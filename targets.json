@@ -5,6 +5,6 @@
     },
     "1055116242924617728": {
         "priority": 1,
-        "is_admin": false
+        "is_admin": true 
     }
 }
