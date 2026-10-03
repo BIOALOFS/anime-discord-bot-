@@ -1,0 +1,39 @@
+{
+  "added": "تمت إضافة {name} في الموضع {position}.",
+  "removed": "تمت إزالة {name}.",
+  "moved": "تم نقل {name} إلى {position}.",
+  "empty": "هذه المجموعة فارغة.",
+  "error": "خطأ: {message}",
+  "partial": "قد تكون النتائج غير مكتملة: {message}",
+  "pending": "هذا الإدخال بانتظار المراجعة البشرية.",
+  "saved": "تم الحفظ.",
+  "not_owner": "يمكن للشخص الذي فتح هذه الواجهة فقط التحكم بها.",
+  "setup_required": "يجب على مسؤول إعداد هذا الخادم.",
+  "channel_denied": "استخدم إحدى القنوات المضبوطة.",
+  "confirm": "تأكيد",
+  "cancel": "إلغاء",
+  "previous": "السابق",
+  "next": "التالي",
+  "help_sections": [
+    {
+      "title": "المجموعة",
+      "body": "`!add <name>` أو `/add character:` للإضافة بعد اختيار نتيجة معتمدة.\n`!remove` للإزالة و`!undo` للاستعادة.\n`!move <character> <position>` للترتيب.\n`!profile [@user] [position]` للتصفح؛ مثال `!profile 5`.\n`!random` و`!compare` و`!export`."
+    },
+    {
+      "title": "البحث",
+      "body": "`!p <query>` بحث نصي و`!sp <query>` بحث مرئي.\n`!sa <work>` و`!sap <work>` لاختيار العمل ثم شخصياته.\n`!find [@user] <query>` يبحث في الأسماء والألقاب والأعمال."
+    },
+    {
+      "title": "الصور والملاحظات",
+      "body": "`!pi <character> <URL>` أو مرفق يرسل صورة للمراجعة.\n`!images` و`!pic` و`!piremove` و`!pireset`. أو `/image add|list|select|remove|reset`.\n`!nick` و`!unnick` و`!note` و`!unnote`."
+    },
+    {
+      "title": "المظهر والأدوات",
+      "body": "`!avatar` و`!banner` يرسلان صوراً للمراجعة؛ أو `/settings avatar|banner`.\n`!bio` و`!title` و`!color` و`!language` و`!settings` و`!reset`.\n`!custom` و`!editcustom` و`!report` و`!help`."
+    }
+  ],
+  "help_admin_title": "إدارة الخادم",
+  "help_admin_body": "`!setup #channel` و`!channel add|remove|list|all`، أو `/setup` و`/channel`. التغييرات المهمة تتطلب تأكيداً.",
+  "help_catalog_title": "إدارة الفهرس",
+  "help_catalog_body": "للموثوقين عالمياً: `reviewsearch`, `reviewqueue` و`review` و`reviewimage` و`reviewappearance` و`editcatalog` و`editwork` و`mergecharacters` و`replacecatalogimage` و`reports` و`providerstatus`."
+}
