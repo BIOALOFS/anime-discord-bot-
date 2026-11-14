@@ -1,0 +1,4 @@
+{"data":{"Media":{"relations":{"edges":[
+ {"relationType":"SEQUEL","node":{"id":40,"title":{"romaji":"Safe Sequel"},"genres":[],"isAdult":false}},
+ {"relationType":"SIDE_STORY","node":{"id":41,"title":{"romaji":"Adult Side"},"genres":["Hentai"],"isAdult":false}}
+]}}}}

@@ -1,0 +1,4 @@
+{"data":{"Media":{"characters":{"pageInfo":{"hasNextPage":true},"edges":[
+ {"role":"MAIN","node":{"id":20,"name":{"full":"Hero"},"media":{"nodes":[{"isAdult":false,"genres":["Action"]}]}}},
+ {"role":"SUPPORTING","node":{"id":21,"name":{"full":"Corrupted"},"media":{"nodes":[{"isAdult":false,"genres":["Action"]},{"isAdult":true,"genres":[]}]}}}
+]}}}}

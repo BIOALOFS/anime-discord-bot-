@@ -1,9 +1,19 @@
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageInfo {
+    #[serde(default)]
+    pub has_next_page: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Nodes<T> {
     #[serde(default = "Vec::new")]
     pub nodes: Vec<T>,
+    #[serde(default)]
+    pub page_info: PageInfo,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -11,6 +21,18 @@ pub struct Title {
     pub romaji: Option<String>,
     pub english: Option<String>,
     pub native: Option<String>,
+}
+
+impl Title {
+    /// Romaji first, then English, then native.
+    pub fn main(&self) -> &str {
+        [&self.romaji, &self.english, &self.native]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .find(|s| !s.is_empty())
+            .unwrap_or("?")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +56,35 @@ pub struct Studio {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct Trailer {
+    pub id: Option<String>,
+    pub site: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StaffName {
+    pub full: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StaffNode {
+    #[serde(default)]
+    pub name: StaffName,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StaffEdge {
+    pub role: Option<String>,
+    pub node: StaffNode,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StaffConnection {
+    #[serde(default)]
+    pub edges: Vec<StaffEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Media {
     pub id: i64,
@@ -46,6 +97,8 @@ pub struct Media {
     pub popularity: Option<i64>,
     pub episodes: Option<i32>,
     pub chapters: Option<i32>,
+    pub duration: Option<i32>,
+    pub source: Option<String>,
     pub status: Option<String>,
     pub season: Option<String>,
     pub season_year: Option<i32>,
@@ -57,6 +110,26 @@ pub struct Media {
     pub site_url: Option<String>,
     pub studios: Option<Nodes<Studio>>,
     pub next_airing_episode: Option<NextAiring>,
+    pub trailer: Option<Trailer>,
+    pub staff: Option<StaffConnection>,
+}
+
+impl Media {
+    pub fn cover(&self) -> Option<&str> {
+        let c = self.cover_image.as_ref()?;
+        c.large.as_deref().or(c.extra_large.as_deref())
+    }
+
+    /// YouTube trailer URL, if the trailer is hosted there.
+    pub fn trailer_url(&self) -> Option<String> {
+        let t = self.trailer.as_ref()?;
+        match (t.site.as_deref(), t.id.as_deref()) {
+            (Some(site), Some(id)) if site.eq_ignore_ascii_case("youtube") && !id.is_empty() => {
+                Some(format!("https://www.youtube.com/watch?v={id}"))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A media a character appears in; only the flags needed for safety are guaranteed.
@@ -70,19 +143,31 @@ pub struct MediaRef {
     #[serde(default)]
     pub genres: Vec<String>,
     pub site_url: Option<String>,
+    pub format: Option<String>,
+    pub season_year: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CharacterName {
     pub full: Option<String>,
     pub native: Option<String>,
     #[serde(default)]
     pub alternative: Vec<String>,
+    #[serde(default)]
+    pub alternative_spoiler: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CharacterImage {
     pub large: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FuzzyDate {
+    pub year: Option<i32>,
+    pub month: Option<u32>,
+    pub day: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,7 +180,50 @@ pub struct Character {
     pub description: Option<String>,
     pub favourites: Option<i64>,
     pub site_url: Option<String>,
+    pub age: Option<String>,
+    pub gender: Option<String>,
+    pub date_of_birth: Option<FuzzyDate>,
+    pub blood_type: Option<String>,
     pub media: Option<Nodes<MediaRef>>,
+}
+
+impl Character {
+    pub fn display_name(&self) -> &str {
+        self.name
+            .full
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("?")
+    }
+
+    pub fn image_url(&self) -> Option<&str> {
+        self.image.as_ref()?.large.as_deref()
+    }
+
+    /// Title of the most popular appearance.
+    pub fn main_work(&self) -> Option<&str> {
+        let r = self.media.as_ref()?.nodes.first()?;
+        Some(r.title.as_ref()?.main())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CharacterEdge {
+    pub role: Option<String>,
+    pub node: Character,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelationEdge {
+    #[serde(rename = "relationType")]
+    pub relation_type: Option<String>,
+    pub node: Media,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiringNode {
+    pub airing_at: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

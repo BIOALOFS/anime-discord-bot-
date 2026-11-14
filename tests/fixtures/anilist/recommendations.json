@@ -1,0 +1,5 @@
+{"data":{"Media":{"recommendations":{"pageInfo":{"hasNextPage":false},"nodes":[
+ {"mediaRecommendation":{"id":30,"title":{"romaji":"Safe Rec"},"genres":["Action"],"isAdult":false}},
+ {"mediaRecommendation":{"id":31,"title":{"romaji":"Adult Rec"},"genres":["Action"],"isAdult":true}},
+ {"mediaRecommendation":null}
+]}}}}
