@@ -1,3 +1,5 @@
+#[allow(dead_code)] // consumed by commands from milestone 3 on
+mod anilist;
 mod commands;
 mod config;
 mod db;
@@ -12,6 +14,8 @@ pub struct Data {
     pub db: SqlitePool,
     #[allow(dead_code)]
     pub config: config::Config,
+    #[allow(dead_code)]
+    pub anilist: std::sync::Arc<anilist::AniListClient>,
 }
 
 #[tokio::main]
@@ -22,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let pool = db::connect(&config.database_url).await?;
+    let anilist = std::sync::Arc::new(anilist::AniListClient::new(&config)?);
     let token = config.discord_token.clone();
     let dev_guild = config.dev_guild_id;
 
@@ -42,7 +47,11 @@ async fn main() -> anyhow::Result<()> {
                     None => poise::builtins::register_globally(ctx, cmds).await?,
                 }
                 tracing::info!(bot = %ready.user.name, "ready");
-                Ok(Data { db: pool, config })
+                Ok(Data {
+                    db: pool,
+                    config,
+                    anilist,
+                })
             })
         })
         .build();
