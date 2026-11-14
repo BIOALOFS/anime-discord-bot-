@@ -1,0 +1,7 @@
+{"data":{"Page":{"characters":[
+ {"id":10,"name":{"full":"Low Favs Safe"},"favourites":5,"media":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":1,"isAdult":false,"genres":["Action"],"title":{"romaji":"Safe Show"}}]}},
+ {"id":11,"name":{"full":"Adult Linked"},"favourites":900,"media":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":2,"isAdult":true,"genres":["Drama"]}]}},
+ {"id":12,"name":{"full":"Mixed"},"favourites":800,"media":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":1,"isAdult":false,"genres":["Action"]},{"id":3,"isAdult":false,"genres":["Hentai"]}]}},
+ {"id":13,"name":{"full":"No Appearances"},"favourites":700,"media":{"pageInfo":{"hasNextPage":false},"nodes":[]}},
+ {"id":14,"name":{"full":"High Favs Safe"},"favourites":500,"media":{"pageInfo":{"hasNextPage":true},"nodes":[{"id":1,"isAdult":false,"genres":["Comedy"],"title":{"romaji":"Safe Show"}}]}}
+]}}}

@@ -1,0 +1,4 @@
+{"data":{"Page":{"pageInfo":{"lastPage":3,"hasNextPage":true},"media":[
+ {"id":61,"title":{"romaji":"Random Adult"},"genres":[],"isAdult":true},
+ {"id":62,"title":{"romaji":"Random Safe"},"genres":["Action"],"isAdult":false}
+]}}}

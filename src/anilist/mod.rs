@@ -1,7 +1,12 @@
-pub mod client;
+//! AniList access. `client` (raw transport) is private to this module; callers use `SafeAniList`.
+
+mod client;
 pub mod models;
-pub mod queries;
+mod queries;
+mod safe;
 pub mod safety;
 
-#[allow(unused_imports)] // used by commands from milestone 3
-pub use client::{AniError, AniListClient, CharacterLookup, MediaKind};
+pub use client::AniError;
+pub use safe::{
+    AiringEntry, AiringInfo, CharacterLookup, ContentPolicy, MediaKind, SafeAniList, SeasonalQuery,
+};

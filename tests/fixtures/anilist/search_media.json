@@ -1,0 +1,5 @@
+{"data":{"Page":{"media":[
+ {"id":1,"title":{"romaji":"Safe Show","english":"Safe Show","native":"安全"},"genres":["Action","Comedy"],"isAdult":false,"format":"TV","seasonYear":2020,"averageScore":82,"siteUrl":"https://anilist.co/anime/1"},
+ {"id":2,"title":{"romaji":"Adult Show"},"genres":["Drama"],"isAdult":true,"format":"TV"},
+ {"id":3,"title":{"romaji":"Genre Show"},"genres":["Hentai"],"isAdult":false,"format":"OVA"}
+]}}}

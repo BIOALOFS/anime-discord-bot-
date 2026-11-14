@@ -1,0 +1,5 @@
+{"data":{"Page":{"pageInfo":{"hasNextPage":false},"airingSchedules":[
+ {"airingAt":2000,"episode":3,"media":{"id":50,"title":{"romaji":"Late Safe"},"genres":[],"isAdult":false}},
+ {"airingAt":1000,"episode":2,"media":{"id":51,"title":{"romaji":"Adult Airing"},"genres":[],"isAdult":true}},
+ {"airingAt":1500,"episode":1,"media":{"id":52,"title":{"romaji":"Early Safe"},"genres":[],"isAdult":false}}
+]}}}
