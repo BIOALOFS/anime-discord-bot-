@@ -23,7 +23,6 @@ RUN apt-get update \
     && chown anpot:anpot /data
 WORKDIR /app
 COPY --from=builder /app/target/release/anpot /usr/local/bin/anpot
-COPY assets /app/assets
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENV DATABASE_URL=sqlite:///data/bot.db?mode=rwc
 VOLUME /data

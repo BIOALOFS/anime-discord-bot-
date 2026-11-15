@@ -43,7 +43,7 @@ pub struct Config {
 }
 
 fn d_db() -> String {
-    "sqlite://data/bot.db?mode=rwc".into()
+    "sqlite://bot.db?mode=rwc".into()
 }
 fn d_log() -> String {
     "info".into()
@@ -81,7 +81,8 @@ fn opt_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Err
 
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
-        let _ = dotenvy::dotenv();
+        // Only the working directory's .env; absent is fine.
+        let _ = dotenvy::from_filename(".env");
         Ok(envy::from_env()?)
     }
 }
