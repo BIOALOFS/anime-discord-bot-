@@ -439,7 +439,7 @@ pub async fn audit(
 
 async fn flag(pool: &SqlitePool, guild: i64, column: &'static str) -> Result<bool> {
     // `column` is one of our own constants. A missing row means the column default.
-    let default = column == "games";
+    let default = matches!(column, "games" | "mature_games");
     let v: Option<bool> = sqlx::query_scalar(&format!(
         "SELECT {column} FROM guild_settings WHERE guild_id = ?1"
     ))
@@ -476,6 +476,13 @@ pub async fn games_enabled(pool: &SqlitePool, guild: i64) -> Result<bool> {
 }
 pub async fn set_games(pool: &SqlitePool, guild: i64, on: bool) -> Result<()> {
     set_flag(pool, guild, "games", on).await
+}
+/// Whether mature-rated (violent/horror) games may be shown. Sexual content is hidden regardless.
+pub async fn mature_games(pool: &SqlitePool, guild: i64) -> Result<bool> {
+    flag(pool, guild, "mature_games").await
+}
+pub async fn set_mature_games(pool: &SqlitePool, guild: i64, on: bool) -> Result<()> {
+    set_flag(pool, guild, "mature_games", on).await
 }
 pub async fn nsfw_mode(pool: &SqlitePool, guild: i64) -> Result<bool> {
     flag(pool, guild, "nsfw_mode").await

@@ -8,6 +8,8 @@ const ALLOWED_HOSTS: &[&str] = &[
     "s4.anilist.co",
     "cdn.discordapp.com",
     "media.discordapp.net",
+    "images.igdb.com",
+    "t.vndb.org",
 ];
 const MAX_DOWNLOAD: usize = 6 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(6);

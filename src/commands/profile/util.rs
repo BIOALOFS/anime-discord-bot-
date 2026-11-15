@@ -93,6 +93,8 @@ pub async fn refresh_entries(
         .iter()
         .filter(|e| e.fetched_at.is_none_or(|f| t - f > STALE_SECS))
         .map(|e| e.character_id)
+        // Game / visual-novel characters live in the provider id range and are not on AniList.
+        .filter(|id| *id < crate::providers::PROVIDER_CHARACTER_MIN)
         .collect();
     if ids.is_empty() {
         return;

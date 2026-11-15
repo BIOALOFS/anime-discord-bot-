@@ -479,7 +479,7 @@ impl ProfileView {
             _ => Ok(None),
         };
         match started {
-            Ok(Some(r)) => self.roster = Some(r),
+            Ok(Some(r)) => self.roster = Some(r.with_profile(self.pool.clone(), self.viewer)),
             Ok(None) => self.notice = Some(i18n::ROSTER_NO_WORKS.to_string()),
             Err(e) => self.notice = Some(crate::commands::ani_message(&e).to_string()),
         }

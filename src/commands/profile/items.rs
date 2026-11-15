@@ -75,7 +75,11 @@ impl Item {
     }
 
     pub fn from_work(w: &WorkEntry) -> Self {
-        let kind = MediaKind::from_key(&w.kind).map_or("", kind_label);
+        let kind = match w.kind.as_str() {
+            "game" => crate::i18n::KIND_GAME,
+            "vn" => crate::i18n::KIND_VN,
+            other => MediaKind::from_key(other).map_or("", kind_label),
+        };
         let tag = format!("{} {}", flag(w.country.as_deref()), kind)
             .trim()
             .to_string();

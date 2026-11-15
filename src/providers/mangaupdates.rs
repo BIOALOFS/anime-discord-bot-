@@ -1,7 +1,7 @@
 //! MangaUpdates v1 API. It has no content rating, so a work is shown only when its genres are known and none
 //! of them is an adult genre.
 
-use super::{CatalogProvider, ProviderError, Source, Work};
+use super::{CatalogProvider, Kind, ProviderError, Source, Work};
 use serde_json::{json, Value};
 
 const API: &str = "https://api.mangaupdates.com/v1";
@@ -66,6 +66,9 @@ fn parse_one(rec: &Value) -> Option<Work> {
     Some(Work {
         id: format!("mu:{id}"),
         source: Source::MangaUpdates,
+        kind: Kind::Manga,
+        native: None,
+        subtitle: None,
         title: rec.get("title")?.as_str()?.to_string(),
         year: rec
             .get("year")

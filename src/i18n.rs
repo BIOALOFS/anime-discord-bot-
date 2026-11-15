@@ -455,3 +455,14 @@ pub const FEED_DIGEST_TITLE: &str = "ملخص الحلقات الجديدة 📺
 pub const BIRTHDAYS_TITLE: &str = "🎂 أعياد ميلاد اليوم";
 pub const BTN_WATCH: &str = "مشاهدة";
 pub const F_YEAR: &str = "السنة";
+pub const WORKS_PICK_PLACEHOLDER: &str = "افتح عملًا…";
+
+pub const KIND_GAME: &str = "لعبة";
+pub const KIND_VN: &str = "رواية بصرية";
+pub const MATURE_GAMES_ON: &str =
+    "✅ سيتم عرض الألعاب ذات التصنيف الناضج (العنف والرعب فقط، المحتوى الجنسي مخفي دائمًا).";
+pub const MATURE_GAMES_OFF: &str = "✅ سيتم إخفاء الألعاب المصنفة M / PEGI 18 / CERO Z.";
+pub const GAMES_SERVER_OFF: &str = "الألعاب معطلة في هذا السيرفر. يمكن للمشرف تفعيلها من /settings.";
+pub const GAMES_UNAVAILABLE: &str = "مصادر الألعاب غير مفعّلة على هذا البوت.";
+pub const CHARACTER_FROM: &str = "من";
+pub const F_TYPE: &str = "النوع";

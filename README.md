@@ -10,7 +10,8 @@ Nine commands, with chained options (category → action → value) instead of d
 | Command | What it does |
 | --- | --- |
 | `/profile` | Show a profile (yours or `user`'s). Options `category` → `action` → `value` (+ `image`, `text`): add characters/works, customize (colour, bio, template, custom image/title/description per character), organize (reorder, groups, tiers, notes), share (1200×630 card), privacy (visibility, JSON export/import, delete all my data), compare, lists (watched/planning) |
-| `/search` | `type` (anime, manga, manhwa, manhua, novel, character) → `name` with type-aware autocomplete |
+| `/search` | Works only: `type` (anime, manga, manhwa, manhua, novel, plus game / visual novel when those providers are enabled) → `name` with type-aware autocomplete |
+| `/character` | `name` (autocomplete ranked by popularity, main work in the label) + optional `work` filter + optional `source` (all, anime/manga, games). Several matches → a select menu |
 | `/airing` | Next episode of an anime or this week's schedule |
 | `/random` | Random work/character, today's spotlight, today's character birthdays |
 | `/top` | Most favourited characters or works (server or global) |
@@ -35,6 +36,8 @@ Environment variables (a `.env` file in the working directory is read if present
 | `COMMAND_COOLDOWN_SECS` | `3` | no | per-user cooldown |
 | `DEV_GUILD_ID` | empty | no | register commands instantly in one server (otherwise global, up to ~1 hour); global commands are cleared in this mode |
 | `ENABLE_FALLBACK_PROVIDERS` | `false` | no | MangaDex/MangaUpdates fallback for works AniList lacks (see below) |
+| `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET` | empty | no | enable IGDB games and game characters (see below); both are needed |
+| `ENABLE_VNDB` | `true` | no | VNDB visual novels and characters, no key needed; `false` switches it off |
 | `CACHE_TTL_*` | see `.env.example` | no | cache lifetimes in seconds |
 
 Create the Discord application at <https://discord.com/developers/applications>, add a bot, copy its token and invite
@@ -56,6 +59,32 @@ they can only be set for characters already in your own profile and only appear 
 written work. Only `safe`/`suggestive` ratings are accepted (MangaUpdates works need known, non-adult genres), the
 source is credited in the card footer, and covers are downloaded by the bot and attached (never hotlinked). These APIs
 were not reachable from the development sandbox, so this path is covered by fixture tests only.
+
+### Games and visual novels (optional)
+
+AniList has no video games, so two optional providers sit behind the `CatalogProvider` trait. Ids are provider-prefixed
+(`igdb:55`, `vndb:v17`, characters `igdb:c55` / `vndb:c12`). They feed `/search type:game|vn` and `/character`, and
+their works and characters can be added to profiles like any other. Pictures are downloaded and cached by the bot
+(never hotlinked) and every card credits the source.
+
+* **IGDB** (games, game characters) is free for **non-commercial use only**. To get credentials:
+  1. Sign in at <https://dev.twitch.tv/console> with a Twitch account that has two-factor authentication enabled.
+  2. Register an application: any name, **OAuth Redirect URL** `http://localhost`, category *Application Integration*,
+     client type **Confidential**.
+  3. Open *Manage* on the application, copy the **Client ID** and generate a **Client Secret**.
+  4. Put them in `.env` as `IGDB_CLIENT_ID` and `IGDB_CLIENT_SECRET`. The bot fetches and refreshes the Twitch
+     client-credentials token itself. Limits respected: 4 requests/second, at most 8 open requests. Footer: "Data from IGDB.com".
+* **VNDB** (visual novels and characters) uses the public HTTP API v2 ("Kana", `https://api.vndb.org/kana`), no key.
+  The bot paces requests below ~200 per 5 minutes and caches results; footer: "Data from VNDB". The data is under the
+  VNDB data license (<https://vndb.org/d17>).
+* Missing credentials disable the provider automatically. Per server: `/settings section:games option:toggle`
+  switches game sources on/off (default on) and `option:mature-games` (default on) hides M / PEGI 18 / CERO Z games when off.
+* **Safety:** only sexual content is blocked. IGDB: theme "Erotic" and ESRB AO are hidden. VNDB: any sexual-content ("ero")
+  tag or a suggestive/explicit image flag is hidden. Violent or horror games (for example Silent Hill, M / PEGI 18) stay
+  visible unless `mature-games` is off. An item without a reliable verdict (no age rating on IGDB, no tags on VNDB) is hidden.
+  Game characters are shown only if their games pass.
+* Not verifiable offline: these APIs were unreachable from the development sandbox, so parsing and safety are covered by
+  fixture tests only.
 
 ## Deploy without compiling on the host
 
@@ -91,8 +120,8 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 2. أنشئ ملف `.env` (انسخ `.env.example`) وضع `DISCORD_TOKEN`، وللتجربة السريعة ضع `DEV_GUILD_ID` ليظهر الأمر فورًا في سيرفرك.
 3. شغّل: `cargo run` ثم جرّب `/search` و`/profile`.
 
-الأوامر التسعة: `/profile` `/search` `/airing` `/random` `/top` `/recommend` `/game` `/settings` `/help`.
-اكتب `/help` لرؤية الأمثلة. أوامر الإدارة تحتاج صلاحية إدارة السيرفر.
+الأوامر العشرة: `/profile` `/search` `/character` `/airing` `/random` `/top` `/recommend` `/game` `/settings` `/help`.
+`/search` للأعمال فقط و`/character` للشخصيات (أنمي/مانجا وألعاب). الألعاب اختيارية: ضع `IGDB_CLIENT_ID` و`IGDB_CLIENT_SECRET` من <https://dev.twitch.tv/console> (تطبيق من نوع Confidential، رابط OAuth: `http://localhost`، وحساب Twitch بتحقق ثنائي) ويعمل VNDB بدون مفتاح. اكتب `/help` لرؤية الأمثلة. أوامر الإدارة تحتاج صلاحية إدارة السيرفر.
 
 > **تنبيه أمني:** نُشر توكن حقيقي سابقًا داخل `.env` في تاريخ المستودع. أعد ضبط التوكن من لوحة المطورين ولا ترفع `.env` أبدًا.
 
