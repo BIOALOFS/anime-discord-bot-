@@ -521,7 +521,13 @@ pub async fn run_media(ctx: Context<'_>, kind: MediaKind, input: String) -> Resu
     } else {
         match api.search_media(input.trim(), kind, 10, policy).await {
             Ok(mut v) if v.len() == 1 => Mode::Card(Box::new(v.remove(0))),
-            Ok(v) if v.is_empty() => return say_ephemeral(ctx, i18n::NO_RESULTS).await,
+            Ok(v) if v.is_empty() => {
+                // AniList has nothing: try the (opt-in) fallback catalogs for written works.
+                if kind.is_written() && super::fallback::run(ctx, input.trim()).await? {
+                    return Ok(());
+                }
+                return say_ephemeral(ctx, i18n::NO_RESULTS).await;
+            }
             Ok(v) => Mode::Pick(v),
             Err(e) => return fail(ctx, e).await,
         }

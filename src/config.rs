@@ -38,6 +38,9 @@ pub struct Config {
     pub cache_ttl_negative_secs: u64,
     #[serde(default = "d_cooldown")]
     pub command_cooldown_secs: u64,
+    /// MangaDex / MangaUpdates fallback for works AniList lacks. Off unless explicitly enabled.
+    #[serde(default, deserialize_with = "opt_bool")]
+    pub enable_fallback_providers: bool,
     #[serde(default, deserialize_with = "opt_u64")]
     pub dev_guild_id: Option<u64>,
 }
@@ -71,6 +74,14 @@ fn d_cooldown() -> u64 {
     3
 }
 
+fn opt_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let s: Option<String> = Option::deserialize(d)?;
+    Ok(matches!(
+        s.as_deref().map(|v| v.trim().to_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    ))
+}
+
 /// `DEV_GUILD_ID=` (empty) in .env.example must mean "unset".
 fn opt_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
     let s: Option<String> = Option::deserialize(d)?;
@@ -102,6 +113,7 @@ impl Config {
             cache_ttl_airing_secs: 60,
             cache_ttl_negative_secs: 60,
             command_cooldown_secs: 0,
+            enable_fallback_providers: false,
             dev_guild_id: None,
         }
     }

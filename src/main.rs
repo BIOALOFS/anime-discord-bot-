@@ -10,6 +10,7 @@ mod error;
 mod feed;
 mod guild;
 mod i18n;
+mod providers;
 mod render;
 mod ui;
 
@@ -26,6 +27,7 @@ pub struct Data {
     pub http: reqwest::Client,
     pub renderer: std::sync::Arc<render::Renderer>,
     pub guilds: std::sync::Arc<guild::GuildStore>,
+    pub providers: std::sync::Arc<providers::Providers>,
 }
 
 #[tokio::main]
@@ -40,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let anilist = std::sync::Arc::new(anilist::SafeAniList::new(&config)?);
     let token = config.discord_token.expose().to_string();
     let dev_guild = config.dev_guild_id;
+    let fallback = config.enable_fallback_providers;
     let (feed_pool, feed_api) = (pool.clone(), anilist.clone());
 
     let framework = poise::Framework::builder()
@@ -74,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
                     .build()?;
                 Ok(Data {
                     guilds: std::sync::Arc::new(guild::GuildStore::new(pool.clone())),
+                    providers: std::sync::Arc::new(providers::Providers::new(http.clone(), fallback)),
                     renderer: std::sync::Arc::new(render::Renderer::new(http.clone())),
                     http,
                     db: pool,
@@ -203,6 +207,14 @@ mod tests {
                 );
             }
             for p in &c.parameters {
+                assert!(
+                    p.name
+                        .chars()
+                        .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '-'),
+                    "{}.{} is not a valid Discord option name",
+                    c.name,
+                    p.name
+                );
                 assert!(p.name.chars().count() <= 32, "bad parameter {}", p.name);
                 assert!(
                     p.name_localizations.contains_key("ar"),

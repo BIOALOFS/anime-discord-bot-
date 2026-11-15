@@ -454,3 +454,4 @@ pub const LEADERBOARD_TITLE: &str = "ترتيب الألعاب";
 pub const FEED_DIGEST_TITLE: &str = "ملخص الحلقات الجديدة 📺";
 pub const BIRTHDAYS_TITLE: &str = "🎂 أعياد ميلاد اليوم";
 pub const BTN_WATCH: &str = "مشاهدة";
+pub const F_YEAR: &str = "السنة";

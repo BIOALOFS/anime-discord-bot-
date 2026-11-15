@@ -1,5 +1,6 @@
 pub mod airing;
 pub mod character;
+pub mod fallback;
 pub mod game;
 pub mod help;
 pub mod media;
