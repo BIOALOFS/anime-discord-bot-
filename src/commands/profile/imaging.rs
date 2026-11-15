@@ -46,13 +46,9 @@ pub fn sniff(b: &[u8]) -> Option<Format> {
     }
 }
 
-/// Banners take PNG, JPG and WebP only; character pictures may also be GIFs.
-pub fn format_allowed(bytes: &[u8], allow_gif: bool) -> bool {
-    match sniff(bytes) {
-        Some(Format::Gif) => allow_gif,
-        Some(_) => true,
-        None => false,
-    }
+/// PNG, JPG, WebP and GIF are accepted (for characters and banners alike); anything else is refused.
+pub fn is_supported(bytes: &[u8]) -> bool {
+    sniff(bytes).is_some()
 }
 
 #[derive(Debug)]
@@ -184,13 +180,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gif_is_for_characters_only_and_unknown_bytes_are_refused() {
+    fn png_jpeg_webp_and_gif_are_supported_and_everything_else_is_refused() {
         let gif = b"GIF89a\x01\x00";
         let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0];
-        assert!(format_allowed(gif, true) && !format_allowed(gif, false));
-        assert!(format_allowed(&png, false) && format_allowed(&png, true));
-        assert!(!format_allowed(b"<svg/>", true) && !format_allowed(b"", true));
-        assert!(!format_allowed(&[0u8; 4_000_000][..16], true));
+        assert!(is_supported(gif) && is_supported(&png) && is_supported(&[0xFF, 0xD8, 0xFF, 0xE0]));
+        assert!(is_supported(b"RIFF\x00\x00\x00\x00WEBPVP8 "));
+        assert!(!is_supported(b"<svg/>") && !is_supported(b"") && !is_supported(b"%PDF-1.7"));
     }
     use image::{Delay, Rgba, RgbaImage};
 

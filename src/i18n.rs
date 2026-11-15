@@ -286,7 +286,6 @@ pub const LANGUAGE_UNKNOWN: &str = "اللغة غير معروفة. اختر م�
 pub const SETTINGS_UNKNOWN: &str = "إعداد غير معروف. اختر اللغة أو الخصوصية.";
 pub const EDIT_HINT: &str = "للتعديل: /edit";
 pub const UPLOAD_ADMINS_ONLY: &str = "رفع الصور المخصصة في هذا السيرفر للمشرفين فقط.";
-pub const BANNER_NO_GIF: &str = "الغلاف يقبل PNG أو JPG أو WebP فقط (بدون GIF).";
 pub const BANNER_PRESET_SET: &str = "✅ تم تغيير الغلاف.";
 pub const BANNER_RESET: &str = "✅ عاد الغلاف إلى الافتراضي.";
 pub const BANNER_UNKNOWN: &str =
@@ -298,3 +297,50 @@ pub const TITLE_TOO_LONG: &str = "الاسم أطول من 40 حرفًا.";
 pub const EDIT_NEEDS_CHARACTER: &str = "اختر شخصية من بروفايلك في خيار «الشخصية».";
 pub const EDIT_NEEDS_WORK: &str = "اختر عملًا من أعمالك في خيار «القيمة».";
 pub const CAST_PLACEHOLDER: &str = "اختر شخصية لعرض بطاقتها…";
+pub const PAGE_WORD: &str = "الصفحة";
+pub const PAGES_PREV_GROUP: &str = "◀ مجموعة الصفحات السابقة";
+pub const PAGES_NEXT_GROUP: &str = "مجموعة الصفحات التالية ▶";
+pub const SELECT_PAGE_PLACEHOLDER: &str = "انتقل إلى صفحة…";
+pub const F_PROFILE_CHARACTERS: &str = "الشخصيات";
+pub const F_PROFILE_WORKS: &str = "الأعمال";
+pub const F_PROFILE_PRIVACY: &str = "الخصوصية";
+pub const F_PROFILE_JOINED: &str = "انضم";
+pub const F_PROFILE_SUGGESTIONS: &str = "الاقتراحات";
+pub const F_PROFILE_BADGES: &str = "الأوسمة";
+pub const BANNER_PICKER_TITLE: &str = "🎨 اختر غلافًا جاهزًا";
+pub const BANNER_PICKER_HELP: &str = "اختر من القائمة لترى المعاينة ثم اضغط «تطبيق».\nلرفع صورتك أو GIF: `/edit` ← البروفايل ← الغلاف وأرفق الملف (إن سمح السيرفر بالصور المخصصة). للون: اكتب `#ff8800` في القيمة.";
+pub const BANNER_PICKER_PLACEHOLDER: &str = "الأغلفة الجاهزة…";
+pub const BANNER_APPLY: &str = "تطبيق";
+pub const BANNER_RESET_BTN: &str = "إعادة للافتراضي";
+pub const BTN_REMOVE_FROM_PROFILE: &str = "إزالة من بروفايلي";
+pub const CHARACTER_REMOVED: &str = "تمت إزالة الشخصية من بروفايلك.";
+pub const SUGGESTED_BY: &str = "اقترحه";
+pub const SUGGEST_ADDED: &str = "✅ تمت إضافة الاقتراح";
+pub const SUGGEST_REASON_LONG: &str = "السبب أطول من 300 حرف.";
+pub const SUGGEST_REASON_BAD: &str =
+    "اكتب سببًا نصيًا (الروابط والإشارات والكلمات غير المناسبة تُحذف).";
+pub const SUGGEST_SAME: &str = "اختر عملين مختلفين.";
+pub const SUGGEST_NONE: &str =
+    "لا توجد اقتراحات في هذا السيرفر بعد. أضف أول اقتراح بـ `/suggest add`.";
+pub const SUGGEST_NONE_MINE: &str = "ليس لديك اقتراحات في هذا السيرفر.";
+pub const SUGGEST_ANOTHER: &str = "اقتراح آخر";
+pub const SUGGEST_DELETED: &str = "🗑 تم حذف الاقتراح.";
+pub const SUGGEST_CANNOT_DELETE: &str = "لا يمكنك حذف هذا الاقتراح.";
+pub const SUGGEST_MINE_TITLE: &str = "اقتراحاتي";
+pub const SUGGEST_DELETE_PLACEHOLDER: &str = "اختر اقتراحًا لحذفه…";
+pub const BTN_DELETE: &str = "حذف";
+pub fn suggest_exists(author: i64) -> String {
+    format!("هذا الاقتراح موجود بالفعل، أضافه <@{author}>.")
+}
+pub fn suggest_limit(limit: i64) -> String {
+    format!("وصلت إلى الحد اليومي ({limit} اقتراحات في اليوم). حاول غدًا.")
+}
+pub const REMINDER_DM: &str = "🔔 تذكير: صدرت حلقة جديدة من عمل طلبتَ التذكير به.";
+pub const BTN_REMIND: &str = "ذكّرني";
+pub const BTN_REMINDER_CANCEL: &str = "إلغاء التذكير";
+pub const REMINDER_SET: &str = "🔔 سأذكّرك عند صدور حلقة جديدة (رسالة خاصة).";
+pub const REMINDER_CANCELLED: &str = "🔕 أُلغي التذكير.";
+pub const REMINDER_FULL: &str = "وصلت إلى الحد الأقصى للتذكيرات (50). احذف بعضها من /settings.";
+pub const REMINDERS_TITLE: &str = "تذكيراتي";
+pub const REMINDERS_NONE: &str = "ليس لديك تذكيرات. استخدم زر «ذكّرني» على بطاقة أنمي.";
+pub const REMINDERS_PLACEHOLDER: &str = "اختر تذكيرًا لإلغائه…";

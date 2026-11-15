@@ -149,14 +149,19 @@ async fn page_jump_modal() {
 }
 
 #[tokio::test]
-async fn character_card_and_back_return_to_the_same_page() {
+async fn picking_a_character_hands_it_to_the_host_and_the_page_is_kept() {
     let mut r = roster().await;
     r.handle(ID_RANGE, &["3".into()]).await;
-    assert_eq!(r.handle(ID_CHAR, &["1031".into()]).await, Step::Update);
-    assert!(matches!(r.mode, Mode::Card(_)));
-    assert_eq!(r.handle(BACK, &[]).await, Step::Update);
-    assert!(matches!(r.mode, Mode::List));
-    assert_eq!(r.page, 3, "back returns to the same page");
+    let step = r.handle(ID_CHAR, &["1031".into()]).await;
+    let Step::Open(c) = step else {
+        panic!("expected the character to be opened by the host")
+    };
+    assert_eq!(c.id, 1031);
+    assert!(
+        matches!(r.mode, Mode::List),
+        "the roster itself stays on the list"
+    );
+    assert_eq!(r.page, 3, "the page is kept for when the user comes back");
     assert_eq!(
         r.handle(BACK, &[]).await,
         Step::Exit,

@@ -3,6 +3,8 @@ pub mod custom;
 pub mod feed;
 pub mod game;
 pub mod profile;
+pub mod reminders;
+pub mod suggest;
 pub mod works;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};

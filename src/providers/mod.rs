@@ -353,6 +353,27 @@ impl Providers {
         out
     }
 
+    /// Re-find one game or visual novel from a provider-prefixed key (`igdb:55`, `vndb:v17`); `None` when the
+    /// provider is off, the item is unknown or it fails the safety rules.
+    pub async fn work_by_key(&self, key: &str, allow_mature: bool) -> Option<Work> {
+        let (prefix, tail) = key.split_once(':')?;
+        match prefix {
+            "igdb" => self
+                .igdb
+                .as_ref()?
+                .game_by_id(tail.parse().ok()?, allow_mature)
+                .await
+                .ok()
+                .flatten(),
+            "vndb"
+                if self.cfg.vndb && tail.starts_with('v') && tail[1..].parse::<u64>().is_ok() =>
+            {
+                self.vndb.vn_by_id(tail).await.ok().flatten()
+            }
+            _ => None,
+        }
+    }
+
     /// Re-find one character from an autocomplete value like `igdb:c55` / `vndb:c123`.
     pub async fn character_by_key(&self, key: &str, allow_mature: bool) -> Option<Work> {
         let (prefix, tail) = key.split_once(':')?;

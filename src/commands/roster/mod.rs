@@ -28,7 +28,6 @@ const ID_WORK: &str = "rwork";
 const ID_GROUP: &str = "rgroup";
 const ID_RANGE: &str = "rrange";
 const ID_CHAR: &str = "rchar";
-const ID_ADD: &str = "radd";
 pub const ID_JUMP: &str = "rjump";
 
 // ---- pure helpers -------------------------------------------------------------------------
@@ -93,7 +92,7 @@ pub fn parse_page_input(input: &str, pages: usize) -> Option<usize> {
 
 // ---- component ----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Step {
     Update,
     Keep,
@@ -102,6 +101,20 @@ pub enum Step {
     Close,
     /// Private message to the presser only.
     Whisper(String),
+    /// A character was picked: the host view opens it (with its own action buttons) and may come back here.
+    Open(Box<Character>),
+}
+
+impl PartialEq for Step {
+    fn eq(&self, other: &Self) -> bool {
+        use Step::*;
+        match (self, other) {
+            (Update, Update) | (Keep, Keep) | (Exit, Exit) | (Close, Close) => true,
+            (Whisper(a), Whisper(b)) => a == b,
+            (Open(a), Open(b)) => a.id == b.id,
+            _ => false,
+        }
+    }
 }
 
 impl Step {
@@ -112,6 +125,8 @@ impl Step {
             Step::Keep => Outcome::Keep,
             Step::Close => Outcome::Close,
             Step::Whisper(t) => Outcome::Whisper(t),
+            // Hosts handle `Open` themselves before calling `apply`.
+            Step::Open(_) => Outcome::Keep,
             Step::Exit => {
                 *slot = None;
                 Outcome::Update
@@ -123,7 +138,6 @@ impl Step {
 enum Mode {
     WorkPick,
     List,
-    Card(Box<Character>),
 }
 
 pub struct Roster {
@@ -282,13 +296,7 @@ impl Roster {
         let first = values.first().map(String::as_str);
         match id {
             CLOSE => Step::Close,
-            BACK => match self.mode {
-                Mode::Card(_) => {
-                    self.mode = Mode::List;
-                    Step::Update
-                }
-                _ => Step::Exit,
-            },
+            BACK => Step::Exit,
             ID_WORK => {
                 let Some(picked) = first.and_then(|v| v.parse::<i64>().ok()) else {
                     return Step::Keep;
@@ -313,31 +321,12 @@ impl Roster {
                 Some(p) if p < self.pages() => self.goto(p).await,
                 _ => Step::Keep,
             },
-            ID_ADD => {
-                let (Mode::Card(c), Some((pool, user))) = (&self.mode, &self.profile) else {
-                    return Step::Keep;
-                };
-                let text = match crate::db::profile::create_profile(pool, *user).await {
-                    Ok(_) => match super::profile::add_and_cache(pool, *user, c).await {
-                        Ok(t) => t,
-                        Err(e) => {
-                            tracing::warn!("roster add failed: {e:#}");
-                            i18n::ERR_GENERIC.to_string()
-                        }
-                    },
-                    Err(_) => i18n::ERR_GENERIC.to_string(),
-                };
-                Step::Whisper(text)
-            }
             ID_CHAR => {
                 let Some(cid) = first.and_then(|v| v.parse::<i64>().ok()) else {
                     return Step::Keep;
                 };
                 match self.api.character_by_id(cid, self.policy).await {
-                    Ok(crate::anilist::CharacterLookup::Found(c)) => {
-                        self.mode = Mode::Card(c);
-                        Step::Update
-                    }
+                    Ok(crate::anilist::CharacterLookup::Found(c)) => Step::Open(c),
                     Ok(_) => {
                         self.notice = Some(i18n::NOT_FOUND.to_string());
                         Step::Update
@@ -495,17 +484,6 @@ impl Roster {
                 ));
                 rows.push(self.actions(enabled));
                 (self.list_embed(), rows)
-            }
-            Mode::Card(c) => {
-                let back = serenity::CreateButton::new(BACK)
-                    .label(i18n::BTN_BACK_TO_LIST)
-                    .emoji('↩')
-                    .style(serenity::ButtonStyle::Secondary)
-                    .disabled(!enabled);
-                (
-                    cards::character_card(c),
-                    vec![buttons(vec![back, close_button(enabled)])],
-                )
             }
         };
         Page::embed(embed.build(), rows).notice(self.notice.clone())

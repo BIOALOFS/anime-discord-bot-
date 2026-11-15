@@ -71,14 +71,24 @@ pub enum BannerSpec {
     Url(String),
 }
 
-/// `(key, Arabic label, top colour, bottom colour)`.
-pub const BANNER_PRESETS: &[(&str, &str, [u8; 3], [u8; 3])] = &[
-    ("slate", "رمادي هادئ", [52, 58, 76], [24, 27, 38]),
-    ("sunset", "غروب", [255, 138, 92], [120, 40, 110]),
-    ("ocean", "محيط", [56, 189, 248], [30, 58, 138]),
-    ("forest", "غابة", [74, 190, 120], [18, 70, 50]),
-    ("sakura", "ساكورا", [255, 183, 213], [190, 80, 130]),
-    ("night", "ليل", [88, 70, 200], [14, 12, 40]),
+/// Ready-made banners, drawn in code (no bundled pictures, nothing copyrighted): `(key, Arabic name)`.
+pub const BANNER_PRESETS: &[(&str, &str)] = &[
+    ("slate", "رمادي هادئ"),
+    ("sunset", "غروب"),
+    ("ocean", "محيط"),
+    ("forest", "غابة"),
+    ("sakura", "ساكورا"),
+    ("night", "ليل"),
+    ("aurora", "شفق قطبي"),
+    ("ember", "جمر"),
+    ("stripes", "خطوط مائلة"),
+    ("dots", "نقاط"),
+    ("grid", "شبكة"),
+    ("waves", "أمواج"),
+    ("rings", "حلقات"),
+    ("checker", "رقعة"),
+    ("mountains", "جبال"),
+    ("sunburst", "أشعة"),
 ];
 
 pub const DEFAULT_BANNER_PRESET: &str = "slate";
@@ -88,7 +98,7 @@ impl BannerSpec {
     pub fn parse(stored: Option<&str>) -> Self {
         let s = stored.map(str::trim).unwrap_or("");
         if let Some(k) = s.strip_prefix("preset:") {
-            if BANNER_PRESETS.iter().any(|p| p.0 == k) {
+            if BANNER_PRESETS.iter().any(|(key, _)| *key == k) {
                 return Self::Preset(k.to_string());
             }
         } else if let Some(c) = s.strip_prefix("color:") {
@@ -373,3 +383,9 @@ fn urls_of<'a>(
 
 #[cfg(test)]
 mod tests;
+
+/// Test helper: a preset drawn without a name.
+#[cfg(test)]
+pub fn draw_banner_for_tests(key: &str) -> Rendered {
+    draw::banner(None, &BannerSpec::Preset(key.to_string()), "").expect("banner")
+}

@@ -528,7 +528,116 @@ fn draw_header(
 pub const BANNER_W: u32 = 1200;
 pub const BANNER_H: u32 = 300;
 
-/// The profile banner strip: an uploaded picture, a solid colour or a preset gradient, with the name drawn on it.
+fn lerp3(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [0, 1, 2].map(|i| (f32::from(a[i]) * (1.0 - t) + f32::from(b[i]) * t) as u8)
+}
+
+fn paint(f: impl Fn(u32, u32) -> [u8; 3]) -> RgbaImage {
+    let mut img = RgbaImage::new(BANNER_W, BANNER_H);
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        let c = f(x, y);
+        *p = Rgba([c[0], c[1], c[2], 255]);
+    }
+    img
+}
+
+/// One of the ready-made banners (see `BANNER_PRESETS`); unknown keys give the neutral gradient.
+pub fn preset_canvas(key: &str) -> RgbaImage {
+    let (w, h) = (BANNER_W as f32, BANNER_H as f32);
+    let two = |a: [u8; 3], b: [u8; 3]| gradient(BANNER_W, BANNER_H, a, b);
+    match key {
+        "sunset" => two([255, 138, 92], [120, 40, 110]),
+        "ocean" => two([56, 189, 248], [30, 58, 138]),
+        "forest" => two([74, 190, 120], [18, 70, 50]),
+        "sakura" => two([255, 183, 213], [190, 80, 130]),
+        "night" => two([88, 70, 200], [14, 12, 40]),
+        "ember" => two([255, 170, 60], [90, 14, 24]),
+        // Diagonal sweep from teal to violet.
+        "aurora" => paint(|x, y| {
+            lerp3(
+                [32, 201, 151],
+                [124, 58, 237],
+                (x as f32 / w * 0.8) + (y as f32 / h * 0.2),
+            )
+        }),
+        "stripes" => paint(|x, y| {
+            if (x + y) / 28 % 2 == 0 {
+                [37, 99, 235]
+            } else {
+                [29, 78, 216]
+            }
+        }),
+        "dots" => paint(|x, y| {
+            let (dx, dy) = ((x % 40) as f32 - 20.0, (y % 40) as f32 - 20.0);
+            if dx * dx + dy * dy < 49.0 {
+                [250, 204, 21]
+            } else {
+                [30, 41, 59]
+            }
+        }),
+        "grid" => paint(|x, y| {
+            if x % 50 < 2 || y % 50 < 2 {
+                [96, 165, 250]
+            } else {
+                [15, 23, 42]
+            }
+        }),
+        "waves" => paint(|x, y| {
+            let fx = x as f32 / w * std::f32::consts::TAU;
+            let wave = (h * 0.5) + (fx * 2.0).sin() * 40.0 + (fx * 5.0).sin() * 12.0;
+            let t = (y as f32 - wave) / h;
+            if y as f32 > wave {
+                lerp3([14, 116, 144], [8, 47, 73], t * 2.0)
+            } else {
+                lerp3([186, 230, 253], [125, 211, 252], y as f32 / h)
+            }
+        }),
+        "rings" => paint(|x, y| {
+            let (dx, dy) = (x as f32 - w * 0.5, (y as f32 - h * 0.5) * 2.0);
+            let d = (dx * dx + dy * dy).sqrt();
+            if (d / 34.0) as u32 % 2 == 0 {
+                [124, 58, 237]
+            } else {
+                [76, 29, 149]
+            }
+        }),
+        "checker" => paint(|x, y| {
+            if (x / 50 + y / 50) % 2 == 0 {
+                [226, 232, 240]
+            } else {
+                [148, 163, 184]
+            }
+        }),
+        "mountains" => paint(|x, y| {
+            let fx = x as f32 / w * std::f32::consts::TAU;
+            let far = h * 0.55 + (fx * 3.0).sin() * 30.0;
+            let near = h * 0.72 + (fx * 5.0 + 1.0).sin() * 24.0 + (fx * 11.0).sin() * 6.0;
+            let y = y as f32;
+            if y > near {
+                [30, 41, 59]
+            } else if y > far {
+                [71, 85, 105]
+            } else {
+                lerp3([254, 215, 170], [148, 163, 184], y / h * 1.4)
+            }
+        }),
+        "sunburst" => paint(|x, y| {
+            let (dx, dy) = (x as f32 - w * 0.5, y as f32 - h * 1.1);
+            let angle = dy.atan2(dx);
+            if ((angle * 10.0).floor() as i32).rem_euclid(2) == 0 {
+                [251, 191, 36]
+            } else {
+                [245, 158, 11]
+            }
+        }),
+        // "slate" and anything unknown.
+        _ => two([52, 58, 76], [24, 27, 38]),
+    }
+}
+
+/// The profile banner strip: an uploaded picture, a solid colour or a ready-made banner, with the name drawn on it
+/// when `title` is not empty.
 pub fn banner(base: Option<&RgbaImage>, spec: &super::BannerSpec, title: &str) -> Option<Rendered> {
     use super::BannerSpec as B;
     let mut img = match (base, spec) {
@@ -539,14 +648,8 @@ pub fn banner(base: Option<&RgbaImage>, spec: &super::BannerSpec, title: &str) -
             rgb_of(Some(*c)),
             shade(rgb_of(Some(*c)), 0.85),
         ),
-        (None, B::Preset(k)) => {
-            let (top, bottom) = super::BANNER_PRESETS
-                .iter()
-                .find(|p| p.0 == k)
-                .map_or(([52, 58, 76], [24, 27, 38]), |p| (p.2, p.3));
-            gradient(BANNER_W, BANNER_H, top, bottom)
-        }
-        (None, _) => gradient(BANNER_W, BANNER_H, [52, 58, 76], [24, 27, 38]),
+        (None, B::Preset(k)) => preset_canvas(k),
+        (None, _) => preset_canvas(super::DEFAULT_BANNER_PRESET),
     };
     if let Some(f) = font() {
         let clean = sanitize(f, title);

@@ -13,7 +13,7 @@ use crate::{
         AniError, ContentPolicy, MediaKind, SafeAniList,
     },
     db::{
-        profile as pdb,
+        profile as pdb, reminders,
         works::{self, MediaCacheRow},
     },
     error::{Context, Error},
@@ -35,6 +35,7 @@ const BTN_CHARACTERS: &str = "characters";
 const BTN_STAR: &str = "star";
 const BTN_REROLL: &str = "reroll";
 const CAST_PICK: &str = "cast_pick";
+const BTN_REMIND: &str = "remind";
 const MAX_HISTORY: usize = 8;
 
 /// Where a card came from; decides which extra buttons it gets.
@@ -71,6 +72,8 @@ pub struct MediaView {
     notice: Option<String>,
     /// Is the shown card in the viewer's favourites (drives the ⭐ / ✅ toggle)?
     added: bool,
+    /// Does the viewer have a release reminder on the shown work?
+    reminded: bool,
     whisper: Option<Whisper>,
     /// Main characters of the shown card (first page of the cast), for the dropdown.
     cast: Vec<(Character, String)>,
@@ -121,6 +124,7 @@ impl MediaView {
             history: Vec::new(),
             notice: None,
             added: false,
+            reminded: false,
             whisper: None,
             cast: Vec::new(),
             cast_for: None,
@@ -159,7 +163,7 @@ impl MediaView {
         }
     }
 
-    fn open_cast_member(&mut self, values: &[String]) -> Outcome {
+    async fn open_cast_member(&mut self, values: &[String]) -> Outcome {
         let Some(id) = values.first().and_then(|v| v.parse::<i64>().ok()) else {
             return Outcome::Keep;
         };
@@ -185,6 +189,12 @@ impl MediaView {
     }
 
     async fn refresh_added(&mut self) {
+        self.reminded = match &self.mode {
+            Mode::Card(m) => reminders::has(&self.pool, self.user, m.id)
+                .await
+                .unwrap_or(false),
+            _ => false,
+        };
         self.added = match &self.mode {
             Mode::Card(m) => works::has_work(&self.pool, self.user, &work_key_of(m))
                 .await
@@ -305,6 +315,40 @@ impl MediaView {
         }
     }
 
+    /// 🔔 / 🔕: ask for a DM when a new episode is released, or cancel it.
+    async fn toggle_reminder(&mut self) -> Outcome {
+        let Some(m) = self.current_card() else {
+            return Outcome::Keep;
+        };
+        let (pool, user) = (self.pool.clone(), self.user);
+        let text = if self.reminded {
+            match reminders::remove(&pool, user, m.id).await {
+                Ok(_) => {
+                    self.reminded = false;
+                    i18n::REMINDER_CANCELLED
+                }
+                Err(e) => {
+                    tracing::warn!("reminder removal failed: {e}");
+                    i18n::ERR_GENERIC
+                }
+            }
+        } else {
+            match reminders::add(&pool, user, m.id, m.title.main()).await {
+                Ok(reminders::AddResult::Added | reminders::AddResult::Already) => {
+                    self.reminded = true;
+                    i18n::REMINDER_SET
+                }
+                Ok(reminders::AddResult::Full) => i18n::REMINDER_FULL,
+                Err(e) => {
+                    tracing::warn!("reminder add failed: {e}");
+                    i18n::ERR_GENERIC
+                }
+            }
+        };
+        self.whisper = Some(Whisper::text(text));
+        Outcome::Update
+    }
+
     /// ⭐ / ✅: add or remove the work from the viewer's favourites, with an undo button.
     async fn toggle_favourite(&mut self) -> Outcome {
         let Some(m) = self.current_card() else {
@@ -376,6 +420,24 @@ impl MediaView {
                 .style(secondary)
                 .disabled(!enabled),
         ];
+        // Only anime has release times, so only anime cards can remind.
+        if kind_of(m) == MediaKind::Anime {
+            main.push(
+                serenity::CreateButton::new(BTN_REMIND)
+                    .label(if self.reminded {
+                        i18n::BTN_REMINDER_CANCEL
+                    } else {
+                        i18n::BTN_REMIND
+                    })
+                    .emoji(if self.reminded { '🔕' } else { '🔔' })
+                    .style(if self.reminded {
+                        serenity::ButtonStyle::Success
+                    } else {
+                        secondary
+                    })
+                    .disabled(!enabled),
+            );
+        }
         if let Some(url) = &m.site_url {
             main.push(
                 serenity::CreateButton::new_link(url).label(format!("🔗 {}", i18n::BTN_ANILIST)),
@@ -477,7 +539,7 @@ impl MediaView {
     async fn handle(&mut self, id: &str, values: &[String]) -> Outcome {
         match id {
             CLOSE => Outcome::Close,
-            CAST_PICK => self.open_cast_member(values),
+            CAST_PICK => self.open_cast_member(values).await,
             BACK => match self.history.pop() {
                 Some(previous) => {
                     self.mode = previous;
@@ -487,6 +549,7 @@ impl MediaView {
                 None => Outcome::Keep,
             },
             BTN_STAR => self.toggle_favourite().await,
+            BTN_REMIND => self.toggle_reminder().await,
             BTN_CHARACTERS => self.open_characters().await,
             BTN_REROLL => self.reroll().await,
             PICK_ID => self.open_picked(values).await,
@@ -499,6 +562,11 @@ impl MediaView {
 }
 
 // ---- entry points ------------------------------------------------------------------------
+
+/// Autocomplete label used by `/suggest`.
+pub fn media_label_for_suggest(m: &Media) -> String {
+    media_label(m)
+}
 
 fn media_label(m: &Media) -> String {
     let mut bits = Vec::new();

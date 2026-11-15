@@ -110,6 +110,11 @@ pub trait View: Send {
 
     fn render(&self, enabled: bool) -> Page;
 
+    /// Runs once before the first render (load covers, check profile state...).
+    fn on_start(&mut self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
     /// Panels that only their opener should ever see (admin menus) are sent ephemerally.
     fn ephemeral(&self) -> bool {
         false
@@ -209,6 +214,7 @@ async fn send_whisper(
 
 /// Send the view and drive it until it closes or times out.
 pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
+    view.on_start().await;
     let reply = view.render(true).into_reply().ephemeral(view.ephemeral());
     let handle = ctx.send(reply).await?;
     let message_id = handle.message().await?.id;

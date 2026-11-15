@@ -3,7 +3,10 @@
 
 use crate::{
     anilist::{models::Media, AiringEntry, ContentPolicy, SafeAniList},
-    db::feed::{self, FeedConfig, FilterMode},
+    db::{
+        feed::{self, FeedConfig, FilterMode},
+        reminders,
+    },
     i18n,
     ui::{
         embeds::Emb,
@@ -209,7 +212,8 @@ pub async fn run(feed: Feed, mut shutdown: watch::Receiver<bool>) {
 async fn tick(f: &Feed) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
     let guilds = feed::active_guilds(&f.pool).await?;
-    if !guilds.is_empty() {
+    // Reminders reuse the same batched fetch: no AniList call per reminder, and none at all when nothing needs it.
+    if !guilds.is_empty() || reminders::any(&f.pool).await? {
         let (from, to) = poll_window(feed::last_checked(&f.pool).await?, now);
         // One shared fetch for every server; AniList failures keep `last_checked` so we retry the same window.
         let entries = f
@@ -221,10 +225,102 @@ async fn tick(f: &Feed) -> anyhow::Result<()> {
                 tracing::warn!(guild = cfg.guild_id, "feed for guild failed: {e:#}");
             }
         }
+        if let Err(e) = deliver_reminders(f, &entries, now).await {
+            tracing::warn!("reminders failed (will retry): {e:#}");
+        }
         feed::set_last_checked(&f.pool, now).await?;
     }
     feed::prune_posted(&f.pool, now - 2 * 86_400).await?;
     post_birthdays(f, now).await
+}
+
+/// The `(user, work, episode)` notifications owed for a batch of releases, in episode order. Each episode notifies a
+/// user once: `last` is what was already announced, and later releases in the same batch build on earlier ones.
+pub fn reminders_owed(
+    entries: &[&AiringEntry],
+    by_work: &std::collections::HashMap<i64, Vec<reminders::Reminder>>,
+) -> Vec<(i64, i64, i64)> {
+    let mut sorted: Vec<&&AiringEntry> = entries.iter().collect();
+    sorted.sort_by_key(|e| (e.media.id, e.episode));
+    let mut last: std::collections::HashMap<(i64, i64), i64> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for e in sorted {
+        for r in by_work.get(&e.media.id).map(Vec::as_slice).unwrap_or(&[]) {
+            let seen = last.entry((r.user_id, r.work_id)).or_insert(r.last_episode);
+            let ep = i64::from(e.episode);
+            if reminders::is_due(ep, *seen) {
+                *seen = ep;
+                out.push((r.user_id, r.work_id, ep));
+            }
+        }
+    }
+    out
+}
+
+async fn deliver_reminders(f: &Feed, entries: &[AiringEntry], now: i64) -> anyhow::Result<()> {
+    let due: Vec<&AiringEntry> = entries
+        .iter()
+        .filter(|e| e.airing_at <= now && now - e.airing_at <= CATCH_UP_SECS)
+        .collect();
+    if due.is_empty() {
+        return Ok(());
+    }
+    let mut ids: Vec<i64> = due.iter().map(|e| e.media.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let by_work = reminders::for_works(&f.pool, &ids).await?;
+    for (user, work, episode) in reminders_owed(&due, &by_work) {
+        let Some(e) = due
+            .iter()
+            .find(|e| e.media.id == work && i64::from(e.episode) == episode)
+        else {
+            continue;
+        };
+        // Marked first: whatever happens next, this release never notifies this user twice.
+        reminders::mark(&f.pool, user, work, episode).await?;
+        send_reminder(f, user, e).await;
+    }
+    Ok(())
+}
+
+/// DM the member; if their DMs are closed, ping them in a notifications channel only where the server allows it.
+async fn send_reminder(f: &Feed, user: i64, e: &AiringEntry) {
+    let embed = episode_embed(&e.media, e.episode, e.airing_at).build();
+    let dm = async {
+        let channel = serenity::UserId::new(user as u64)
+            .create_dm_channel(&f.http)
+            .await?;
+        channel
+            .send_message(
+                &f.http,
+                serenity::CreateMessage::new()
+                    .content(i18n::REMINDER_DM)
+                    .embed(embed.clone()),
+            )
+            .await
+    };
+    if dm.await.is_ok() {
+        return;
+    }
+    let Ok(channels) = feed::reminder_fallback_channels(&f.pool, user).await else {
+        return;
+    };
+    for (_, channel) in channels {
+        let msg = serenity::CreateMessage::new()
+            .content(format!("<@{user}> {}", i18n::REMINDER_DM))
+            .embed(embed.clone())
+            .allowed_mentions(
+                serenity::CreateAllowedMentions::new()
+                    .users(vec![serenity::UserId::new(user as u64)]),
+            );
+        if serenity::ChannelId::new(channel as u64)
+            .send_message(&f.http, msg)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
 }
 
 async fn serve_guild(

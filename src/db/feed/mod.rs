@@ -235,6 +235,20 @@ pub async fn birthday_targets(pool: &SqlitePool) -> Result<Vec<(i64, i64)>> {
         .collect())
 }
 
+/// Channels where a reminder may be pinged when the member's DMs are closed: servers the member shares with the
+/// bot that switched `reminder_ping` on and have a notifications channel.
+pub async fn reminder_fallback_channels(pool: &SqlitePool, user: i64) -> Result<Vec<(i64, i64)>> {
+    sqlx::query_as(
+        "SELECT f.guild_id, f.channel_id FROM user_guilds ug \
+         JOIN guild_settings s ON s.guild_id = ug.guild_id AND s.reminder_ping = 1 \
+         JOIN guild_feed f ON f.guild_id = ug.guild_id AND f.channel_id IS NOT NULL \
+         WHERE ug.user_id = ?1 ORDER BY f.guild_id",
+    )
+    .bind(user)
+    .fetch_all(pool)
+    .await
+}
+
 // ---- dedupe, cap and digest ---------------------------------------------------------------
 
 pub async fn already_posted(

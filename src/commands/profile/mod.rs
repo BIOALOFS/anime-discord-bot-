@@ -2,6 +2,7 @@
 //! lives in `/edit`.
 
 mod actions;
+mod banner_picker;
 mod edit;
 pub use edit::edit;
 mod imaging;

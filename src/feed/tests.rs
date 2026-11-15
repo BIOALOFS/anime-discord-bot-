@@ -235,3 +235,54 @@ fn skipped_adult_media_never_reaches_the_decision() {
         "filtering happens in SafeAniList::airing_between (tested there)"
     );
 }
+
+#[test]
+fn reminders_notify_each_release_once_in_episode_order() {
+    use crate::db::reminders::Reminder;
+    let mut e5 = entry(NOW - 60, 100, "TV", &[]);
+    e5.episode = 5;
+    let mut e6 = entry(NOW - 30, 100, "TV", &[]);
+    e6.episode = 6;
+    let by_work = std::collections::HashMap::from([(
+        10,
+        vec![
+            Reminder {
+                user_id: 1,
+                work_id: 10,
+                title: "Show".into(),
+                last_episode: 4,
+            },
+            Reminder {
+                user_id: 2,
+                work_id: 10,
+                title: "Show".into(),
+                last_episode: 5,
+            },
+            Reminder {
+                user_id: 3,
+                work_id: 10,
+                title: "Show".into(),
+                last_episode: 6,
+            },
+        ],
+    )]);
+    // Given in reverse order on purpose.
+    let owed = reminders_owed(&[&e6, &e5], &by_work);
+    assert_eq!(owed.len(), 3);
+    assert!(
+        owed.contains(&(1, 10, 5)) && owed.contains(&(1, 10, 6)),
+        "a member who missed ep 5 hears about both"
+    );
+    assert!(
+        owed.contains(&(2, 10, 6)) && !owed.contains(&(2, 10, 5)),
+        "ep 5 was already announced"
+    );
+    assert!(
+        !owed.iter().any(|o| o.0 == 3),
+        "nothing newer than what user 3 already got"
+    );
+    assert!(
+        reminders_owed(&[&e5], &std::collections::HashMap::new()).is_empty(),
+        "no reminders, nothing owed"
+    );
+}

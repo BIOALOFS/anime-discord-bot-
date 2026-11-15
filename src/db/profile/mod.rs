@@ -69,6 +69,8 @@ pub struct Profile {
     /// The name shown on the card instead of the Discord name (max `MAX_TITLE`).
     pub display_title: Option<String>,
     pub language: String,
+    /// Unix time the profile was created.
+    pub created_at: i64,
 }
 
 impl Profile {
@@ -164,7 +166,7 @@ pub async fn create_profile(pool: &SqlitePool, user: i64) -> Result<bool> {
 
 pub async fn get_profile(pool: &SqlitePool, user: i64) -> Result<Option<Profile>> {
     Ok(sqlx::query_as::<_, Profile>(
-        "SELECT user_id, bio, accent_color, quote, banner, default_style, privacy, template, display_title, language \
+        "SELECT user_id, bio, accent_color, quote, banner, default_style, privacy, template, display_title, language, created_at \
          FROM profiles WHERE user_id = ?1",
     )
     .bind(user)
@@ -852,7 +854,6 @@ pub async fn delete_user_data(pool: &SqlitePool, user: i64) -> Result<()> {
         "DELETE FROM upload_bans WHERE user_id = ?1",
         "DELETE FROM game_scores WHERE user_id = ?1",
         "DELETE FROM hidden_recommendations WHERE user_id = ?1",
-        "DELETE FROM alert_requests WHERE user_id = ?1",
         "DELETE FROM user_guilds WHERE user_id = ?1",
         "DELETE FROM users WHERE discord_id = ?1",
     ] {
