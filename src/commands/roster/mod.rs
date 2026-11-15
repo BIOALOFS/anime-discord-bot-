@@ -28,6 +28,7 @@ const ID_WORK: &str = "rwork";
 const ID_GROUP: &str = "rgroup";
 const ID_RANGE: &str = "rrange";
 const ID_CHAR: &str = "rchar";
+const ID_ADD: &str = "radd";
 pub const ID_JUMP: &str = "rjump";
 
 // ---- pure helpers -------------------------------------------------------------------------
@@ -99,6 +100,8 @@ pub enum Step {
     /// Leave the roster and return to the host view.
     Exit,
     Close,
+    /// Private message to the presser only.
+    Whisper(String),
 }
 
 impl Step {
@@ -108,6 +111,7 @@ impl Step {
             Step::Update => Outcome::Update,
             Step::Keep => Outcome::Keep,
             Step::Close => Outcome::Close,
+            Step::Whisper(t) => Outcome::Whisper(t),
             Step::Exit => {
                 *slot = None;
                 Outcome::Update
@@ -133,6 +137,8 @@ pub struct Roster {
     entries: Vec<(usize, Character, String)>,
     mode: Mode,
     notice: Option<String>,
+    /// Lets a character opened from the list be added to the viewer's profile.
+    profile: Option<(sqlx::SqlitePool, i64)>,
 }
 
 fn works_of(c: &Character, policy: ContentPolicy) -> Vec<(i64, String)> {
@@ -171,12 +177,18 @@ impl Roster {
             entries: Vec::new(),
             mode: Mode::WorkPick,
             notice: None,
+            profile: None,
         };
         if r.work.is_some() {
             r.mode = Mode::List;
             r.load().await?;
         }
         Ok(Some(r))
+    }
+
+    pub fn with_profile(mut self, pool: sqlx::SqlitePool, user: i64) -> Self {
+        self.profile = Some((pool, user));
+        self
     }
 
     /// The cast of one work, opened directly on the list.
@@ -197,6 +209,7 @@ impl Roster {
             entries: Vec::new(),
             mode: Mode::List,
             notice: None,
+            profile: None,
         };
         r.load().await?;
         Ok(r)
@@ -300,6 +313,22 @@ impl Roster {
                 Some(p) if p < self.pages() => self.goto(p).await,
                 _ => Step::Keep,
             },
+            ID_ADD => {
+                let (Mode::Card(c), Some((pool, user))) = (&self.mode, &self.profile) else {
+                    return Step::Keep;
+                };
+                let text = match crate::db::profile::create_profile(pool, *user).await {
+                    Ok(_) => match super::profile::add_and_cache(pool, *user, c).await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::warn!("roster add failed: {e:#}");
+                            i18n::ERR_GENERIC.to_string()
+                        }
+                    },
+                    Err(_) => i18n::ERR_GENERIC.to_string(),
+                };
+                Step::Whisper(text)
+            }
             ID_CHAR => {
                 let Some(cid) = first.and_then(|v| v.parse::<i64>().ok()) else {
                     return Step::Keep;

@@ -41,10 +41,21 @@ pub struct Config {
     /// MangaDex / MangaUpdates fallback for works AniList lacks. Off unless explicitly enabled.
     #[serde(default, deserialize_with = "opt_bool")]
     pub enable_fallback_providers: bool,
+    /// IGDB (games). Both values are needed; either missing disables the provider.
+    #[serde(default)]
+    pub igdb_client_id: Option<String>,
+    #[serde(default)]
+    pub igdb_client_secret: Option<Secret>,
+    /// VNDB (visual novels) needs no key; set `ENABLE_VNDB=false` to switch it off.
+    #[serde(default = "d_true", deserialize_with = "opt_bool_true")]
+    pub enable_vndb: bool,
     #[serde(default, deserialize_with = "opt_u64")]
     pub dev_guild_id: Option<u64>,
 }
 
+fn d_true() -> bool {
+    true
+}
 fn d_db() -> String {
     "sqlite://bot.db?mode=rwc".into()
 }
@@ -82,6 +93,15 @@ fn opt_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     ))
 }
 
+/// Default-on switch: only an explicit "false/0/no/off" turns it off.
+fn opt_bool_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let s: Option<String> = Option::deserialize(d)?;
+    Ok(!matches!(
+        s.as_deref().map(|v| v.trim().to_lowercase()).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    ))
+}
+
 /// `DEV_GUILD_ID=` (empty) in .env.example must mean "unset".
 fn opt_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
     let s: Option<String> = Option::deserialize(d)?;
@@ -92,6 +112,22 @@ fn opt_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Err
 }
 
 impl Config {
+    /// Providers switched on by this configuration (blank credentials count as missing).
+    pub fn provider_config(&self) -> crate::providers::ProviderConfig {
+        let id = self.igdb_client_id.as_deref().map(str::trim).unwrap_or("");
+        let secret = self
+            .igdb_client_secret
+            .as_ref()
+            .map(|s| s.expose().trim())
+            .unwrap_or("");
+        crate::providers::ProviderConfig {
+            fallback: self.enable_fallback_providers,
+            igdb: (!id.is_empty() && !secret.is_empty())
+                .then(|| (id.to_string(), secret.to_string())),
+            vndb: self.enable_vndb,
+        }
+    }
+
     pub fn load() -> anyhow::Result<Self> {
         // Only the working directory's .env; absent is fine.
         let _ = dotenvy::from_filename(".env");
@@ -114,6 +150,9 @@ impl Config {
             cache_ttl_negative_secs: 60,
             command_cooldown_secs: 0,
             enable_fallback_providers: false,
+            igdb_client_id: None,
+            igdb_client_secret: None,
+            enable_vndb: false,
             dev_guild_id: None,
         }
     }

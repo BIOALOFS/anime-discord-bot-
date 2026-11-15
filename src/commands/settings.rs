@@ -109,7 +109,14 @@ pub const SECTIONS: &[Section] = &[
     Section {
         key: "games",
         label: "الألعاب",
-        options: &[o("toggle", "تشغيل/إيقاف الألعاب", Kind::OnOff)],
+        options: &[
+            o("toggle", "تشغيل/إيقاف الألعاب (ومصادر الألعاب)", Kind::OnOff),
+            o(
+                "mature-games",
+                "عرض الألعاب ذات التصنيف الناضج (M/PEGI 18)",
+                Kind::OnOff,
+            ),
+        ],
     },
     Section {
         key: "birthdays",
@@ -611,6 +618,21 @@ pub async fn settings(
             Some(b) => {
                 custom::set_games(&pool, guild, b).await?;
                 reply(ctx, if b { i18n::GAMES_ON } else { i18n::GAMES_OFF }).await
+            }
+            None => reply(ctx, i18n::SETTINGS_BAD_TOGGLE).await,
+        },
+        ("games", "mature-games") => match on {
+            Some(b) => {
+                custom::set_mature_games(&pool, guild, b).await?;
+                reply(
+                    ctx,
+                    if b {
+                        i18n::MATURE_GAMES_ON
+                    } else {
+                        i18n::MATURE_GAMES_OFF
+                    },
+                )
+                .await
             }
             None => reply(ctx, i18n::SETTINGS_BAD_TOGGLE).await,
         },

@@ -3,12 +3,14 @@
 use super::{buttons, fail, parse_id, policy, roster::Roster, say_ephemeral};
 use crate::{
     anilist::{
-        models::{Character, MediaRef},
+        kind_of,
+        models::{Character, Media, MediaRef},
         safety, AniError, CharacterLookup, ContentPolicy, SafeAniList,
     },
-    db::profile as db,
+    db::{profile as db, works},
     error::{Context, Error},
     i18n,
+    providers::{CharacterSource, Providers, Work},
     ui::{
         autocomplete::to_choices,
         cards,
@@ -17,8 +19,9 @@ use crate::{
             apply_nav, back_button, close_button, nav_row, page_count, page_slice, parse_nav, BACK,
             CLOSE,
         },
-        select::{character_choices, pick_row, PICK_ID},
-        session::{self, ModalSpec, Outcome, Page, View},
+        select::{character_choices, PICK_ID},
+        select::{select_row, Choice},
+        session::{self, ModalSpec, Outcome, Page, UndoFuture, View, Whisper},
         text::clean_description_max,
     },
 };
@@ -30,6 +33,9 @@ const BTN_WORKS: &str = "works";
 const BTN_RANDOM: &str = "random_character";
 const BTN_ROSTER: &str = "open_roster";
 const BTN_DESCRIBE: &str = "describe";
+const WORK_PICK: &str = "work_pick";
+const WORK_ADD: &str = "work_add";
+const WORK_ROSTER: &str = "work_roster";
 const BTN_ADD: &str = "add_to_profile";
 const DESCRIPTION_CHARS: usize = 200;
 const WORKS_PER_PAGE: usize = 10;
@@ -38,7 +44,14 @@ const WORKS_PER_PAGE: usize = 10;
 pub enum Mode {
     Pick(Vec<Character>),
     Card(Character),
-    Works { character: Character, page: usize },
+    Works {
+        character: Character,
+        page: usize,
+    },
+    /// A work picked from the character's works list.
+    Work(Box<Media>),
+    /// A game or visual-novel character from IGDB / VNDB.
+    Provider(Box<Work>),
 }
 
 pub struct CharacterView {
@@ -50,6 +63,11 @@ pub struct CharacterView {
     pool: SqlitePool,
     user: i64,
     roster: Option<Roster>,
+    whisper: Option<Whisper>,
+    providers: Option<Arc<Providers>>,
+    /// Game / visual-novel matches shown next to the AniList ones in the pick menu.
+    extra: Vec<Work>,
+    cover: Option<Arc<Vec<u8>>>,
 }
 
 /// Appearances that may be shown under the given policy.
@@ -82,7 +100,27 @@ impl CharacterView {
             pool,
             user,
             roster: None,
+            whisper: None,
+            providers: None,
+            extra: Vec::new(),
+            cover: None,
         }
+    }
+
+    /// Attach the provider handle and game/VN character matches.
+    pub fn with_providers(mut self, providers: Arc<Providers>, extra: Vec<Work>) -> Self {
+        self.providers = Some(providers);
+        self.extra = extra;
+        self
+    }
+
+    async fn open_provider(&mut self, w: Work) {
+        self.cover = match &self.providers {
+            Some(p) => p.cover(&w).await,
+            None => None,
+        };
+        self.history.push(self.mode.clone());
+        self.mode = Mode::Provider(Box::new(w));
     }
 
     /// Add the shown character to the presser's own profile.
@@ -105,6 +143,13 @@ impl CharacterView {
             }
         });
         Outcome::Update
+    }
+
+    /// Fetch the picture of a provider card (downloaded by the bot, never hotlinked).
+    pub async fn load_cover(&mut self) {
+        if let (Mode::Provider(w), Some(p)) = (&self.mode, &self.providers) {
+            self.cover = p.cover(w).await;
+        }
     }
 
     fn fail(&mut self, e: AniError) -> Outcome {
@@ -130,16 +175,35 @@ impl View for CharacterView {
         }
         let (embed, mut rows) = match &self.mode {
             Mode::Pick(list) => {
-                let body = list
+                let mut lines: Vec<String> = list
                     .iter()
                     .enumerate()
                     .map(|(i, c)| match c.main_work() {
                         Some(w) => format!("**{}.** {} — {w}", i + 1, c.display_name()),
                         None => format!("**{}.** {}", i + 1, c.display_name()),
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let rows = pick_row(character_choices(list), enabled)
+                    .collect();
+                lines.extend(self.extra.iter().enumerate().map(|(i, w)| {
+                    format!(
+                        "**{}.** {} — {} ({})",
+                        list.len() + i + 1,
+                        w.title,
+                        w.subtitle.as_deref().unwrap_or("-"),
+                        w.source.credit()
+                    )
+                }));
+                let body = lines.join("\n");
+                let mut choices = character_choices(list);
+                choices.extend(self.extra.iter().map(|w| Choice {
+                    label: w.title.clone(),
+                    description: Some(format!(
+                        "{} · {}",
+                        w.subtitle.as_deref().unwrap_or("-"),
+                        w.source.prefix().to_uppercase()
+                    )),
+                    value: w.id.clone(),
+                }));
+                let rows = select_row(PICK_ID, i18n::PICK_PLACEHOLDER, choices, enabled)
                     .into_iter()
                     .collect();
                 (Emb::new().title(i18n::PICK_PROMPT).description(body), rows)
@@ -191,16 +255,88 @@ impl View for CharacterView {
                 let works = works_of(character, self.policy);
                 let pages = page_count(works.len(), WORKS_PER_PAGE);
                 let slice = page_slice(&works, *page, WORKS_PER_PAGE);
+                let choices: Vec<Choice> = slice
+                    .iter()
+                    .filter_map(|r| {
+                        let title = r.title.as_ref()?.main().to_string();
+                        let mut bits = Vec::new();
+                        if let Some(f) = &r.format {
+                            bits.push(crate::ui::format::format_ar(f).to_string());
+                        }
+                        if let Some(y) = r.season_year {
+                            bits.push(y.to_string());
+                        }
+                        Some(Choice {
+                            label: title,
+                            description: (!bits.is_empty()).then(|| bits.join(" · ")),
+                            value: r.id?.to_string(),
+                        })
+                    })
+                    .collect();
+                let mut rows: Vec<_> =
+                    select_row(WORK_PICK, i18n::WORKS_PICK_PLACEHOLDER, choices, enabled)
+                        .into_iter()
+                        .collect();
+                rows.push(nav_row(*page, pages, enabled));
+                (cards::works_embed(character, slice, *page, pages), rows)
+            }
+            Mode::Work(m) => {
+                let secondary = serenity::ButtonStyle::Secondary;
+                let mut row = vec![
+                    serenity::CreateButton::new(WORK_ADD)
+                        .label(i18n::BTN_FAVOURITE)
+                        .emoji('⭐')
+                        .style(secondary)
+                        .disabled(!enabled),
+                    serenity::CreateButton::new(WORK_ROSTER)
+                        .label(i18n::BTN_CHARACTERS)
+                        .emoji('👥')
+                        .style(secondary)
+                        .disabled(!enabled),
+                ];
+                if let Some(u) = &m.site_url {
+                    row.push(
+                        serenity::CreateButton::new_link(u)
+                            .label(format!("🔗 {}", i18n::BTN_ANILIST)),
+                    );
+                }
+                (cards::work_card(m), vec![buttons(row)])
+            }
+            Mode::Provider(w) => {
+                let name = self
+                    .cover
+                    .as_ref()
+                    .map_or("cover.jpg", |c| super::fallback::cover_name(c));
+                let mut row = vec![super::fallback::add_button(enabled)];
+                if let Some(u) = &w.url {
+                    row.push(
+                        serenity::CreateButton::new_link(u)
+                            .label(format!("🔗 {}", w.source.credit())),
+                    );
+                }
                 (
-                    cards::works_embed(character, slice, *page, pages),
-                    vec![nav_row(*page, pages, enabled)],
+                    super::fallback::card(w, self.cover.is_some(), name),
+                    vec![buttons(row)],
                 )
             }
         };
         if !matches!(self.mode, Mode::Card(_)) {
             rows.push(self.actions(enabled));
         }
-        Page::embed(embed.build(), rows).notice(self.notice.clone())
+        let page = Page::embed(embed.build(), rows).notice(self.notice.clone());
+        match (&self.mode, &self.cover) {
+            (Mode::Provider(_), Some(c)) => {
+                page.with_files(vec![serenity::CreateAttachment::bytes(
+                    c.to_vec(),
+                    super::fallback::cover_name(c).to_string(),
+                )])
+            }
+            _ => page,
+        }
+    }
+
+    fn take_whisper(&mut self) -> Option<Whisper> {
+        self.whisper.take()
     }
 
     fn modal_for(&self, id: &str) -> Option<ModalSpec> {
@@ -242,12 +378,82 @@ impl View for CharacterView {
                 Outcome::Update
             }
             BTN_ADD => self.add_to_profile().await,
+            super::fallback::BTN_PROVIDER_ADD => {
+                if let Mode::Provider(w) = &self.mode {
+                    self.whisper =
+                        Some(super::fallback::add_to_profile(&self.pool, self.user, w).await);
+                }
+                Outcome::Keep
+            }
+            WORK_PICK => {
+                let Some(id) = values.first().and_then(|v| v.parse::<i64>().ok()) else {
+                    return Outcome::Keep;
+                };
+                match self.api.media_by_id(id, self.policy).await {
+                    Ok(Some(m)) => {
+                        self.history.push(self.mode.clone());
+                        self.mode = Mode::Work(Box::new(m));
+                        Outcome::Update
+                    }
+                    Ok(None) => {
+                        self.notice = Some(i18n::NOT_FOUND.to_string());
+                        Outcome::Update
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            WORK_ADD => {
+                let Mode::Work(m) = &self.mode else {
+                    return Outcome::Keep;
+                };
+                let (pool, user) = (self.pool.clone(), self.user);
+                let key = works::work_key(m.id);
+                let kind = kind_of(m).key().to_string();
+                let row = super::media::media_cache_row(m, super::profile::now());
+                let result = async {
+                    db::create_profile(&pool, user).await?;
+                    works::upsert_media_cache(&pool, &row).await?;
+                    works::add_work(&pool, user, &key, &kind).await
+                }
+                .await;
+                self.whisper = Some(match result {
+                    Ok(db::AddOutcome::Added(_)) => {
+                        let undo_pool = self.pool.clone();
+                        let undo: Box<dyn FnOnce() -> UndoFuture + Send + Sync> =
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    works::remove_work(&undo_pool, user, &key)
+                                        .await
+                                        .map_or(i18n::ERR_GENERIC, |_| i18n::UNDONE)
+                                        .to_string()
+                                })
+                            });
+                        Whisper {
+                            text: i18n::WORK_ADDED.to_string(),
+                            undo: Some(undo),
+                        }
+                    }
+                    Ok(db::AddOutcome::Duplicate) => Whisper::text(i18n::WORK_ALREADY),
+                    Err(_) => Whisper::text(i18n::ERR_GENERIC),
+                });
+                Outcome::Keep
+            }
+            WORK_ROSTER => {
+                let Mode::Work(m) = &self.mode else {
+                    return Outcome::Keep;
+                };
+                match Roster::for_work(self.api.clone(), self.policy, m.id, m.title.main()).await {
+                    Ok(r) => self.roster = Some(r.with_profile(self.pool.clone(), self.user)),
+                    Err(e) => return self.fail(e),
+                }
+                Outcome::Update
+            }
             BTN_ROSTER => {
                 let Mode::Card(c) = &self.mode else {
                     return Outcome::Keep;
                 };
                 match Roster::start(self.api.clone(), self.policy, c).await {
-                    Ok(Some(r)) => self.roster = Some(r),
+                    Ok(Some(r)) => self.roster = Some(r.with_profile(self.pool.clone(), self.user)),
                     Ok(None) => self.notice = Some(i18n::ROSTER_NO_WORKS.to_string()),
                     Err(e) => return self.fail(e),
                 }
@@ -282,9 +488,18 @@ impl View for CharacterView {
                 let Mode::Pick(list) = &self.mode else {
                     return Outcome::Keep;
                 };
-                let id = values.first().and_then(|v| v.parse::<i64>().ok());
+                let picked = values.first();
+                let id = picked.and_then(|v| v.parse::<i64>().ok());
                 let Some(c) = list.iter().find(|c| Some(c.id) == id).cloned() else {
-                    return Outcome::Keep;
+                    let found =
+                        picked.and_then(|v| self.extra.iter().find(|w| &w.id == v).cloned());
+                    return match found {
+                        Some(w) => {
+                            self.open_provider(w).await;
+                            Outcome::Update
+                        }
+                        None => Outcome::Keep,
+                    };
                 };
                 self.history.push(self.mode.clone());
                 self.mode = Mode::Card(c);
@@ -310,70 +525,356 @@ impl View for CharacterView {
 
 // ---- entry points ------------------------------------------------------------------------
 
+/// Where `/character` looks: everything, AniList only, or game/visual-novel providers only.
+pub fn source_choices() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("الكل", "all"),
+        ("أنمي / مانجا", "anime"),
+        ("ألعاب", "games"),
+    ]
+}
+
+fn source_of(key: Option<&str>) -> CharacterSource {
+    match key.map(str::trim) {
+        Some("anime") => CharacterSource::AnimeManga,
+        Some("games") => CharacterSource::Games,
+        _ => CharacterSource::All,
+    }
+}
+
+/// Does a title match the `work` filter (case-insensitive substring)?
+fn title_matches(title: &str, needle: &str) -> bool {
+    title.to_lowercase().contains(&needle.trim().to_lowercase())
+}
+
+/// Keep AniList characters that appear in a work matching the filter (by id or title text).
+fn filter_by_work(list: Vec<Character>, filter: &WorkFilter) -> Vec<Character> {
+    match filter {
+        WorkFilter::None => list,
+        WorkFilter::Id { id, .. } => list
+            .into_iter()
+            .filter(|c| {
+                works_of(c, ContentPolicy::SAFE)
+                    .iter()
+                    .any(|r| r.id == Some(*id))
+            })
+            .collect(),
+        WorkFilter::Text(t) => list
+            .into_iter()
+            .filter(|c| {
+                works_of(c, ContentPolicy::SAFE).iter().any(|r| {
+                    r.title.as_ref().is_some_and(|ti| {
+                        [Some(ti.main()), ti.english.as_deref(), ti.native.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .any(|x| title_matches(x, t))
+                    })
+                })
+            })
+            .collect(),
+    }
+}
+
+fn filter_providers(list: Vec<Work>, filter: &WorkFilter) -> Vec<Work> {
+    let text = match filter {
+        WorkFilter::None => return list,
+        WorkFilter::Text(t) => t.as_str(),
+        WorkFilter::Id { title, .. } => title.as_str(),
+    };
+    list.into_iter()
+        .filter(|w| {
+            w.subtitle
+                .as_deref()
+                .is_some_and(|s| title_matches(s, text))
+        })
+        .collect()
+}
+
+/// The optional `work` option: an autocomplete id, free text, or nothing.
+enum WorkFilter {
+    None,
+    Id { id: i64, title: String },
+    Text(String),
+}
+
+async fn work_filter(api: &SafeAniList, raw: Option<&str>) -> WorkFilter {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return WorkFilter::None;
+    };
+    match parse_id(raw) {
+        Some(id) => match api.media_by_id(id, ContentPolicy::SAFE).await {
+            Ok(Some(m)) => WorkFilter::Id {
+                id,
+                title: m.title.main().to_string(),
+            },
+            _ => WorkFilter::Text(raw.to_string()),
+        },
+        None => WorkFilter::Text(raw.to_string()),
+    }
+}
+
+/// Autocomplete label for a game / visual-novel character: name, main work, source.
+pub fn provider_label(w: &Work) -> String {
+    match &w.subtitle {
+        Some(s) => format!("{} — {s} ({})", w.title, w.source.prefix().to_uppercase()),
+        None => format!("{} ({})", w.title, w.source.prefix().to_uppercase()),
+    }
+}
+
+async fn ac_source(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
+    let needle = partial.trim().to_lowercase();
+    to_choices(
+        source_choices()
+            .into_iter()
+            .filter(|(l, k)| needle.is_empty() || l.contains(&needle) || k.contains(&needle))
+            .map(|(l, k)| (l.to_string(), k.to_string()))
+            .collect(),
+    )
+}
+
+async fn ac_work(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    super::media::any_autocomplete(ctx, partial).await
+}
+
+/// Name suggestions ranked by popularity, with the main work in the label.
 pub(crate) async fn ac_character(
     ctx: Context<'_>,
     partial: &str,
 ) -> Vec<serenity::AutocompleteChoice> {
-    if !crate::guild::autocomplete_allowed(ctx).await {
+    if !crate::guild::autocomplete_allowed(ctx).await || partial.trim().chars().count() < 2 {
         return Vec::new();
     }
+    let source = source_of(super::profile::option_str(ctx, "source").as_deref());
+    let (games_on, mature) = super::fallback::game_flags(ctx).await;
     let data = ctx.data();
     let api = data.anilist.clone();
+    let providers = data.providers.clone();
+    let use_games = source != CharacterSource::AnimeManga && games_on && providers.games_enabled();
+    let use_ani = source != CharacterSource::Games;
+    // The cache key is the typed text, so the option that changes the answer is part of it.
+    let keyed = format!("{source:?}|{mature}|{}", partial.trim());
     let items = data
         .auto
-        .items(
-            ctx.author().id.get(),
-            "character",
-            partial,
-            |q| async move {
-                match api.search_characters(&q, 10, ContentPolicy::SAFE).await {
-                    Ok(list) => list
-                        .iter()
-                        .map(|c| {
-                            let label = match c.main_work() {
-                                Some(w) => format!("{} — {w}", c.display_name()),
-                                None => c.display_name().to_string(),
-                            };
-                            (label, format!("id:{}", c.id))
-                        })
-                        .collect(),
-                    Err(_) => Vec::new(),
+        .items(ctx.author().id.get(), "character", &keyed, |q| async move {
+            let text = q.rsplit('|').next().unwrap_or("").to_string();
+            let (ani, prov) = futures::join!(
+                async {
+                    if !use_ani {
+                        return Vec::new();
+                    }
+                    api.search_characters(&text, 10, ContentPolicy::SAFE)
+                        .await
+                        .unwrap_or_default()
+                },
+                async {
+                    if use_games {
+                        providers.search_characters(&text, mature).await
+                    } else {
+                        Vec::new()
+                    }
                 }
-            },
-        )
+            );
+            let mut out: Vec<(String, String)> = ani
+                .iter()
+                .map(|c| {
+                    let label = match c.main_work() {
+                        Some(w) => format!("{} — {w}", c.display_name()),
+                        None => c.display_name().to_string(),
+                    };
+                    (label, format!("id:{}", c.id))
+                })
+                .collect();
+            out.extend(prov.iter().map(|w| (provider_label(w), w.id.clone())));
+            out
+        })
         .await;
     to_choices(items)
 }
 
-/// Search for a character.
-pub async fn search_character(ctx: Context<'_>, name: String) -> Result<(), Error> {
+/// Search characters in anime/manga (AniList) and games / visual novels (IGDB, VNDB).
+#[poise::command(
+    slash_command,
+    name_localized("ar", "شخصية"),
+    description_localized("ar", "ابحث عن شخصية من أنمي أو مانجا أو لعبة")
+)]
+pub async fn character(
+    ctx: Context<'_>,
+    #[description = "Character name"]
+    #[description_localized("ar", "اسم الشخصية")]
+    #[name_localized("ar", "الاسم")]
+    #[autocomplete = "ac_character"]
+    name: String,
+    #[description = "Only characters from this work"]
+    #[description_localized("ar", "حصر النتائج في عمل معين")]
+    #[name_localized("ar", "العمل")]
+    #[autocomplete = "ac_work"]
+    work: Option<String>,
+    #[description = "Where to look: all, anime/manga or games"]
+    #[description_localized("ar", "المصدر: الكل أو أنمي/مانجا أو ألعاب")]
+    #[name_localized("ar", "المصدر")]
+    #[autocomplete = "ac_source"]
+    source: Option<String>,
+) -> Result<(), Error> {
+    search_character(ctx, name, work, source).await
+}
+
+/// Resolve the typed or picked value and open the card (or a select menu for several matches).
+pub async fn search_character(
+    ctx: Context<'_>,
+    name: String,
+    work: Option<String>,
+    source: Option<String>,
+) -> Result<(), Error> {
     ctx.defer().await?;
     let api = ctx.data().anilist.clone();
+    let providers = ctx.data().providers.clone();
     let policy = policy(ctx);
-    let mode = if let Some(id) = parse_id(&name) {
-        match api.character_by_id(id, policy).await {
+    let source = source_of(source.as_deref());
+    let (games_on, mature) = super::fallback::game_flags(ctx).await;
+    let use_games = source != CharacterSource::AnimeManga && games_on && providers.games_enabled();
+    let (pool, user) = (ctx.data().db.clone(), ctx.author().id.get() as i64);
+    let new_view = |mode: Mode| CharacterView::new(api.clone(), policy, mode, pool.clone(), user);
+
+    // A suggestion that was picked from the autocomplete list.
+    if let Some(id) = parse_id(&name) {
+        let mode = match api.character_by_id(id, policy).await {
             Ok(CharacterLookup::Found(c)) => Mode::Card(*c),
             Ok(CharacterLookup::Hidden) => return say_ephemeral(ctx, i18n::HIDDEN_NOTICE).await,
             Ok(CharacterLookup::NotFound) => return say_ephemeral(ctx, i18n::NOT_FOUND).await,
             Err(e) => return fail(ctx, e).await,
+        };
+        return session::run(ctx, new_view(mode)).await;
+    }
+    if name.starts_with("igdb:c") || name.starts_with("vndb:c") {
+        if !use_games {
+            return say_ephemeral(ctx, game_notice(games_on, &providers)).await;
         }
-    } else {
-        match api.search_characters(name.trim(), 10, policy).await {
-            Ok(mut v) if v.len() == 1 => Mode::Card(v.remove(0)),
-            Ok(v) if v.is_empty() => return say_ephemeral(ctx, i18n::NO_RESULTS).await,
-            Ok(v) => Mode::Pick(v),
-            Err(e) => return fail(ctx, e).await,
+        return match providers.character_by_key(name.trim(), mature).await {
+            Some(w) => {
+                let mut view =
+                    new_view(Mode::Provider(Box::new(w))).with_providers(providers, Vec::new());
+                view.load_cover().await;
+                session::run(ctx, view).await
+            }
+            None => say_ephemeral(ctx, i18n::NOT_FOUND).await,
+        };
+    }
+
+    let query = name.trim();
+    let filter = work_filter(&api, work.as_deref()).await;
+    let (ani, prov) = futures::join!(
+        async {
+            if source == CharacterSource::Games {
+                return Ok(Vec::new());
+            }
+            api.search_characters(query, 10, policy).await
+        },
+        async {
+            if use_games {
+                providers.search_characters(query, mature).await
+            } else {
+                Vec::new()
+            }
+        }
+    );
+    let prov = filter_providers(prov, &filter);
+    let ani = match ani {
+        Ok(list) => filter_by_work(list, &filter),
+        // A dead AniList must not hide game results.
+        Err(e) if prov.is_empty() => return fail(ctx, e).await,
+        Err(e) => {
+            tracing::warn!("anilist character search failed, showing providers only: {e}");
+            Vec::new()
         }
     };
-    session::run(
-        ctx,
-        CharacterView::new(
-            api,
-            policy,
-            mode,
-            ctx.data().db.clone(),
-            ctx.author().id.get() as i64,
-        ),
-    )
-    .await
+    if ani.is_empty() && prov.is_empty() {
+        let text = if source == CharacterSource::Games && !use_games {
+            game_notice(games_on, &providers)
+        } else {
+            i18n::NO_RESULTS
+        };
+        return say_ephemeral(ctx, text).await;
+    }
+    let mut ani = ani;
+    let (mode, extra) = match (ani.len(), prov.len()) {
+        (1, 0) => (Mode::Card(ani.remove(0)), Vec::new()),
+        (0, 1) => (Mode::Provider(Box::new(prov[0].clone())), Vec::new()),
+        _ => (Mode::Pick(ani), prov),
+    };
+    let mut view = new_view(mode).with_providers(providers, extra);
+    view.load_cover().await;
+    session::run(ctx, view).await
+}
+
+fn game_notice(games_on: bool, providers: &Providers) -> &'static str {
+    if !providers.games_enabled() {
+        i18n::GAMES_UNAVAILABLE
+    } else if !games_on {
+        i18n::GAMES_SERVER_OFF
+    } else {
+        i18n::NO_RESULTS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::{Kind, Source};
+
+    fn prov(title: &str, from: &str) -> Work {
+        Work {
+            id: "igdb:c1".into(),
+            source: Source::Igdb,
+            kind: Kind::Character,
+            title: title.into(),
+            native: None,
+            subtitle: Some(from.into()),
+            year: None,
+            status: None,
+            rating: None,
+            url: None,
+            cover_url: None,
+            genres: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn source_keys_map_to_sources() {
+        assert_eq!(source_of(None), CharacterSource::All);
+        assert_eq!(source_of(Some("all")), CharacterSource::All);
+        assert_eq!(source_of(Some("anime")), CharacterSource::AnimeManga);
+        assert_eq!(source_of(Some(" games ")), CharacterSource::Games);
+        assert_eq!(source_choices().len(), 3);
+    }
+
+    #[test]
+    fn labels_show_the_main_work_and_source() {
+        assert_eq!(
+            provider_label(&prov("Mario", "Super Mario Bros.")),
+            "Mario — Super Mario Bros. (IGDB)"
+        );
+        let mut w = prov("Mario", "x");
+        w.subtitle = None;
+        assert_eq!(provider_label(&w), "Mario (IGDB)");
+    }
+
+    #[test]
+    fn work_filter_applies_to_game_characters() {
+        let list = vec![
+            prov("Mario", "Super Mario Bros."),
+            prov("Pyramid Head", "Silent Hill 2"),
+        ];
+        let kept = filter_providers(list.clone(), &WorkFilter::Text("silent".into()));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].title, "Pyramid Head");
+        assert_eq!(filter_providers(list.clone(), &WorkFilter::None).len(), 2);
+        let by_id = WorkFilter::Id {
+            id: 1,
+            title: "Super Mario".into(),
+        };
+        assert_eq!(filter_providers(list, &by_id)[0].title, "Mario");
+    }
 }

@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let anilist = std::sync::Arc::new(anilist::SafeAniList::new(&config)?);
     let token = config.discord_token.expose().to_string();
     let dev_guild = config.dev_guild_id;
-    let fallback = config.enable_fallback_providers;
+    let provider_cfg = config.provider_config();
     let (feed_pool, feed_api) = (pool.clone(), anilist.clone());
 
     let framework = poise::Framework::builder()
@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
                     .build()?;
                 Ok(Data {
                     guilds: std::sync::Arc::new(guild::GuildStore::new(pool.clone())),
-                    providers: std::sync::Arc::new(providers::Providers::new(http.clone(), fallback)),
+                    providers: std::sync::Arc::new(providers::Providers::new(http.clone(), provider_cfg.clone())),
                     renderer: std::sync::Arc::new(render::Renderer::new(http.clone())),
                     http,
                     db: pool,
@@ -149,10 +149,11 @@ fn qualified_names(cmds: &[Command], prefix: &str, out: &mut Vec<String>) {
 
 /// Every command gets the configured per-user cooldown.
 fn commands_with_cooldown(secs: u64) -> Vec<Command> {
-    // Exactly the nine public commands; nothing else is ever registered.
+    // Exactly the ten public commands; nothing else is ever registered.
     let mut cmds = vec![
         commands::profile::profile(),
         commands::search::search(),
+        commands::character::character(),
         commands::airing::airing(),
         commands::random::random(),
         commands::top::top(),
@@ -252,6 +253,7 @@ mod tests {
         let want = [
             "profile",
             "search",
+            "character",
             "airing",
             "random",
             "top",
@@ -262,7 +264,7 @@ mod tests {
         ];
         assert_eq!(
             names, want,
-            "exactly the nine public commands, in this order, no aliases or leftovers"
+            "exactly the ten public commands, in this order, no aliases or leftovers"
         );
         // Must serialise for Discord without panicking.
         assert!(!poise::builtins::create_application_commands(&cmds).is_empty());

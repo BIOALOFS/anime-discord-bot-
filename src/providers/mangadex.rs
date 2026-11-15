@@ -1,6 +1,6 @@
 //! MangaDex public API: only `safe` and `suggestive` content ratings are requested and accepted.
 
-use super::{CatalogProvider, ProviderError, Source, Work};
+use super::{CatalogProvider, Kind, ProviderError, Source, Work};
 use serde_json::Value;
 
 const API: &str = "https://api.mangadex.org";
@@ -97,6 +97,9 @@ fn parse_one(item: &Value) -> Option<Work> {
     Some(Work {
         id: format!("mdex:{id}"),
         source: Source::MangaDex,
+        kind: Kind::Manga,
+        native: None,
+        subtitle: None,
         title,
         year: attrs.get("year").and_then(Value::as_i64).map(|y| y as i32),
         status: attrs
