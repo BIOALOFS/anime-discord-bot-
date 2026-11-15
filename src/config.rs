@@ -49,7 +49,8 @@ fn d_log() -> String {
     "info".into()
 }
 fn d_rate() -> u32 {
-    80
+    // AniList is currently degraded to ~30/min (baseline 90): stay below it.
+    25
 }
 fn d_search() -> u64 {
     600

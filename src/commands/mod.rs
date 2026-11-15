@@ -76,6 +76,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_error_shown_to_users_is_arabic() {
+        let has_arabic = |s: &str| s.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c));
+        for e in [
+            AniError::Busy,
+            AniError::NotFound,
+            AniError::Http("connection reset by peer".into()),
+            AniError::Api("GraphQL: Max query complexity".into()),
+        ] {
+            let msg = ani_message(&e);
+            assert!(has_arabic(msg), "{e:?} -> {msg}");
+            assert!(
+                !msg.contains("connection") && !msg.contains("GraphQL"),
+                "raw error text must not leak"
+            );
+        }
+        assert!(has_arabic(i18n::ERR_GENERIC));
+    }
+
+    #[test]
     fn ids_come_from_autocomplete_values_only() {
         assert_eq!(parse_id("id:42"), Some(42));
         assert_eq!(parse_id(" id:7 "), Some(7));

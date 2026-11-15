@@ -141,6 +141,7 @@ pub async fn remove_channel(
     description_localized("ar", "اعرض الإعدادات الحالية")
 )]
 pub async fn show(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
     let Some(guild) = guild_of(ctx) else {
         return reply(ctx, i18n::GUILD_ONLY).await;
     };

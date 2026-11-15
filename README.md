@@ -19,7 +19,7 @@ Environment variables (a `.env` file in the working directory is read if present
 | `DISCORD_TOKEN` | — | Bot token (required, never logged) |
 | `DATABASE_URL` | `sqlite://bot.db?mode=rwc` | SQLite file, relative to the working directory |
 | `LOG_LEVEL` | `info` | tracing filter |
-| `ANILIST_RATE_LIMIT_PER_MIN` | `80` | AniList request budget |
+| `ANILIST_RATE_LIMIT_PER_MIN` | `25` | AniList request budget (adapts to `X-RateLimit-*` / `Retry-After`) |
 | `COMMAND_COOLDOWN_SECS` | `3` | per-user cooldown |
 | `DEV_GUILD_ID` | empty | register commands instantly in one server (otherwise global, up to ~1 hour) |
 
