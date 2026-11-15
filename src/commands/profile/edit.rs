@@ -13,7 +13,6 @@ use crate::{
     db::{
         custom,
         profile::{self as pdb, Privacy, MAX_BIO, MAX_TITLE},
-        works,
     },
     error::{Context, Error},
     i18n,
@@ -166,6 +165,10 @@ async fn profile_banner(
 ) -> Result<(), Error> {
     if let Some(att) = image {
         return actions::banner_image(ctx, att).await;
+    }
+    // No value and no picture: the menu of ready-made banners.
+    if value.map(str::trim).filter(|v| !v.is_empty()).is_none() {
+        return super::banner_picker::open(ctx).await;
     }
     begin_private(ctx).await?;
     let Some(p) = require_own(ctx).await? else {
@@ -622,9 +625,6 @@ pub async fn edit(
         _ => Ok(()),
     }
 }
-
-#[allow(dead_code)]
-fn _keep(_: &works::WorkEntry) {}
 
 #[cfg(test)]
 mod tests {

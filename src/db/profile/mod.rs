@@ -1,8 +1,5 @@
 //! Profile storage: profiles, favourite characters, groups, tiers, notes, social queries.
 //! Only AniList ids plus lightweight cached metadata are stored.
-//! (Data-layer functions for groups, tiers, notes, lists and compatibility stay with the schema, even though
-//! no command uses them any more.)
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -63,12 +60,12 @@ pub struct Profile {
     pub accent_color: Option<i64>,
     pub quote: Option<String>,
     pub banner: Option<String>,
-    pub default_style: String,
     pub privacy: String,
-    pub template: String,
     /// The name shown on the card instead of the Discord name (max `MAX_TITLE`).
     pub display_title: Option<String>,
     pub language: String,
+    /// Unix time the profile was created.
+    pub created_at: i64,
 }
 
 impl Profile {
@@ -164,7 +161,7 @@ pub async fn create_profile(pool: &SqlitePool, user: i64) -> Result<bool> {
 
 pub async fn get_profile(pool: &SqlitePool, user: i64) -> Result<Option<Profile>> {
     Ok(sqlx::query_as::<_, Profile>(
-        "SELECT user_id, bio, accent_color, quote, banner, default_style, privacy, template, display_title, language \
+        "SELECT user_id, bio, accent_color, quote, banner, privacy, display_title, language, created_at \
          FROM profiles WHERE user_id = ?1",
     )
     .bind(user)
@@ -260,16 +257,8 @@ pub async fn reset_profile(pool: &SqlitePool, user: i64) -> Result<()> {
     Ok(())
 }
 
-pub async fn set_style(pool: &SqlitePool, user: i64, style: &str) -> Result<()> {
-    set_field(pool, user, "default_style", Some(style.to_string())).await
-}
-
 pub async fn set_privacy(pool: &SqlitePool, user: i64, privacy: Privacy) -> Result<()> {
     set_field(pool, user, "privacy", Some(privacy.as_str().to_string())).await
-}
-
-pub async fn set_template(pool: &SqlitePool, user: i64, template: &str) -> Result<()> {
-    set_field(pool, user, "template", Some(template.to_string())).await
 }
 
 /// `colour` is 0xRRGGBB or None to reset.
@@ -304,18 +293,6 @@ pub async fn count(pool: &SqlitePool, user: i64) -> Result<i64> {
             .fetch_one(pool)
             .await?,
     )
-}
-
-#[allow(dead_code)] // used by the tier/collage styles and the character counters
-pub async fn has_character(pool: &SqlitePool, user: i64, character: i64) -> Result<bool> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM profile_characters WHERE user_id = ?1 AND character_id = ?2",
-    )
-    .bind(user)
-    .bind(character)
-    .fetch_one(pool)
-    .await?
-        > 0)
 }
 
 pub async fn add_character(pool: &SqlitePool, user: i64, character: i64) -> Result<AddOutcome> {
@@ -367,15 +344,6 @@ pub async fn remove_character(pool: &SqlitePool, user: i64, character: i64) -> R
     Ok(true)
 }
 
-pub async fn clear(pool: &SqlitePool, user: i64) -> Result<u64> {
-    let r = sqlx::query("DELETE FROM profile_characters WHERE user_id = ?1")
-        .bind(user)
-        .execute(pool)
-        .await?;
-    touch(pool, user).await?;
-    Ok(r.rows_affected())
-}
-
 /// Move to 1-based `target` (clamped). Shifts only the affected range, in one transaction.
 pub async fn move_character(
     pool: &SqlitePool,
@@ -424,16 +392,6 @@ pub async fn move_character(
     tx.commit().await?;
     touch(pool, user).await?;
     Ok(to)
-}
-
-pub async fn position_of(pool: &SqlitePool, user: i64, character: i64) -> Result<Option<i64>> {
-    Ok(sqlx::query_scalar(
-        "SELECT position FROM profile_characters WHERE user_id = ?1 AND character_id = ?2",
-    )
-    .bind(user)
-    .bind(character)
-    .fetch_optional(pool)
-    .await?)
 }
 
 pub async fn list_page(
@@ -504,28 +462,6 @@ pub async fn search_own(
         .into_iter()
         .map(|r| (r.get("id"), r.get("name")))
         .collect())
-}
-
-#[allow(dead_code)] // used by the tier/collage styles and the character counters
-pub async fn all_character_ids(pool: &SqlitePool, user: i64) -> Result<Vec<i64>> {
-    Ok(sqlx::query_scalar(
-        "SELECT character_id FROM profile_characters WHERE user_id = ?1 ORDER BY position",
-    )
-    .bind(user)
-    .fetch_all(pool)
-    .await?)
-}
-
-/// Entries with a tier, in position order (for the tier-list style).
-#[allow(dead_code)] // used by the tier/collage styles and the character counters
-pub async fn tiered(pool: &SqlitePool, user: i64) -> Result<Vec<Entry>> {
-    let sql = format!(
-        "{ENTRY_SELECT} WHERE pc.user_id = ?1 AND pc.tier IS NOT NULL ORDER BY pc.position"
-    );
-    Ok(sqlx::query_as::<_, Entry>(&sql)
-        .bind(user)
-        .fetch_all(pool)
-        .await?)
 }
 
 pub async fn set_tier(
@@ -619,52 +555,6 @@ pub async fn find_group(pool: &SqlitePool, user: i64, name: &str) -> Result<Opti
     .bind(name.trim())
     .fetch_optional(pool)
     .await?)
-}
-
-pub async fn rename_group(pool: &SqlitePool, user: i64, id: i64, new_name: &str) -> Result<()> {
-    let name = cap(new_name.trim(), MAX_GROUP_NAME);
-    if name.is_empty() {
-        return Err(ProfileError::Invalid("empty group name"));
-    }
-    let r =
-        sqlx::query("UPDATE OR IGNORE profile_groups SET name = ?3 WHERE user_id = ?1 AND id = ?2")
-            .bind(user)
-            .bind(id)
-            .bind(name)
-            .execute(pool)
-            .await?;
-    if r.rows_affected() == 0 {
-        // Either missing or the new name is taken.
-        return if find_group_by_id(pool, user, id).await?.is_some() {
-            Err(ProfileError::Duplicate)
-        } else {
-            Err(ProfileError::NotFound)
-        };
-    }
-    Ok(())
-}
-
-async fn find_group_by_id(pool: &SqlitePool, user: i64, id: i64) -> Result<Option<Group>> {
-    Ok(sqlx::query_as::<_, Group>(
-        "SELECT id, name, position FROM profile_groups WHERE user_id = ?1 AND id = ?2",
-    )
-    .bind(user)
-    .bind(id)
-    .fetch_optional(pool)
-    .await?)
-}
-
-/// Characters of the group become ungrouped (ON DELETE SET NULL).
-pub async fn delete_group(pool: &SqlitePool, user: i64, id: i64) -> Result<()> {
-    let r = sqlx::query("DELETE FROM profile_groups WHERE user_id = ?1 AND id = ?2")
-        .bind(user)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    if r.rows_affected() == 0 {
-        return Err(ProfileError::NotFound);
-    }
-    Ok(())
 }
 
 pub async fn assign_group(
@@ -767,19 +657,6 @@ pub async fn can_view(pool: &SqlitePool, viewer: i64, profile: &Profile) -> Resu
     })
 }
 
-/// How many members of `guild` (that used the bot) have this character.
-#[allow(dead_code)] // used by the tier/collage styles and the character counters
-pub async fn server_favourite_count(pool: &SqlitePool, guild: i64, character: i64) -> Result<i64> {
-    Ok(sqlx::query_scalar(
-        "SELECT count(*) FROM profile_characters pc JOIN user_guilds ug ON ug.user_id = pc.user_id \
-         WHERE ug.guild_id = ?1 AND pc.character_id = ?2",
-    )
-    .bind(guild)
-    .bind(character)
-    .fetch_one(pool)
-    .await?)
-}
-
 /// Most favourited characters, per guild or global: `(character_id, count)`.
 pub async fn top_characters(
     pool: &SqlitePool,
@@ -815,29 +692,6 @@ pub async fn top_character_count(pool: &SqlitePool, guild: Option<i64>) -> Resul
     .await?)
 }
 
-/// Character ids both users have, in `a`'s order.
-pub async fn shared_characters(pool: &SqlitePool, a: i64, b: i64) -> Result<Vec<i64>> {
-    Ok(sqlx::query_scalar(
-        "SELECT x.character_id FROM profile_characters x JOIN profile_characters y \
-         ON x.character_id = y.character_id WHERE x.user_id = ?1 AND y.user_id = ?2 ORDER BY x.position",
-    )
-    .bind(a)
-    .bind(b)
-    .fetch_all(pool)
-    .await?)
-}
-
-/// Overlap as a percentage of the smaller profile (Szymkiewicz-Simpson).
-pub fn compatibility(shared: usize, a_total: usize, b_total: usize) -> u32 {
-    let smaller = a_total.min(b_total);
-    if smaller == 0 {
-        return 0;
-    }
-    ((shared as f64 / smaller as f64) * 100.0)
-        .round()
-        .min(100.0) as u32
-}
-
 /// Everything stored about a user: profile (characters, works, groups), custom images, scores,
 /// hidden recommendations, report/ban records and guild links. Irreversible.
 pub async fn delete_user_data(pool: &SqlitePool, user: i64) -> Result<()> {
@@ -852,7 +706,6 @@ pub async fn delete_user_data(pool: &SqlitePool, user: i64) -> Result<()> {
         "DELETE FROM upload_bans WHERE user_id = ?1",
         "DELETE FROM game_scores WHERE user_id = ?1",
         "DELETE FROM hidden_recommendations WHERE user_id = ?1",
-        "DELETE FROM alert_requests WHERE user_id = ?1",
         "DELETE FROM user_guilds WHERE user_id = ?1",
         "DELETE FROM users WHERE discord_id = ?1",
     ] {
@@ -879,7 +732,6 @@ pub struct ExportDoc {
     pub accent_color: Option<u32>,
     pub quote: Option<String>,
     pub banner: Option<String>,
-    pub default_style: String,
     pub privacy: String,
     pub groups: Vec<String>,
     pub characters: Vec<ExportChar>,
@@ -908,7 +760,6 @@ pub async fn export(pool: &SqlitePool, user: i64) -> Result<ExportDoc> {
         accent_color: p.accent_color.map(|c| c as u32),
         quote: p.quote,
         banner: p.banner,
-        default_style: p.default_style,
         privacy: p.privacy,
         groups: groups.iter().map(|g| g.name.clone()).collect(),
         characters: rows
@@ -933,12 +784,7 @@ pub struct ImportReport {
 
 /// Validates and merges a document into the user's profile. Characters are added without cached
 /// metadata, so they stay hidden until verified safe (see `Entry::visible`).
-pub async fn import(
-    pool: &SqlitePool,
-    user: i64,
-    doc: &ExportDoc,
-    allowed_styles: &[&str],
-) -> Result<ImportReport> {
+pub async fn import(pool: &SqlitePool, user: i64, doc: &ExportDoc) -> Result<ImportReport> {
     if !(1..=2).contains(&doc.version) {
         return Err(ProfileError::Invalid("unsupported version"));
     }
@@ -951,11 +797,11 @@ pub async fn import(
     set_bio(pool, user, doc.bio.as_deref()).await?;
     set_quote(pool, user, doc.quote.as_deref()).await?;
     set_color(pool, user, doc.accent_color.filter(|c| *c <= 0xFF_FFFF)).await?;
-    if let Some(b) = doc.banner.as_deref().filter(|b| b.starts_with("https://")) {
+    // Ready-made, colour and https banners travel; an uploaded picture belongs to the exporting account.
+    if let Some(b) = doc.banner.as_deref().filter(|b| {
+        b.starts_with("https://") || b.starts_with("preset:") || b.starts_with("color:")
+    }) {
         set_banner(pool, user, Some(b)).await?;
-    }
-    if allowed_styles.contains(&doc.default_style.as_str()) {
-        set_style(pool, user, &doc.default_style).await?;
     }
     if let Some(p) = Privacy::parse(&doc.privacy) {
         set_privacy(pool, user, p).await?;
@@ -996,24 +842,27 @@ pub async fn import(
     Ok(report)
 }
 
-/// Overlap of characters and works as one percentage (characters weigh 60%, works 40%; an empty side
-/// does not count).
-pub fn combined_compatibility(
-    shared_c: usize,
-    a_c: usize,
-    b_c: usize,
-    shared_w: usize,
-    a_w: usize,
-    b_w: usize,
-) -> u32 {
-    let c = (a_c.min(b_c) > 0).then(|| compatibility(shared_c, a_c, b_c));
-    let w = (a_w.min(b_w) > 0).then(|| compatibility(shared_w, a_w, b_w));
-    match (c, w) {
-        (Some(c), Some(w)) => ((f64::from(c) * 0.6) + (f64::from(w) * 0.4)).round() as u32,
-        (Some(x), None) | (None, Some(x)) => x,
-        (None, None) => 0,
-    }
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+pub async fn has_character(pool: &SqlitePool, user: i64, character: i64) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM profile_characters WHERE user_id = ?1 AND character_id = ?2",
+    )
+    .bind(user)
+    .bind(character)
+    .fetch_one(pool)
+    .await?
+        > 0)
 }
 
 #[cfg(test)]
-mod tests;
+pub async fn all_character_ids(pool: &SqlitePool, user: i64) -> Result<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT character_id FROM profile_characters WHERE user_id = ?1 ORDER BY position",
+    )
+    .bind(user)
+    .fetch_all(pool)
+    .await?)
+}

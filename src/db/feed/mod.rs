@@ -1,7 +1,4 @@
-//! Airing feed configuration, notification list, member requests, dedupe and digest queue.
-//! (Data-layer functions for groups, tiers, notes, lists and compatibility stay with the schema, even though
-//! no command uses them any more.)
-#![allow(dead_code)]
+//! Notification feed configuration and the per-server dedupe of posted episodes.
 
 use sqlx::{Row, SqlitePool};
 
@@ -16,14 +13,10 @@ pub struct FeedConfig {
     pub enabled: bool,
     pub min_popularity: i64,
     pub formats: Vec<String>,
-    pub excluded_genres: Vec<String>,
-    pub digest_hours: i64,
-    pub daily_cap: i64,
     pub role_id: Option<i64>,
     pub filter: FilterMode,
     /// Work kinds that may be announced (anime, manga, manhwa, manhua, novel).
     pub kinds: Vec<String>,
-    pub last_digest_at: i64,
 }
 
 /// What the notification feed announces.
@@ -76,13 +69,9 @@ fn from_row(r: &sqlx::sqlite::SqliteRow) -> FeedConfig {
         enabled: r.get("enabled"),
         min_popularity: r.get("min_popularity"),
         formats: split_csv(&r.get::<String, _>("formats")),
-        excluded_genres: split_csv(&r.get::<String, _>("excluded_genres")),
-        digest_hours: r.get("digest_hours"),
-        daily_cap: r.get("daily_cap"),
         role_id: r.get("role_id"),
         filter: FilterMode::parse(&r.get::<String, _>("filter_mode")).unwrap_or(FilterMode::All),
         kinds: split_csv(&r.get::<String, _>("kinds")),
-        last_digest_at: r.get("last_digest_at"),
     }
 }
 
@@ -182,57 +171,21 @@ pub async fn set_formats(pool: &SqlitePool, guild: i64, formats: &[String]) -> R
         .collect();
     set(pool, guild, "formats", clean.join(",")).await
 }
-pub async fn set_excluded_genres(pool: &SqlitePool, guild: i64, genres: &[String]) -> Result<()> {
-    set(pool, guild, "excluded_genres", genres.join(",")).await
-}
-pub async fn set_digest_hours(pool: &SqlitePool, guild: i64, hours: i64) -> Result<()> {
-    set(pool, guild, "digest_hours", hours.clamp(0, 72)).await
-}
-pub async fn set_daily_cap(pool: &SqlitePool, guild: i64, cap: i64) -> Result<()> {
-    set(pool, guild, "daily_cap", cap.max(0)).await
-}
 pub async fn set_role(pool: &SqlitePool, guild: i64, role: Option<i64>) -> Result<()> {
     set(pool, guild, "role_id", role).await
 }
-pub async fn set_last_digest(pool: &SqlitePool, guild: i64, at: i64) -> Result<()> {
-    set(pool, guild, "last_digest_at", at).await
-}
-
-pub async fn set_birthday_channel(pool: &SqlitePool, guild: i64, channel: i64) -> Result<()> {
-    sqlx::query("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?1)")
-        .bind(guild)
-        .execute(pool)
-        .await?;
-    sqlx::query("UPDATE guild_settings SET birthday_channel = ?2 WHERE guild_id = ?1")
-        .bind(guild)
-        .bind(channel)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-pub async fn set_birthdays_enabled(pool: &SqlitePool, guild: i64, on: bool) -> Result<()> {
-    sqlx::query("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?1)")
-        .bind(guild)
-        .execute(pool)
-        .await?;
-    sqlx::query("UPDATE guild_settings SET birthday_channel_enabled = ?2 WHERE guild_id = ?1")
-        .bind(guild)
-        .bind(on)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Servers that want the daily birthday post: `(guild_id, channel_id)`.
-pub async fn birthday_targets(pool: &SqlitePool) -> Result<Vec<(i64, i64)>> {
-    let rows = sqlx::query("SELECT guild_id, birthday_channel FROM guild_settings WHERE birthday_channel_enabled = 1 AND birthday_channel IS NOT NULL")
-        .fetch_all(pool)
-        .await?;
-    Ok(rows
-        .iter()
-        .map(|r| (r.get("guild_id"), r.get("birthday_channel")))
-        .collect())
+/// Channels where a reminder may be pinged when the member's DMs are closed: servers the member shares with the
+/// bot that switched `reminder_ping` on and have a notifications channel.
+pub async fn reminder_fallback_channels(pool: &SqlitePool, user: i64) -> Result<Vec<(i64, i64)>> {
+    sqlx::query_as(
+        "SELECT f.guild_id, f.channel_id FROM user_guilds ug \
+         JOIN guild_settings s ON s.guild_id = ug.guild_id AND s.reminder_ping = 1 \
+         JOIN guild_feed f ON f.guild_id = ug.guild_id AND f.channel_id IS NOT NULL \
+         WHERE ug.user_id = ?1 ORDER BY f.guild_id",
+    )
+    .bind(user)
+    .fetch_all(pool)
+    .await
 }
 
 // ---- dedupe, cap and digest ---------------------------------------------------------------
@@ -269,16 +222,6 @@ pub async fn mark_posted(
     Ok(())
 }
 
-pub async fn posted_since(pool: &SqlitePool, guild: i64, since: i64) -> Result<i64> {
-    sqlx::query_scalar(
-        "SELECT count(*) FROM posted_episodes WHERE guild_id = ?1 AND posted_at >= ?2",
-    )
-    .bind(guild)
-    .bind(since)
-    .fetch_one(pool)
-    .await
-}
-
 /// Forget posted rows older than `before` so the table stays small.
 pub async fn prune_posted(pool: &SqlitePool, before: i64) -> Result<u64> {
     Ok(
@@ -288,48 +231,6 @@ pub async fn prune_posted(pool: &SqlitePool, before: i64) -> Result<u64> {
             .await?
             .rows_affected(),
     )
-}
-
-pub async fn enqueue_digest(
-    pool: &SqlitePool,
-    guild: i64,
-    work: i64,
-    episode: i64,
-    title: &str,
-    airing_at: i64,
-) -> Result<()> {
-    sqlx::query("INSERT OR IGNORE INTO digest_queue (guild_id, work_id, episode, title, airing_at) VALUES (?1, ?2, ?3, ?4, ?5)")
-        .bind(guild)
-        .bind(work)
-        .bind(episode)
-        .bind(title)
-        .bind(airing_at)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Take (and clear) the queued digest entries: `(work_id, episode, title, airing_at)`.
-pub async fn drain_digest(pool: &SqlitePool, guild: i64) -> Result<Vec<(i64, i64, String, i64)>> {
-    let rows = sqlx::query("SELECT work_id, episode, title, airing_at FROM digest_queue WHERE guild_id = ?1 ORDER BY airing_at")
-        .bind(guild)
-        .fetch_all(pool)
-        .await?;
-    sqlx::query("DELETE FROM digest_queue WHERE guild_id = ?1")
-        .bind(guild)
-        .execute(pool)
-        .await?;
-    Ok(rows
-        .iter()
-        .map(|r| {
-            (
-                r.get("work_id"),
-                r.get("episode"),
-                r.get("title"),
-                r.get("airing_at"),
-            )
-        })
-        .collect())
 }
 
 pub async fn last_checked(pool: &SqlitePool) -> Result<i64> {

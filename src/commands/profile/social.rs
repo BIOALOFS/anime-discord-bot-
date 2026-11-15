@@ -59,7 +59,7 @@ pub(super) async fn import(ctx: Context<'_>, file: serenity::Attachment) -> Resu
     let Some(doc) = bytes.and_then(|b| parse_export(&b)) else {
         return private_reply(ctx, i18n::IMPORT_BAD_FILE).await;
     };
-    match db::import(&pool(ctx), uid(ctx), &doc, &["cards"]).await {
+    match db::import(&pool(ctx), uid(ctx), &doc).await {
         Ok(r) => private_reply(ctx, i18n::import_report(r.added, r.duplicates, r.invalid)).await,
         Err(db::ProfileError::Invalid(_)) => private_reply(ctx, i18n::IMPORT_BAD_FILE).await,
         Err(e) => Err(e.into()),

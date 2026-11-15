@@ -146,11 +146,10 @@ async fn upload_gate(ctx: Context<'_>) -> Result<Option<i64>, Error> {
     Ok(Some(guild))
 }
 
-/// Download an attachment (Discord's CDN only), validate and re-encode it. GIFs are refused unless `allow_gif`.
+/// Download an attachment (Discord's CDN only), validate and re-encode it. PNG, JPG, WebP and GIF are accepted.
 pub(super) async fn take_upload(
     ctx: Context<'_>,
     att: &serenity::Attachment,
-    allow_gif: bool,
 ) -> Result<Option<imaging::Processed>, Error> {
     let user = uid(ctx);
     if att.size as usize > imaging::MAX_BYTES || !discord_cdn(&att.url) {
@@ -170,16 +169,8 @@ pub(super) async fn take_upload(
         private_reply(ctx, i18n::IMAGE_DOWNLOAD_FAILED).await?;
         return Ok(None);
     };
-    if !imaging::format_allowed(&bytes, allow_gif) {
-        private_reply(
-            ctx,
-            if allow_gif {
-                i18n::IMAGE_INVALID
-            } else {
-                i18n::BANNER_NO_GIF
-            },
-        )
-        .await?;
+    if !imaging::is_supported(&bytes) {
+        private_reply(ctx, i18n::IMAGE_INVALID).await?;
         return Ok(None);
     }
     match tokio::task::spawn_blocking(move || imaging::process(&bytes)).await {
@@ -224,7 +215,7 @@ pub(super) async fn character_image(
     let Some((character, name)) = own_or_reply(ctx, value).await? else {
         return Ok(());
     };
-    let Some(processed) = take_upload(ctx, &att, true).await? else {
+    let Some(processed) = take_upload(ctx, &att).await? else {
         return Ok(());
     };
     let new = new_image(processed);
@@ -236,7 +227,7 @@ pub(super) async fn character_image(
     private_reply(ctx, i18n::custom_image_saved(&name, new.animated)).await
 }
 
-/// Profile banner from an uploaded picture (PNG/JPG/WebP, never a GIF). Stored as a custom image of the caller.
+/// Profile banner from an uploaded picture or GIF (same rules as character images). Stored as a custom image of the caller.
 pub(super) async fn banner_image(
     ctx: Context<'_>,
     image: serenity::Attachment,
@@ -249,7 +240,7 @@ pub(super) async fn banner_image(
     if require_own(ctx).await?.is_none() {
         return Ok(());
     }
-    let Some(processed) = take_upload(ctx, &image, false).await? else {
+    let Some(processed) = take_upload(ctx, &image).await? else {
         return Ok(());
     };
     let id = match custom::store_image(

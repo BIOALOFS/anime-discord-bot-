@@ -76,17 +76,56 @@ pub async fn set_cooldown_secs(pool: &SqlitePool, guild: i64, secs: i64) -> Resu
     Ok(())
 }
 
+/// How many suggestions one member may add per day in this server (0 = unlimited).
+pub async fn suggest_limit(pool: &SqlitePool, guild: i64) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT suggest_daily_limit FROM guild_settings WHERE guild_id = ?1",
+    )
+    .bind(guild)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(crate::db::suggest::DEFAULT_DAILY_LIMIT))
+}
+
+pub async fn set_suggest_limit(pool: &SqlitePool, guild: i64, limit: i64) -> Result<()> {
+    ensure(pool, guild).await?;
+    sqlx::query("UPDATE guild_settings SET suggest_daily_limit = ?2 WHERE guild_id = ?1")
+        .bind(guild)
+        .bind(limit.clamp(0, 1000))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// May a reminder fall back to a ping in the notifications channel when the member's DMs are closed? (default: no)
+pub async fn reminder_ping(pool: &SqlitePool, guild: i64) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT reminder_ping FROM guild_settings WHERE guild_id = ?1",
+    )
+    .bind(guild)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false))
+}
+
+pub async fn set_reminder_ping(pool: &SqlitePool, guild: i64, on: bool) -> Result<()> {
+    ensure(pool, guild).await?;
+    sqlx::query("UPDATE guild_settings SET reminder_ping = ?2 WHERE guild_id = ?1")
+        .bind(guild)
+        .bind(on)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Forget everything the bot stores about one server. Members' global profiles are untouched.
 pub async fn reset_guild(pool: &SqlitePool, guild: i64) -> Result<()> {
     let mut tx = pool.begin().await?;
     for sql in [
         "DELETE FROM guild_settings WHERE guild_id = ?1",
-        "DELETE FROM guild_extra_channels WHERE guild_id = ?1",
         "DELETE FROM guild_feed WHERE guild_id = ?1",
         "DELETE FROM posted_episodes WHERE guild_id = ?1",
-        "DELETE FROM digest_queue WHERE guild_id = ?1",
-        "DELETE FROM alert_list WHERE guild_id = ?1",
-        "DELETE FROM alert_requests WHERE guild_id = ?1",
+        "DELETE FROM suggestions WHERE guild_id = ?1",
         "DELETE FROM user_guilds WHERE guild_id = ?1",
         "DELETE FROM upload_bans WHERE guild_id = ?1",
         "DELETE FROM game_scores WHERE guild_id = ?1",
@@ -107,6 +146,19 @@ mod tests {
         assert!(!upload_admins_only(&pool, 1).await.expect("read"));
         assert_eq!(manager_role(&pool, 1).await.expect("read"), None);
         assert_eq!(cooldown_secs(&pool, 1).await.expect("read"), 0);
+        assert_eq!(
+            suggest_limit(&pool, 1).await.expect("read"),
+            10,
+            "10 suggestions a day by default"
+        );
+        assert!(
+            !reminder_ping(&pool, 1).await.expect("read"),
+            "channel pings are off until the server allows them"
+        );
+        set_suggest_limit(&pool, 1, 5).await.expect("set");
+        set_reminder_ping(&pool, 1, true).await.expect("set");
+        assert_eq!(suggest_limit(&pool, 1).await.expect("read"), 5);
+        assert!(reminder_ping(&pool, 1).await.expect("read"));
         set_upload_admins_only(&pool, 1, true).await.expect("set");
         set_manager_role(&pool, 1, Some(77)).await.expect("set");
         set_cooldown_secs(&pool, 1, 9_999).await.expect("set");

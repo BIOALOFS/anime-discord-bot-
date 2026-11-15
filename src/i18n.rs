@@ -68,7 +68,6 @@ pub const RANDOM_FAILED: &str = "لم أجد نتيجة مناسبة بعد عد
 
 // ---- profiles ----
 pub const PROFILE_TITLE: &str = "بروفايل";
-pub const PROFILE_NONE_SELF: &str = "ليس لديك بروفايل بعد، أنشئه بالأمر `/profile create`.";
 pub const PROFILE_NONE_OTHER: &str = "هذا المستخدم ليس لديه بروفايل.";
 pub const PROFILE_PRIVATE: &str = "هذا البروفايل غير متاح لك.";
 pub const PROFILE_EMPTY: &str = "لا توجد شخصيات في هذا البروفايل بعد.";
@@ -102,9 +101,6 @@ pub fn import_report(added: usize, dups: usize, invalid: usize) -> String {
 }
 pub const SCOPE_SERVER: &str = "السيرفر";
 pub const SCOPE_GLOBAL: &str = "عالميًا";
-pub fn profile_stats(characters: i64, works: i64, privacy: &str) -> String {
-    format!("{characters} شخصية · {works} عمل · الخصوصية: {privacy}")
-}
 pub fn privacy_ar(p: &str) -> &'static str {
     match p {
         "public" => "عام",
@@ -122,7 +118,6 @@ pub const NO_DESCRIPTION: &str = "لا يوجد وصف متاح لهذه الش�
 
 // ---- work roster ----
 pub const BTN_ROSTER: &str = "شخصيات العمل";
-pub const BTN_BACK_TO_LIST: &str = "رجوع للقائمة";
 pub const ROSTER_TITLE: &str = "شخصيات";
 pub const ROSTER_PICK_WORK: &str = "هذه الشخصية تظهر في عدة أعمال، اختر العمل:";
 pub const ROSTER_WORK_PLACEHOLDER: &str = "اختر العمل…";
@@ -167,11 +162,8 @@ pub const BADGE_COLLECTOR: &str = "🏅 جامع";
 pub const BADGE_GAMER: &str = "🎮 لاعب";
 pub const BADGE_WATCHER: &str = "📺 متابع وفيّ";
 pub const SELECT_ITEM_PLACEHOLDER: &str = "افتح عنصرًا…";
-pub const BTN_SECTION_WORKS: &str = "🎬 الأعمال";
-pub const BTN_SECTION_CHARACTERS: &str = "👤 الشخصيات";
-pub const BTN_REPORT: &str = "إبلاغ";
-pub const REPORT_SENT: &str = "🚩 تم إرسال البلاغ للمشرفين.";
-pub const REPORT_ALREADY: &str = "أبلغتَ عن هذه الصورة من قبل.";
+pub const BTN_SECTION_WORKS: &str = "أعمال";
+pub const BTN_SECTION_CHARACTERS: &str = "شخصيات";
 // ---- works / customization / lists ----
 pub const WORK_AMBIGUOUS: &str = "وجدت عدة أعمال، اختر واحدًا من الاقتراحات المنسدلة:";
 pub const WORK_ALREADY: &str = "هذا العمل موجود بالفعل في بروفايلك.";
@@ -248,8 +240,6 @@ pub const GAME_PICK_MODE: &str = "اختر نوع اللعبة من الاقتر
 pub const VERSUS_PROMPT: &str = "أيهما تفضّل؟";
 pub const VERSUS_RESULTS: &str = "نتائج التصويت حتى الآن:";
 pub const LEADERBOARD_TITLE: &str = "ترتيب الألعاب";
-pub const FEED_DIGEST_TITLE: &str = "ملخص الحلقات الجديدة 📺";
-pub const BIRTHDAYS_TITLE: &str = "🎂 أعياد ميلاد اليوم";
 pub const BTN_WATCH: &str = "مشاهدة";
 pub const F_YEAR: &str = "السنة";
 pub const WORKS_PICK_PLACEHOLDER: &str = "افتح عملًا…";
@@ -284,9 +274,7 @@ pub const LANGUAGE_SET: &str = "✅ تم حفظ اللغة: العربية.";
 pub const LANGUAGE_SET_EN: &str = "✅ Language saved. The bot's texts are currently Arabic only.";
 pub const LANGUAGE_UNKNOWN: &str = "اللغة غير معروفة. اختر من القائمة.";
 pub const SETTINGS_UNKNOWN: &str = "إعداد غير معروف. اختر اللغة أو الخصوصية.";
-pub const EDIT_HINT: &str = "للتعديل: /edit";
 pub const UPLOAD_ADMINS_ONLY: &str = "رفع الصور المخصصة في هذا السيرفر للمشرفين فقط.";
-pub const BANNER_NO_GIF: &str = "الغلاف يقبل PNG أو JPG أو WebP فقط (بدون GIF).";
 pub const BANNER_PRESET_SET: &str = "✅ تم تغيير الغلاف.";
 pub const BANNER_RESET: &str = "✅ عاد الغلاف إلى الافتراضي.";
 pub const BANNER_UNKNOWN: &str =
@@ -298,3 +286,56 @@ pub const TITLE_TOO_LONG: &str = "الاسم أطول من 40 حرفًا.";
 pub const EDIT_NEEDS_CHARACTER: &str = "اختر شخصية من بروفايلك في خيار «الشخصية».";
 pub const EDIT_NEEDS_WORK: &str = "اختر عملًا من أعمالك في خيار «القيمة».";
 pub const CAST_PLACEHOLDER: &str = "اختر شخصية لعرض بطاقتها…";
+pub const PAGE_WORD: &str = "الصفحة";
+pub const PAGES_PREV_GROUP: &str = "◀ مجموعة الصفحات السابقة";
+pub const PAGES_NEXT_GROUP: &str = "مجموعة الصفحات التالية ▶";
+pub const SELECT_PAGE_PLACEHOLDER: &str = "انتقل إلى صفحة…";
+pub const F_PROFILE_CHARACTERS: &str = "الشخصيات";
+pub const F_PROFILE_WORKS: &str = "الأعمال";
+pub const F_PROFILE_PRIVACY: &str = "الخصوصية";
+pub const F_PROFILE_JOINED: &str = "انضم";
+pub const F_PROFILE_SUGGESTIONS: &str = "الاقتراحات";
+pub const F_PROFILE_BADGES: &str = "الأوسمة";
+pub const BANNER_PICKER_TITLE: &str = "🎨 اختر غلافًا جاهزًا";
+pub const BANNER_PICKER_HELP: &str = "اختر من القائمة لترى المعاينة ثم اضغط «تطبيق».\nلرفع صورتك أو GIF: `/edit` ← البروفايل ← الغلاف وأرفق الملف (إن سمح السيرفر بالصور المخصصة). للون: اكتب `#ff8800` في القيمة.";
+pub const BANNER_PICKER_PLACEHOLDER: &str = "الأغلفة الجاهزة…";
+pub const BANNER_APPLY: &str = "تطبيق";
+pub const BANNER_RESET_BTN: &str = "إعادة للافتراضي";
+pub const BTN_REMOVE_FROM_PROFILE: &str = "إزالة من بروفايلي";
+pub const CHARACTER_REMOVED: &str = "تمت إزالة الشخصية من بروفايلك.";
+pub const SUGGESTED_BY: &str = "اقترحه";
+pub const SUGGEST_ADDED: &str = "✅ تمت إضافة الاقتراح";
+pub const SUGGEST_REASON_LONG: &str = "السبب أطول من 300 حرف.";
+pub const SUGGEST_REASON_BAD: &str =
+    "اكتب سببًا نصيًا (الروابط والإشارات والكلمات غير المناسبة تُحذف).";
+pub const SUGGEST_SAME: &str = "اختر عملين مختلفين.";
+pub const SUGGEST_NONE: &str =
+    "لا توجد اقتراحات في هذا السيرفر بعد. أضف أول اقتراح بـ `/suggest add`.";
+pub const SUGGEST_NONE_MINE: &str = "ليس لديك اقتراحات في هذا السيرفر.";
+pub const SUGGEST_ANOTHER: &str = "اقتراح آخر";
+pub const SUGGEST_DELETED: &str = "🗑 تم حذف الاقتراح.";
+pub const SUGGEST_CANNOT_DELETE: &str = "لا يمكنك حذف هذا الاقتراح.";
+pub const SUGGEST_MINE_TITLE: &str = "اقتراحاتي";
+pub const SUGGEST_DELETE_PLACEHOLDER: &str = "اختر اقتراحًا لحذفه…";
+pub const BTN_DELETE: &str = "حذف";
+pub fn suggest_exists(author: i64) -> String {
+    format!("هذا الاقتراح موجود بالفعل، أضافه <@{author}>.")
+}
+pub fn suggest_limit(limit: i64) -> String {
+    format!("وصلت إلى الحد اليومي ({limit} اقتراحات في اليوم). حاول غدًا.")
+}
+pub const REMINDER_DM: &str = "🔔 تذكير: صدرت حلقة جديدة من عمل طلبتَ التذكير به.";
+pub const BTN_REMIND: &str = "ذكّرني";
+pub const BTN_REMINDER_CANCEL: &str = "إلغاء التذكير";
+pub const REMINDER_SET: &str = "🔔 سأذكّرك عند صدور حلقة جديدة (رسالة خاصة).";
+pub const REMINDER_CANCELLED: &str = "🔕 أُلغي التذكير.";
+pub const REMINDER_FULL: &str = "وصلت إلى الحد الأقصى للتذكيرات (50). احذف بعضها من /settings.";
+pub const REMINDERS_TITLE: &str = "تذكيراتي";
+pub const REMINDERS_NONE: &str = "ليس لديك تذكيرات. استخدم زر «ذكّرني» على بطاقة أنمي.";
+pub const REMINDERS_PLACEHOLDER: &str = "اختر تذكيرًا لإلغائه…";
+pub fn current_language(label: &str) -> String {
+    format!("اللغة الحالية: **{label}**. اختر قيمة لتغييرها.")
+}
+pub fn current_privacy(label: &str) -> String {
+    format!("الخصوصية الحالية: **{label}**. اختر قيمة لتغييرها.")
+}

@@ -141,6 +141,19 @@ impl Igdb {
         Ok(rank(parse_games(&doc, allow_mature), 10))
     }
 
+    pub async fn game_by_id(
+        &self,
+        id: i64,
+        allow_mature: bool,
+    ) -> Result<Option<Work>, ProviderError> {
+        let body = format!("fields {GAME_FIELDS}; where id = {id}; limit 1;");
+        let doc = self.query("games", body).await?;
+        Ok(parse_games(&doc, allow_mature)
+            .into_iter()
+            .next()
+            .map(|(w, _)| w))
+    }
+
     pub async fn search_characters(
         &self,
         query: &str,

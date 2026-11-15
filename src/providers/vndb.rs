@@ -66,6 +66,16 @@ impl Vndb {
         Ok(out)
     }
 
+    pub async fn vn_by_id(&self, id: &str) -> Result<Option<Work>, ProviderError> {
+        let doc = self
+            .post(
+                "vn",
+                json!({"filters": ["id", "=", id], "fields": VN_FIELDS, "results": 1}),
+            )
+            .await?;
+        Ok(parse_vns(&doc).into_iter().next())
+    }
+
     pub async fn search_characters(&self, query: &str) -> Result<Vec<Work>, ProviderError> {
         let doc = self
             .post(

@@ -10,13 +10,9 @@ fn cfg() -> FeedConfig {
         enabled: true,
         min_popularity: 1500,
         formats: vec!["TV".into(), "TV_SHORT".into(), "ONA".into(), "MOVIE".into()],
-        excluded_genres: vec!["Ecchi".into()],
-        digest_hours: 0,
-        daily_cap: 0,
         role_id: None,
         filter: FilterMode::All,
         kinds: vec!["anime".into(), "manga".into()],
-        last_digest_at: 0,
     }
 }
 
@@ -30,7 +26,7 @@ fn entry(at: i64, pop: i64, format: &str, genres: &[&str]) -> AiringEntry {
 }
 
 fn due(c: &FeedConfig, e: &AiringEntry) -> Decision {
-    decide(e, c, NOW, false, false, 0)
+    decide(e, c, NOW, false, false)
 }
 
 #[test]
@@ -66,7 +62,7 @@ fn restart_catch_up_is_limited_to_six_hours() {
 fn already_posted_episodes_are_never_repeated() {
     let c = cfg();
     assert_eq!(
-        decide(&entry(NOW - 10, 9999, "TV", &[]), &c, NOW, false, true, 0),
+        decide(&entry(NOW - 10, 9999, "TV", &[]), &c, NOW, false, true),
         Decision::Skip(Skip::AlreadyPosted)
     );
 }
@@ -101,10 +97,10 @@ fn profiles_mode_needs_a_member_favourite() {
     let c = with(FilterMode::Profiles);
     let e = entry(NOW - 10, 99_999, "TV", &[]);
     assert_eq!(
-        decide(&e, &c, NOW, false, false, 0),
+        decide(&e, &c, NOW, false, false),
         Decision::Skip(Skip::NotInProfiles)
     );
-    assert_eq!(decide(&e, &c, NOW, true, false, 0), Decision::Post);
+    assert_eq!(decide(&e, &c, NOW, true, false), Decision::Post);
 }
 
 #[test]
@@ -129,31 +125,6 @@ fn formats_mode_checks_the_selected_formats_and_kinds() {
         due(&c, &entry(NOW - 10, 1, "MOVIE", &[])),
         Decision::Skip(Skip::WrongKind)
     );
-}
-
-#[test]
-fn excluded_genres_apply_in_every_mode() {
-    let c = cfg();
-    assert_eq!(
-        due(&c, &entry(NOW - 10, 9999, "TV", &["Action", "ecchi"])),
-        Decision::Skip(Skip::ExcludedGenre),
-        "case-insensitive"
-    );
-}
-
-#[test]
-fn daily_cap_and_digest() {
-    let mut c = cfg();
-    c.daily_cap = 3;
-    let e = entry(NOW - 10, 5000, "TV", &[]);
-    assert_eq!(decide(&e, &c, NOW, false, false, 2), Decision::Post);
-    assert_eq!(
-        decide(&e, &c, NOW, false, false, 3),
-        Decision::Skip(Skip::DailyCap)
-    );
-    c.daily_cap = 0;
-    c.digest_hours = 6;
-    assert_eq!(decide(&e, &c, NOW, false, false, 0), Decision::Digest);
 }
 
 #[test]
@@ -183,16 +154,6 @@ fn poll_window_math() {
 }
 
 #[test]
-fn day_start_and_digest_timing() {
-    assert_eq!(day_start(86_400 * 3 + 5), 86_400 * 3);
-    assert_eq!(day_start(86_400 * 3), 86_400 * 3);
-    assert!(digest_due(6, NOW - 6 * 3600, NOW, 1));
-    assert!(!digest_due(6, NOW - 6 * 3600 + 1, NOW, 1));
-    assert!(!digest_due(6, 0, NOW, 0), "nothing queued, nothing to send");
-    assert!(!digest_due(0, 0, NOW, 5), "digest mode off");
-}
-
-#[test]
 fn embeds_show_episode_time_cover_and_streaming_link() {
     let m: Media = serde_json::from_value(json!({
         "id": 10, "title": {"romaji": "Shingeki", "english": "Attack"}, "averageScore": 85, "genres": ["Action", "Drama"],
@@ -216,11 +177,6 @@ fn embeds_show_episode_time_cover_and_streaming_link() {
         Some("https://stream.example/a"),
         "only streaming links are offered"
     );
-    let digest = digest_embed(&[(10, 7, "Shingeki".into(), 1_800_000_000)]);
-    assert!(digest
-        .description
-        .as_deref()
-        .is_some_and(|d| d.contains("anilist.co/anime/10")));
 }
 
 #[test]
@@ -233,5 +189,56 @@ fn skipped_adult_media_never_reaches_the_decision() {
         due(&c, &e),
         Decision::Post,
         "filtering happens in SafeAniList::airing_between (tested there)"
+    );
+}
+
+#[test]
+fn reminders_notify_each_release_once_in_episode_order() {
+    use crate::db::reminders::Reminder;
+    let mut e5 = entry(NOW - 60, 100, "TV", &[]);
+    e5.episode = 5;
+    let mut e6 = entry(NOW - 30, 100, "TV", &[]);
+    e6.episode = 6;
+    let by_work = std::collections::HashMap::from([(
+        10,
+        vec![
+            Reminder {
+                user_id: 1,
+                work_id: 10,
+                title: "Show".into(),
+                last_episode: 4,
+            },
+            Reminder {
+                user_id: 2,
+                work_id: 10,
+                title: "Show".into(),
+                last_episode: 5,
+            },
+            Reminder {
+                user_id: 3,
+                work_id: 10,
+                title: "Show".into(),
+                last_episode: 6,
+            },
+        ],
+    )]);
+    // Given in reverse order on purpose.
+    let owed = reminders_owed(&[&e6, &e5], &by_work);
+    assert_eq!(owed.len(), 3);
+    assert!(
+        owed.contains(&(1, 10, 5)) && owed.contains(&(1, 10, 6)),
+        "a member who missed ep 5 hears about both"
+    );
+    assert!(
+        owed.contains(&(2, 10, 6)) && !owed.contains(&(2, 10, 5)),
+        "ep 5 was already announced"
+    );
+    assert!(
+        !owed.iter().any(|o| o.0 == 3),
+        "nothing newer than what user 3 already got"
+    );
+    assert!(
+        reminders_owed(&[&e5], &std::collections::HashMap::new()).is_empty(),
+        "no reminders, nothing owed"
     );
 }

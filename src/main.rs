@@ -159,6 +159,7 @@ fn commands_with_cooldown(secs: u64) -> Vec<Command> {
         commands::random::random(),
         commands::top::top(),
         commands::recommend::recommend(),
+        commands::suggest::suggest(),
         commands::game::game(),
         commands::settings::settings(),
         commands::help::help(),
@@ -263,6 +264,10 @@ mod tests {
             "random",
             "top",
             "recommend",
+            "suggest",
+            "suggest add",
+            "suggest random",
+            "suggest mine",
             "game",
             "settings",
             "help",
@@ -276,6 +281,41 @@ mod tests {
         );
         // Must serialise for Discord without panicking.
         assert!(!poise::builtins::create_application_commands(&cmds).is_empty());
+    }
+
+    /// Names of the top-level registered commands.
+    fn top_level_names() -> Vec<String> {
+        commands_with_cooldown(3)
+            .iter()
+            .map(|c| c.name.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn help_lists_exactly_the_registered_commands() {
+        let help: String = commands::help::CATEGORIES.iter().map(|c| c.body).collect();
+        let registered = top_level_names();
+        for name in &registered {
+            assert!(
+                help.contains(&format!("/{name}")),
+                "/{name} is registered but not explained in /help"
+            );
+        }
+        // Every `/word` the help mentions as a command must be registered (options like `/edit` are commands too).
+        let mut rest = help.as_str();
+        while let Some(i) = rest.find("`/") {
+            rest = &rest[i + 2..];
+            let word: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                .collect();
+            if !word.is_empty() {
+                assert!(
+                    registered.contains(&word),
+                    "/help mentions /{word}, which is not a registered command"
+                );
+            }
+        }
     }
 
     #[test]

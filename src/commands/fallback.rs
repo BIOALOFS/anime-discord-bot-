@@ -38,10 +38,14 @@ pub async fn game_flags(ctx: Context<'_>) -> (bool, bool) {
 }
 
 /// The "add to my profile" button of a provider card.
-pub fn add_button(enabled: bool) -> serenity::CreateButton {
+pub fn add_button(enabled: bool, in_profile: bool) -> serenity::CreateButton {
     serenity::CreateButton::new(BTN_PROVIDER_ADD)
-        .label(i18n::BTN_ADD_TO_PROFILE)
-        .emoji('➕')
+        .label(if in_profile {
+            i18n::BTN_REMOVE_FROM_PROFILE
+        } else {
+            i18n::BTN_ADD_TO_PROFILE
+        })
+        .emoji(if in_profile { '➖' } else { '➕' })
         .style(serenity::ButtonStyle::Secondary)
         .disabled(!enabled)
 }
@@ -220,7 +224,7 @@ impl View for FallbackView {
             Some(i) => {
                 let w = &self.works[i];
                 let name = self.cover.as_ref().map_or("cover.jpg", |c| cover_name(c));
-                let mut row = vec![add_button(enabled)];
+                let mut row = vec![add_button(enabled, false)];
                 if self.from_list {
                     row.push(back_button(enabled));
                 }

@@ -47,6 +47,8 @@ const T_NSFW: &str = "s:nsfw";
 const T_MATURE: &str = "s:mature";
 const T_GAMES: &str = "s:games";
 const N_TOGGLE: &str = "n:toggle";
+const N_PING: &str = "n:ping";
+const L_SUGGEST: &str = "l:suggest";
 const N_MODE: &str = "n:mode";
 const N_POP: &str = "n:pop";
 const N_FORMATS: &str = "n:formats";
@@ -73,11 +75,14 @@ pub struct State {
     pub manager_role: Option<i64>,
     pub bot_channel: Option<i64>,
     pub cooldown: i64,
+    pub suggest_limit: i64,
+    pub reminder_ping: bool,
     pub feed: FeedConfig,
 }
 
 pub const POPULARITY_CHOICES: [i64; 5] = [500, 1500, 3000, 5000, 10_000];
 pub const COOLDOWN_CHOICES: [i64; 6] = [0, 3, 5, 10, 30, 60];
+pub const SUGGEST_LIMIT_CHOICES: [i64; 6] = [0, 3, 5, 10, 20, 50];
 
 pub fn mode_label(m: FilterMode) -> &'static str {
     match m {
@@ -249,6 +254,8 @@ impl AdminView {
             manager_role: adb::manager_role(pool, guild).await?,
             bot_channel: guilds.settings(guild).await?.command_channel,
             cooldown: adb::cooldown_secs(pool, guild).await?,
+            suggest_limit: adb::suggest_limit(pool, guild).await?,
+            reminder_ping: adb::reminder_ping(pool, guild).await?,
             feed: feed::get_config(pool, guild).await?,
         })
     }
@@ -280,8 +287,9 @@ pub fn embed_for(screen: Screen, s: &State, guild: i64) -> Emb {
             yes_no(s.games)
         )),
         Screen::Notifications => e.title("🔔 الإشعارات").description(format!(
-            "• الحالة: {}\n• القناة: {}\n• التصفية: **{}**\n• حد الشعبية: {}\n• الصيغ: {}\n• الأنواع: {}\n\nجدول البث متاح للأنمي فقط في AniList؛ المانجا والمانهوا لا يوفّر لها جدول فصول.",
+            "• الحالة: {}\n• تنبيه التذكير في القناة عند إغلاق الرسائل الخاصة: {}\n• القناة: {}\n• التصفية: **{}**\n• حد الشعبية: {}\n• الصيغ: {}\n• الأنواع: {}\n\nجدول البث متاح للأنمي فقط في AniList؛ المانجا والمانهوا لا يوفّر لها جدول فصول.",
             yes_no(s.feed.enabled),
+            yes_no(s.reminder_ping),
             channel_text(s.feed.channel_id, "غير محددة (استخدم /set-notifications-channel)"),
             mode_label(s.feed.filter),
             s.feed.min_popularity,
@@ -304,8 +312,9 @@ pub fn embed_for(screen: Screen, s: &State, guild: i64) -> Emb {
             channel_text(s.feed.channel_id, "غير محددة (لا إشعارات)")
         )),
         Screen::Limits => e.title("⏱ الحدود").description(format!(
-            "• مهلة الأوامر لكل عضو: **{}**\n(المشرفون معفون)",
-            if s.cooldown == 0 { "الافتراضي".to_string() } else { format!("{} ثانية", s.cooldown) }
+            "• مهلة الأوامر لكل عضو: **{}** (المشرفون معفون)\n• حد الاقتراحات اليومي لكل عضو: **{}**",
+            if s.cooldown == 0 { "الافتراضي".to_string() } else { format!("{} ثانية", s.cooldown) },
+            if s.suggest_limit == 0 { "بلا حد".to_string() } else { s.suggest_limit.to_string() }
         )),
         Screen::Reset => e.title("🗑 إعادة الضبط").description(
             "سيتم حذف إعدادات هذا السيرفر: القنوات والإشعارات والصور المخصصة والرتب والنقاط. بروفايلات الأعضاء العامة لا تُحذف.",
@@ -513,6 +522,15 @@ impl View for AdminView {
                 T_MATURE => custom::set_mature_games(&pool, g, !self.state.mature).await?,
                 T_GAMES => custom::set_games(&pool, g, !self.state.games).await?,
                 N_TOGGLE => feed::set_enabled(&pool, g, !self.state.feed.enabled).await?,
+                N_PING => adb::set_reminder_ping(&pool, g, !self.state.reminder_ping).await?,
+                L_SUGGEST => {
+                    if let Some(n) = first
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .filter(|n| SUGGEST_LIMIT_CHOICES.contains(n))
+                    {
+                        adb::set_suggest_limit(&pool, g, n).await?;
+                    }
+                }
                 N_MODE => {
                     if let Some(m) = first.and_then(FilterMode::parse) {
                         feed::set_filter_mode(&pool, g, m).await?;
@@ -654,19 +672,17 @@ mod tests {
             manager_role: Some(5),
             bot_channel: Some(10),
             cooldown: 0,
+            suggest_limit: 10,
+            reminder_ping: false,
             feed: FeedConfig {
                 guild_id: 1,
                 channel_id: Some(20),
                 enabled: true,
                 min_popularity: 1500,
                 formats: vec!["TV".into()],
-                excluded_genres: vec![],
-                digest_hours: 0,
-                daily_cap: 0,
                 role_id: Some(6),
                 filter: FilterMode::All,
                 kinds: vec!["anime".into()],
-                last_digest_at: 0,
             },
         }
     }

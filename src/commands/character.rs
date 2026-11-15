@@ -1,6 +1,10 @@
 //! `/character search` and the interactive character card (also used by `/random character`).
 
-use super::{buttons, fail, parse_id, policy, roster::Roster, say_ephemeral};
+use super::{
+    buttons, fail, parse_id, policy,
+    roster::{Roster, Step},
+    say_ephemeral,
+};
 use crate::{
     anilist::{
         kind_of,
@@ -52,6 +56,8 @@ pub enum Mode {
     Work(Box<Media>),
     /// A game or visual-novel character from IGDB / VNDB.
     Provider(Box<Work>),
+    /// History marker: going back here re-opens the roster the user came from.
+    ResumeRoster,
 }
 
 pub struct CharacterView {
@@ -70,6 +76,65 @@ pub struct CharacterView {
     cover: Option<Arc<Vec<u8>>>,
     /// Opened from another view (work card, /top): always offer Back, which returns to that view.
     from_parent: bool,
+    /// Is the shown character already in the viewer's profile? (drives add / remove)
+    in_profile: bool,
+    /// Rosters left behind while a character picked from them is open.
+    suspended: Vec<Roster>,
+}
+
+/// Buttons under every AniList character image: add to / remove from my profile, works, source link and back on the
+/// first row; description, random, roster and close on the second.
+pub fn card_rows(
+    link: Option<&str>,
+    in_profile: bool,
+    show_back: bool,
+    enabled: bool,
+) -> Vec<serenity::CreateActionRow> {
+    let secondary = serenity::ButtonStyle::Secondary;
+    let mut main = vec![
+        serenity::CreateButton::new(BTN_ADD)
+            .label(if in_profile {
+                i18n::BTN_REMOVE_FROM_PROFILE
+            } else {
+                i18n::BTN_ADD_TO_PROFILE
+            })
+            .emoji(if in_profile { '➖' } else { '➕' })
+            .style(if in_profile {
+                serenity::ButtonStyle::Danger
+            } else {
+                secondary
+            })
+            .disabled(!enabled),
+        serenity::CreateButton::new(BTN_WORKS)
+            .label(i18n::BTN_WORKS)
+            .style(secondary)
+            .disabled(!enabled),
+    ];
+    if let Some(url) = link {
+        main.push(serenity::CreateButton::new_link(url).label(format!("🔗 {}", i18n::BTN_ANILIST)));
+    }
+    if show_back {
+        main.push(back_button(enabled));
+    }
+    let mut extra = vec![
+        serenity::CreateButton::new(BTN_DESCRIBE)
+            .label(i18n::BTN_DESCRIPTION)
+            .emoji('📖')
+            .style(secondary)
+            .disabled(!enabled),
+        serenity::CreateButton::new(BTN_RANDOM)
+            .label(i18n::BTN_RANDOM_CHARACTER)
+            .emoji('🎲')
+            .style(serenity::ButtonStyle::Primary)
+            .disabled(!enabled),
+        serenity::CreateButton::new(BTN_ROSTER)
+            .label(i18n::BTN_ROSTER)
+            .emoji('👥')
+            .style(secondary)
+            .disabled(!enabled),
+    ];
+    extra.push(close_button(enabled));
+    vec![buttons(main), buttons(extra)]
 }
 
 /// Appearances that may be shown under the given policy.
@@ -107,7 +172,15 @@ impl CharacterView {
             extra: Vec::new(),
             cover: None,
             from_parent: false,
+            in_profile: false,
+            suspended: Vec::new(),
         }
+    }
+
+    /// Text shown above the card (e.g. the result of a game round).
+    pub fn with_notice(mut self, text: String) -> Self {
+        self.notice = Some(text);
+        self
     }
 
     /// Mark the view as a child of another view.
@@ -137,25 +210,108 @@ impl CharacterView {
         self.mode = Mode::Provider(Box::new(w));
     }
 
-    /// Add the shown character to the presser's own profile.
-    async fn add_to_profile(&mut self) -> Outcome {
-        let Mode::Card(c) = &self.mode else {
+    /// The id used in the profile tables for the shown character (AniList id or encoded provider id).
+    fn shown_character_id(&self) -> Option<i64> {
+        match &self.mode {
+            Mode::Card(c) => Some(c.id),
+            Mode::Provider(w) => w.character_id(),
+            _ => None,
+        }
+    }
+
+    /// Re-read whether the shown character is in the viewer's profile.
+    pub async fn refresh_in_profile(&mut self) {
+        self.in_profile = match self.shown_character_id() {
+            Some(id) => db::get_entry(&self.pool, self.user, id)
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+            None => false,
+        };
+    }
+
+    /// Prepare the first screen: the profile state and a provider picture.
+    pub async fn prepare(&mut self) {
+        self.refresh_in_profile().await;
+        self.load_cover().await;
+    }
+
+    /// Add the shown character to the viewer's profile, or remove it when it is already there (with undo).
+    async fn toggle_profile(&mut self) -> Outcome {
+        let Some(id) = self.shown_character_id() else {
             return Outcome::Keep;
         };
-        self.notice = Some(match db::get_profile(&self.pool, self.user).await {
-            Ok(Some(_)) => match super::profile::add_and_cache(&self.pool, self.user, c).await {
-                Ok(text) => text,
+        let (pool, user) = (self.pool.clone(), self.user);
+        if self.in_profile {
+            let removed = db::remove_character(&pool, user, id).await;
+            self.whisper = Some(match removed {
+                Ok(_) => {
+                    self.in_profile = false;
+                    let mode = self.mode.clone();
+                    let undo: Box<dyn FnOnce() -> UndoFuture + Send + Sync> = Box::new(move || {
+                        Box::pin(async move {
+                            let w = match &mode {
+                                Mode::Card(c) => match db::create_profile(&pool, user).await {
+                                    Ok(_) => super::profile::add_and_cache(&pool, user, c)
+                                        .await
+                                        .map(|_| i18n::UNDONE.to_string()),
+                                    Err(e) => Err(e.into()),
+                                },
+                                Mode::Provider(w) => {
+                                    Ok(super::fallback::add_to_profile(&pool, user, w).await.text)
+                                }
+                                _ => Ok(i18n::ERR_GENERIC.to_string()),
+                            };
+                            w.unwrap_or_else(|_| i18n::ERR_GENERIC.to_string())
+                        })
+                    });
+                    Whisper {
+                        text: i18n::CHARACTER_REMOVED.to_string(),
+                        undo: Some(undo),
+                    }
+                }
                 Err(e) => {
-                    tracing::warn!("could not add character to profile: {e:#}");
-                    i18n::ERR_GENERIC.to_string()
+                    tracing::warn!("could not remove character: {e}");
+                    Whisper::text(i18n::ERR_GENERIC)
+                }
+            });
+            return Outcome::Update;
+        }
+        let whisper = match &self.mode {
+            Mode::Provider(w) => super::fallback::add_to_profile(&pool, user, w).await,
+            Mode::Card(c) => match db::create_profile(&pool, user).await {
+                Ok(_) => match super::profile::add_and_cache(&pool, user, c).await {
+                    Ok(text) => {
+                        let undo_pool = pool.clone();
+                        let undo: Box<dyn FnOnce() -> UndoFuture + Send + Sync> =
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    db::remove_character(&undo_pool, user, id)
+                                        .await
+                                        .map_or(i18n::ERR_GENERIC, |_| i18n::UNDONE)
+                                        .to_string()
+                                })
+                            });
+                        Whisper {
+                            text,
+                            undo: Some(undo),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("could not add character to profile: {e:#}");
+                        Whisper::text(i18n::ERR_GENERIC)
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("profile creation failed: {e}");
+                    Whisper::text(i18n::ERR_GENERIC)
                 }
             },
-            Ok(None) => i18n::PROFILE_NONE_SELF.to_string(),
-            Err(e) => {
-                tracing::warn!("profile lookup failed: {e}");
-                i18n::ERR_GENERIC.to_string()
-            }
-        });
+            _ => return Outcome::Keep,
+        };
+        self.whisper = Some(whisper);
+        self.refresh_in_profile().await;
         Outcome::Update
     }
 
@@ -222,49 +378,15 @@ impl View for CharacterView {
                     .collect();
                 (Emb::new().title(i18n::PICK_PROMPT).description(body), rows)
             }
-            Mode::Card(c) => {
-                let secondary = serenity::ButtonStyle::Secondary;
-                let mut main = vec![
-                    serenity::CreateButton::new(BTN_WORKS)
-                        .label(i18n::BTN_WORKS)
-                        .style(secondary)
-                        .disabled(!enabled),
-                    serenity::CreateButton::new(BTN_DESCRIBE)
-                        .label(i18n::BTN_DESCRIPTION)
-                        .emoji('📖')
-                        .style(secondary)
-                        .disabled(!enabled),
-                    serenity::CreateButton::new(BTN_ADD)
-                        .label(i18n::BTN_ADD_TO_PROFILE)
-                        .emoji('➕')
-                        .style(secondary)
-                        .disabled(!enabled),
-                    serenity::CreateButton::new(BTN_RANDOM)
-                        .label(i18n::BTN_RANDOM_CHARACTER)
-                        .emoji('🎲')
-                        .style(serenity::ButtonStyle::Primary)
-                        .disabled(!enabled),
-                ];
-                if let Some(url) = &c.site_url {
-                    main.push(
-                        serenity::CreateButton::new_link(url)
-                            .label(format!("🔗 {}", i18n::BTN_ANILIST)),
-                    );
-                }
-                let mut extra = vec![serenity::CreateButton::new(BTN_ROSTER)
-                    .label(i18n::BTN_ROSTER)
-                    .emoji('👥')
-                    .style(serenity::ButtonStyle::Secondary)
-                    .disabled(!enabled)];
-                if !self.history.is_empty() || self.from_parent {
-                    extra.push(back_button(enabled));
-                }
-                extra.push(close_button(enabled));
-                (
-                    cards::character_card(c),
-                    vec![buttons(main), buttons(extra)],
-                )
-            }
+            Mode::Card(c) => (
+                cards::character_card(c),
+                card_rows(
+                    c.site_url.as_deref(),
+                    self.in_profile,
+                    !self.history.is_empty() || self.from_parent,
+                    enabled,
+                ),
+            ),
             Mode::Works { character, page } => {
                 let works = works_of(character, self.policy);
                 let pages = page_count(works.len(), WORKS_PER_PAGE);
@@ -316,12 +438,13 @@ impl View for CharacterView {
                 }
                 (cards::work_card(m), vec![buttons(row)])
             }
+            Mode::ResumeRoster => (Emb::new().description(i18n::ERR_GENERIC), Vec::new()),
             Mode::Provider(w) => {
                 let name = self
                     .cover
                     .as_ref()
                     .map_or("cover.jpg", |c| super::fallback::cover_name(c));
-                let mut row = vec![super::fallback::add_button(enabled)];
+                let mut row = vec![super::fallback::add_button(enabled, self.in_profile)];
                 if let Some(u) = &w.url {
                     row.push(
                         serenity::CreateButton::new_link(u)
@@ -365,15 +488,42 @@ impl View for CharacterView {
         step.apply(&mut self.roster)
     }
 
+    async fn on_start(&mut self) {
+        self.prepare().await;
+    }
+
     async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
+        let outcome = self.handle(id, values).await;
+        self.refresh_in_profile().await;
+        outcome
+    }
+}
+
+impl CharacterView {
+    async fn handle(&mut self, id: &str, values: &[String]) -> Outcome {
         self.notice = None;
         if let Some(r) = self.roster.as_mut() {
             let step = r.handle(id, values).await;
+            if let Step::Open(c) = step {
+                // Keep the roster page the user came from; Back returns to it.
+                if let Some(r) = self.roster.take() {
+                    self.suspended.push(r);
+                }
+                self.history.push(self.mode.clone());
+                self.history.push(Mode::ResumeRoster);
+                self.mode = Mode::Card(*c);
+                return Outcome::Update;
+            }
             return step.apply(&mut self.roster);
         }
         match id {
             CLOSE => Outcome::Close,
             BACK => match self.history.pop() {
+                Some(Mode::ResumeRoster) => {
+                    self.mode = self.history.pop().unwrap_or(Mode::Pick(Vec::new()));
+                    self.roster = self.suspended.pop();
+                    Outcome::Update
+                }
                 Some(m) => {
                     self.mode = m;
                     Outcome::Update
@@ -391,14 +541,7 @@ impl View for CharacterView {
                 };
                 Outcome::Update
             }
-            BTN_ADD => self.add_to_profile().await,
-            super::fallback::BTN_PROVIDER_ADD => {
-                if let Mode::Provider(w) = &self.mode {
-                    self.whisper =
-                        Some(super::fallback::add_to_profile(&self.pool, self.user, w).await);
-                }
-                Outcome::Keep
-            }
+            BTN_ADD | super::fallback::BTN_PROVIDER_ADD => self.toggle_profile().await,
             WORK_PICK => {
                 let Some(id) = values.first().and_then(|v| v.parse::<i64>().ok()) else {
                     return Outcome::Keep;
@@ -853,6 +996,64 @@ mod tests {
             cover_url: None,
             genres: Vec::new(),
         }
+    }
+
+    fn labels(rows: &[serenity::CreateActionRow]) -> Vec<String> {
+        rows.iter()
+            .flat_map(|r| {
+                serde_json::to_value(r).expect("json")["components"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .map(|b| b["label"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn every_character_image_has_add_works_link_and_back() {
+        let rows = card_rows(Some("https://anilist.co/character/1"), false, true, true);
+        let l = labels(&rows);
+        for want in [i18n::BTN_ADD_TO_PROFILE, i18n::BTN_WORKS, i18n::BTN_BACK] {
+            assert!(l.iter().any(|x| x == want), "{want} missing in {l:?}");
+        }
+        assert!(
+            l.iter().any(|x| x.contains(i18n::BTN_ANILIST)),
+            "source link"
+        );
+        assert!(
+            rows.len() <= 5
+                && rows
+                    .iter()
+                    .all(|r| serde_json::to_value(r).expect("json")["components"]
+                        .as_array()
+                        .map_or(0, Vec::len)
+                        <= 5)
+        );
+    }
+
+    #[test]
+    fn the_add_button_becomes_remove_when_the_character_is_in_my_profile() {
+        let l = labels(&card_rows(None, true, false, true));
+        assert!(l.iter().any(|x| x == i18n::BTN_REMOVE_FROM_PROFILE));
+        assert!(!l.iter().any(|x| x == i18n::BTN_ADD_TO_PROFILE));
+        assert!(
+            !l.iter().any(|x| x == i18n::BTN_BACK),
+            "no back button without a parent"
+        );
+        let provider = |in_profile| {
+            serde_json::to_value(super::super::fallback::add_button(true, in_profile))
+                .expect("json")["label"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        assert_eq!(provider(false), i18n::BTN_ADD_TO_PROFILE);
+        assert_eq!(
+            provider(true),
+            i18n::BTN_REMOVE_FROM_PROFILE,
+            "game characters toggle too"
+        );
     }
 
     #[test]
