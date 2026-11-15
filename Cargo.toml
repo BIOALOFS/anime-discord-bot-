@@ -8,6 +8,7 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dotenvy = "0.15"
 envy = "0.4"
+futures = "0.3"
 governor = "0.8"
 moka = { version = "0.12", features = ["future"] }
 poise = "0.6"

@@ -272,6 +272,19 @@ pub fn picker_embed(list: &[Media]) -> Emb {
     Emb::new().title(i18n::PICK_PROMPT).description(body)
 }
 
+pub fn picker_character_embed(list: &[Character]) -> Emb {
+    let body = list
+        .iter()
+        .enumerate()
+        .map(|(i, c)| match c.main_work() {
+            Some(w) => format!("**{}.** {} — {w}", i + 1, c.display_name()),
+            None => format!("**{}.** {}", i + 1, c.display_name()),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Emb::new().title(i18n::PICK_PROMPT).description(body)
+}
+
 pub fn seasonal_embed(title: &str, items: &[Media], page: usize, pages: usize) -> Emb {
     let body = if items.is_empty() {
         i18n::EMPTY_LIST.to_string()
@@ -407,6 +420,53 @@ pub fn character_embed(c: &Character, works: &[&MediaRef], server_favourites: i6
         i18n::server_favs(server_favourites),
         true,
     )
+}
+
+/// Up to 5 nicknames: plain alternatives first, then spoiler ones wrapped in `||`.
+pub fn nicknames(c: &Character) -> Vec<String> {
+    c.name
+        .alternative
+        .iter()
+        .filter(|a| !a.is_empty())
+        .cloned()
+        .chain(
+            c.name
+                .alternative_spoiler
+                .iter()
+                .filter(|a| !a.is_empty())
+                .map(|a| format!("||{a}||")),
+        )
+        .take(5)
+        .collect()
+}
+
+/// The simplified character card: image, name (+ native), main work link, nicknames, footer.
+pub fn character_card(c: &Character) -> Emb {
+    let title = match c.name.native.as_deref().filter(|n| !n.is_empty()) {
+        Some(n) => format!("{} ({n})", c.display_name()),
+        None => c.display_name().to_string(),
+    };
+    let mut lines = Vec::new();
+    if let Some(work) = c.media.as_ref().and_then(|m| m.nodes.first()) {
+        if let Some(t) = &work.title {
+            lines.push(match &work.site_url {
+                Some(u) => format!("📺 [{}]({u})", t.main()),
+                None => format!("📺 {}", t.main()),
+            });
+        }
+    }
+    let nicks = nicknames(c);
+    if !nicks.is_empty() {
+        lines.push(format!("**{}:** {}", i18n::NICKNAMES, nicks.join("، ")));
+    }
+    let mut e = Emb::new()
+        .title(title)
+        .url(c.site_url.clone())
+        .image(c.image_url().map(str::to_string));
+    if !lines.is_empty() {
+        e = e.description(lines.join("\n"));
+    }
+    e
 }
 
 pub fn works_embed(c: &Character, works: &[&MediaRef], page: usize, pages: usize) -> Emb {
@@ -597,6 +657,29 @@ mod tests {
             Some("مفضلة عند 0 من أعضاء السيرفر")
         );
         assert!(get("أبرز الأعمال").is_some_and(|w| w.contains("Show")));
+    }
+
+    #[test]
+    fn simple_card_has_only_the_essentials() {
+        let c: Character = serde_json::from_value(json!({
+            "id": 5, "name": {"full": "Hero", "native": "勇者", "alternative": ["A", "B", "C", "D"], "alternativeSpoiler": ["S1", "S2"]},
+            "image": {"large": "https://img"}, "description": "A very long description that must not appear",
+            "age": "17", "favourites": 99, "siteUrl": "https://anilist.co/character/5",
+            "media": {"nodes": [{"id": 1, "title": {"romaji": "Show"}, "siteUrl": "https://anilist.co/anime/1", "isAdult": false, "genres": []}]}
+        }))
+        .expect("character");
+        let e = character_card(&c);
+        assert_eq!(e.title.as_deref(), Some("Hero (勇者)"));
+        assert_eq!(e.image.as_deref(), Some("https://img"));
+        assert!(e.fields.is_empty(), "no fields");
+        let d = e.description.as_deref().expect("desc");
+        assert!(d.contains("📺 [Show](https://anilist.co/anime/1)"));
+        assert!(!d.contains("long description"), "no description text");
+        assert!(
+            d.contains("A، B، C، D، ||S1||") && !d.contains("S2"),
+            "max 5 nicknames, spoilers wrapped"
+        );
+        assert_eq!(e.footer.as_deref(), Some("Powered by AniList"));
     }
 
     #[test]

@@ -14,13 +14,8 @@ pub async fn on_error(err: FrameworkError<'_, Data, Error>) {
                 guild = ?ctx.guild_id(),
                 "command failed: {error:#}"
             );
-            let _ = ctx
-                .send(
-                    poise::CreateReply::default()
-                        .content(i18n::ERR_GENERIC)
-                        .ephemeral(true),
-                )
-                .await;
+            // Ephemeral even when the command had deferred publicly.
+            let _ = crate::commands::say_ephemeral(ctx, i18n::ERR_GENERIC).await;
         }
         FrameworkError::CooldownHit { ctx, .. } => {
             let _ = ctx

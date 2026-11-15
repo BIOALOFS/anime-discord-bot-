@@ -34,6 +34,7 @@ pub struct Emb {
     pub description: Option<String>,
     pub colour: Option<u32>,
     pub author: Option<String>,
+    pub author_icon: Option<String>,
     pub fields: Vec<(String, String, bool)>,
     pub footer: Option<String>,
     pub image: Option<String>,
@@ -66,6 +67,10 @@ impl Emb {
     }
     pub fn author(mut self, s: impl Into<String>) -> Self {
         self.author = Some(s.into());
+        self
+    }
+    pub fn author_icon(mut self, s: Option<impl Into<String>>) -> Self {
+        self.author_icon = s.map(Into::into);
         self
     }
     pub fn field(
@@ -155,7 +160,11 @@ impl Emb {
             e = e.description(d);
         }
         if let Some(a) = self.author {
-            e = e.author(serenity::CreateEmbedAuthor::new(a));
+            let mut author = serenity::CreateEmbedAuthor::new(a);
+            if let Some(icon) = self.author_icon {
+                author = author.icon_url(icon);
+            }
+            e = e.author(author);
         }
         for (n, v, inline) in self.fields {
             e = e.field(n, v, inline);

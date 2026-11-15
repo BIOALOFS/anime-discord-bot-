@@ -219,7 +219,10 @@ impl View for CharacterView {
 
 // ---- entry points ------------------------------------------------------------------------
 
-async fn ac_character(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+pub(crate) async fn ac_character(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
     let data = ctx.data();
     let api = data.anilist.clone();
     let items = data

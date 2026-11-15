@@ -128,6 +128,14 @@ impl SafeAniList {
         Ok(Self::from_client(AniListClient::new(cfg)?, cfg))
     }
 
+    /// Test constructor for other modules: answers every query from `f` instead of the network.
+    #[cfg(test)]
+    pub fn with_fixture(
+        f: impl Fn(&str, &Value) -> Result<Value, AniError> + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_mock(Box::new(f))
+    }
+
     #[cfg(test)]
     pub(super) fn with_mock(mock: super::client::Mock) -> Self {
         let cfg = Config::for_tests();

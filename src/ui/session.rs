@@ -4,8 +4,9 @@
 use crate::{error::Context, error::Error, i18n};
 use poise::serenity_prelude as serenity;
 use serenity::{
-    ComponentInteractionCollector, ComponentInteractionDataKind, CreateActionRow, CreateEmbed,
-    CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
+    ComponentInteractionCollector, ComponentInteractionDataKind, CreateActionRow, CreateAttachment,
+    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage,
+    EditInteractionResponse,
 };
 use std::{future::Future, time::Duration};
 
@@ -16,14 +17,23 @@ pub struct Page {
     pub content: Option<String>,
     pub embeds: Vec<CreateEmbed>,
     pub components: Vec<CreateActionRow>,
+    /// Attached images; an edit always replaces the previous attachments.
+    pub files: Vec<CreateAttachment>,
 }
 
 impl Page {
+    #[allow(dead_code)] // used by the image styles (collage, podium, tier)
+    pub fn with_files(mut self, files: Vec<CreateAttachment>) -> Self {
+        self.files = files;
+        self
+    }
+
     pub fn embed(embed: CreateEmbed, components: Vec<CreateActionRow>) -> Self {
         Self {
             content: None,
             embeds: vec![embed],
             components,
+            files: Vec::new(),
         }
     }
 
@@ -37,14 +47,22 @@ impl Page {
         for e in self.embeds {
             r = r.embed(e);
         }
+        for f in self.files {
+            r = r.attachment(f);
+        }
         r.components(self.components)
     }
 
     fn into_edit(self) -> EditInteractionResponse {
-        EditInteractionResponse::new()
+        let mut e = EditInteractionResponse::new()
             .content(self.content.unwrap_or_default())
             .embeds(self.embeds)
             .components(self.components)
+            .clear_attachments();
+        for f in self.files {
+            e = e.new_attachment(f);
+        }
+        e
     }
 }
 

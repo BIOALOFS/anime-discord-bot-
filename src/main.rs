@@ -16,6 +16,7 @@ pub struct Data {
     pub config: config::Config,
     pub anilist: std::sync::Arc<anilist::SafeAniList>,
     pub auto: ui::autocomplete::AutoState,
+    pub http: reqwest::Client,
 }
 
 #[tokio::main]
@@ -25,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::new(&config.log_level))
         .init();
 
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting anpot");
     let pool = db::connect(&config.database_url).await?;
     let anilist = std::sync::Arc::new(anilist::SafeAniList::new(&config)?);
     let token = config.discord_token.expose().to_string();
@@ -46,12 +48,22 @@ async fn main() -> anyhow::Result<()> {
                     }
                     None => poise::builtins::register_globally(ctx, cmds).await?,
                 }
-                tracing::info!(bot = %ready.user.name, "ready");
+                let mut names = Vec::new();
+                qualified_names(cmds, "", &mut names);
+                let scope = match dev_guild {
+                    Some(g) => format!("guild {g} (instant)"),
+                    None => "global (can take up to an hour to appear)".to_string(),
+                };
+                tracing::info!(bot = %ready.user.name, %scope, count = names.len(), commands = %names.join(", "), "commands registered");
                 Ok(Data {
                     db: pool,
                     config,
                     anilist,
                     auto: Default::default(),
+                    http: reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(15))
+                        .user_agent(concat!("anpot-discord-bot/", env!("CARGO_PKG_VERSION")))
+                        .build()?,
                 })
             })
         })
@@ -85,6 +97,15 @@ fn apply_cooldown(cmd: &mut Command, secs: u64) {
     }
 }
 
+/// `profile group create`-style names of every (sub)command, for the startup log.
+fn qualified_names(cmds: &[Command], prefix: &str, out: &mut Vec<String>) {
+    for c in cmds {
+        let path = format!("{prefix}{}", c.name);
+        out.push(path.clone());
+        qualified_names(&c.subcommands, &format!("{path} "), out);
+    }
+}
+
 /// Every command gets the configured per-user cooldown.
 fn commands_with_cooldown(secs: u64) -> Vec<Command> {
     let mut cmds = vec![
@@ -95,6 +116,8 @@ fn commands_with_cooldown(secs: u64) -> Vec<Command> {
         commands::airing::airing(),
         commands::seasonal::seasonal(),
         commands::random::random(),
+        commands::profile::profile(),
+        commands::profile::top(),
     ];
     for c in &mut cmds {
         apply_cooldown(c, secs);
@@ -188,6 +211,32 @@ mod tests {
             "random anime",
             "random manga",
             "random character",
+            "profile",
+            "profile create",
+            "profile add",
+            "profile bulk-add",
+            "profile remove",
+            "profile clear",
+            "profile reorder",
+            "profile move",
+            "profile rank",
+            "profile group",
+            "profile group create",
+            "profile group rename",
+            "profile group delete",
+            "profile group assign",
+            "profile note",
+            "profile set-bio",
+            "profile set-color",
+            "profile set-banner",
+            "profile view",
+            "profile style",
+            "profile privacy",
+            "profile export",
+            "profile import",
+            "profile compare",
+            "top",
+            "top characters",
         ] {
             assert!(
                 names.iter().any(|n| n == want),
