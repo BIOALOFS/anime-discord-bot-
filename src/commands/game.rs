@@ -1,8 +1,12 @@
 //! `/game mode`: guess the character, guess the anime, versus and the leaderboard.
 
-use super::{buttons, fail, policy, say_ephemeral};
+use super::{
+    buttons,
+    character::{CharacterView, Mode as CharMode},
+    fail, policy, say_ephemeral,
+};
 use crate::{
-    anilist::{models::Character, models::Media, MediaKind},
+    anilist::{models::Character, models::Media, ContentPolicy, MediaKind, SafeAniList},
     db::{custom, game},
     error::{Context, Error},
     i18n,
@@ -11,7 +15,8 @@ use crate::{
         autocomplete::to_choices,
         cards,
         embeds::Emb,
-        session::{self, Outcome, Page, View},
+        select::{character_choices, select_row},
+        session::{self, Outcome, Page, View, Whisper},
         text::clean_description_max,
     },
 };
@@ -130,11 +135,22 @@ struct Quiz {
     reveal: Emb,
     image: Option<Rendered>,
     result: Option<(bool, usize, i64)>,
+    /// The character behind a guess-the-character round: after the answer it is shown with the usual character
+    /// buttons (add to / remove from my profile, works, source link).
+    answer: Option<(std::sync::Arc<SafeAniList>, ContentPolicy, Character)>,
+    sub: Option<CharacterView>,
     _guard: ActiveGuard,
 }
 
 impl View for Quiz {
+    fn take_whisper(&mut self) -> Option<Whisper> {
+        self.sub.as_mut().and_then(|s| s.take_whisper())
+    }
+
     fn render(&self, enabled: bool) -> Page {
+        if let Some(sub) = &self.sub {
+            return sub.render(enabled);
+        }
         let style = |i: usize| match &self.result {
             Some(_) if i == self.correct => serenity::ButtonStyle::Success,
             Some((_, chosen, _)) if i == *chosen => serenity::ButtonStyle::Danger,
@@ -174,7 +190,10 @@ impl View for Quiz {
         }
     }
 
-    async fn on_interaction(&mut self, id: &str, _values: &[String]) -> Outcome {
+    async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
+        if let Some(sub) = self.sub.as_mut() {
+            return sub.on_interaction(id, values).await;
+        }
         let Some(i) = id
             .strip_prefix("ans:")
             .and_then(|n| n.parse::<usize>().ok())
@@ -192,7 +211,28 @@ impl View for Quiz {
             None => 0,
         };
         self.result = Some((correct, i, streak));
-        Outcome::Close
+        match self.answer.take() {
+            // Keep the session open: the revealed character gets its action buttons.
+            Some((api, policy, character)) => {
+                let head = if correct {
+                    i18n::game_correct(streak)
+                } else {
+                    i18n::GAME_WRONG.to_string()
+                };
+                let mut view = CharacterView::new(
+                    api,
+                    policy,
+                    CharMode::Card(character),
+                    self.pool.clone(),
+                    self.user,
+                )
+                .with_notice(head);
+                view.prepare().await;
+                self.sub = Some(view);
+                Outcome::Update
+            }
+            None => Outcome::Close,
+        }
     }
 }
 
@@ -239,6 +279,8 @@ async fn start_quiz_character(ctx: Context<'_>, guild: Option<i64>) -> Result<()
         reveal: cards::character_card(&answer),
         image,
         result: None,
+        answer: Some((api.clone(), pol, answer.clone())),
+        sub: None,
         _guard: guard,
     };
     session::run(ctx, quiz).await
@@ -311,6 +353,8 @@ async fn start_quiz_anime(ctx: Context<'_>, guild: Option<i64>) -> Result<(), Er
         reveal: cards::work_card(&answer),
         image: None,
         result: None,
+        answer: None,
+        sub: None,
         _guard: guard,
     };
     session::run(ctx, quiz).await
@@ -320,13 +364,27 @@ async fn start_quiz_anime(ctx: Context<'_>, guild: Option<i64>) -> Result<(), Er
 
 struct Versus {
     pool: SqlitePool,
+    api: std::sync::Arc<SafeAniList>,
+    policy: ContentPolicy,
+    user: i64,
     a: Character,
     b: Character,
     voted: Option<(bool, u32, u32)>,
+    /// A character card opened from the dropdown after voting; Back returns to the result.
+    sub: Option<CharacterView>,
 }
 
+const VERSUS_PICK: &str = "versus_pick";
+
 impl View for Versus {
+    fn take_whisper(&mut self) -> Option<Whisper> {
+        self.sub.as_mut().and_then(|s| s.take_whisper())
+    }
+
     fn render(&self, enabled: bool) -> Page {
+        if let Some(sub) = &self.sub {
+            return sub.render(enabled);
+        }
         let mut ea = Emb::new()
             .title(format!("🅰️ {}", self.a.display_name()))
             .image(self.a.image_url().map(str::to_string));
@@ -358,15 +416,53 @@ impl View for Versus {
                 percent_bar(pb)
             )
         });
+        let mut components = vec![row];
+        // Both names are listed: once the vote is in, a dropdown opens either character with its buttons.
+        if self.voted.is_some() {
+            components.extend(select_row(
+                VERSUS_PICK,
+                i18n::CAST_PLACEHOLDER,
+                character_choices(&[self.a.clone(), self.b.clone()]),
+                enabled,
+            ));
+        }
         Page {
             content: notice.or(Some(i18n::VERSUS_PROMPT.to_string())),
             embeds: vec![ea.build(), eb.build()],
-            components: vec![row],
+            components,
             files: vec![],
         }
     }
 
-    async fn on_interaction(&mut self, id: &str, _values: &[String]) -> Outcome {
+    async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
+        if let Some(sub) = self.sub.as_mut() {
+            if sub.wants_to_leave(id) {
+                self.sub = None;
+                return Outcome::Update;
+            }
+            return sub.on_interaction(id, values).await;
+        }
+        if id == VERSUS_PICK {
+            let picked = values.first().and_then(|v| v.parse::<i64>().ok());
+            let Some(c) = [&self.a, &self.b]
+                .into_iter()
+                .find(|c| Some(c.id) == picked)
+                .cloned()
+            else {
+                return Outcome::Keep;
+            };
+            let mut sub = CharacterView::new(
+                self.api.clone(),
+                self.policy,
+                CharMode::Card(c),
+                self.pool.clone(),
+                self.user,
+            )
+            .with_back();
+            sub.prepare().await;
+            self.sub = Some(sub);
+            return Outcome::Update;
+        }
         let a_wins = match id {
             "vote:a" => true,
             "vote:b" => false,
@@ -389,7 +485,7 @@ impl View for Versus {
             .unwrap_or((0, 0));
         let (pa, pb) = (win_rate(wa, sa), win_rate(wb, sb));
         self.voted = Some((a_wins, pa, pb));
-        Outcome::Close
+        Outcome::Update
     }
 }
 
@@ -401,9 +497,13 @@ async fn start_versus(ctx: Context<'_>) -> Result<(), Error> {
                 ctx,
                 Versus {
                     pool: ctx.data().db.clone(),
+                    api: api.clone(),
+                    policy: pol,
+                    user: ctx.author().id.get() as i64,
                     a,
                     b: decoys.remove(0),
                     voted: None,
+                    sub: None,
                 },
             )
             .await

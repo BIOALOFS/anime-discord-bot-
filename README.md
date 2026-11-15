@@ -5,24 +5,27 @@ code, logs and docs are English. Adult media and characters are filtered out eve
 
 ## Commands
 
-Eleven user commands and three admin commands, with chained options instead of dozens of subcommands:
+Twelve user commands and three admin commands, with chained options instead of dozens of subcommands:
 
 | Command | What it does |
 | --- | --- |
-| `/profile` | Show a profile (yours or `user`'s): a banner strip on top, then **one card per item** (large image, name, custom title/description, counter `3/12`), ⏮ ◀ ▶ ⏭ buttons and a dropdown to jump to any item (25 per window). `action:add-character` / `add-work` + `value` adds favourites. There is no other display style. |
-| `/edit` | Every modification. `target` = `profile` (banner, description ≤300, title ≤40, colour, privacy, reset, export/import/delete data), `character` (image incl. GIF for characters in your profile, title ≤40, description ≤300, reset, remove, move) or `work` (remove, move). Confirmations are ephemeral with an undo button. |
+| `/profile` | One message with three embeds: the **banner** (PNG/JPG/WebP or an animated GIF), an **info** card (name/title, bio, counts, join date, privacy, suggestions) and the **current item** (`3/12`). Components are exactly: row 1 `⏮ ◀ mode-toggle ▶ ⏭` (the toggle names the *other* mode: "أعمال" while viewing characters, "شخصيات" while viewing works; it resets to item 1), row 2 a dropdown of the items on this page (25), row 3 a dropdown to switch pages (grouped ranges beyond 25 pages). `action:add-character` / `add-work` + `value` adds favourites. Only the person who ran the command can press the controls (others get an ephemeral hint). |
+| `/edit` | Every modification. `target` = `profile` (banner, description ≤300, title ≤40, colour, privacy, reset, export/import/delete data), `character` (image incl. GIF for characters in your profile, title ≤40, description ≤300, reset, remove, move) or `work` (remove, move). The banner action without a value opens a menu of **16 ready-made banners** (gradients and patterns drawn in code, no bundled pictures) with a preview; you can also upload a picture/GIF (3 MB, needs custom images enabled in the server), give a colour like `#ff8800`, or reset. Confirmations are ephemeral with an undo button. |
 | `/search` | Works only: `type` (anime, manga, manhwa, manhua, novel, plus game / visual novel when those providers are enabled) → `name` with type-aware autocomplete |
 | `/character` | `name` (autocomplete ranked by popularity, main work in the label) + optional `work` filter + optional `source` (all, anime/manga, games). Several matches → a select menu |
 | `/airing` | Next episode of an anime or this week's schedule |
 | `/random` | Random work/character, today's spotlight, today's character birthdays |
 | `/top` | Most favourited characters or works (server or global); characters come with a dropdown that opens their card |
-| `/recommend` | Suggestions from your favourites (with `user`: for both of you) |
+| `/recommend` | Automatic AniList recommendations from your favourites (with `user`: for both of you) |
+| `/suggest` | Member suggestions: `add` links two works of any provider/type (anime, manga, novel, game, visual novel) with a reason ≤300 chars; `random` shows one from this server (author mentioned without a ping; buttons: another, open first/second work, delete for the author or Manage Guild); `mine` lists yours with a menu to delete one. The same pair (either order) can only be added once per server; links and mentions are stripped from reasons; daily limit per member (default 10, set in `/admin` → Limits). |
 | `/game` | Guess the character, guess the anime, versus, leaderboard |
-| `/settings` | Personal preferences only: language and privacy |
+| `/settings` | Personal preferences only: language, privacy and your **reminders** (list and cancel; max 50) |
 | `/help` | Commands by category with examples |
 | `/admin` | Admin panel (Manage Guild, hidden from others): ephemeral buttons for Safety (NSFW, mature games, games), Notifications (on/off, filter mode), Custom images (on/off, who may upload), Roles, Channels (read-only summary, unset), Limits (cooldown) and Reset |
 | `/set-bot-channel` | Admin-only, one `channel` option: the single channel where commands work (admins may bypass) |
 | `/set-notifications-channel` | Admin-only, one `channel` option: where new episode notifications are posted |
+
+Under every character image (from `/character`, a work's cast, `/top`, `/random`, a game round or a roster) there are the same buttons: add to / remove from my profile, works, source link and back. Inside `/profile` there are none. Every anime card has a 🔔 **remind me** button: when a new episode is released the bot DMs you (if your DMs are closed and the server allows it in `/admin` → Notifications, it pings you in the notifications channel). Reminders reuse the batched airing fetch, so they add no AniList calls of their own.
 
 Both channel commands check that the bot can view, send, embed links and attach files there. Unsetting a channel is done
 in `/admin` → Channels. Wherever a message lists character names it carries a dropdown (max 25 options, provider-prefixed
@@ -137,6 +140,18 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 
 أوامر المستخدمين: `/profile` (عرض بطاقات مع غلاف وإضافة) `/edit` (كل التعديلات) `/search` `/character` `/airing` `/random` `/top` `/recommend` `/game` `/settings` (اللغة والخصوصية) `/help`.
 أوامر الإدارة (للمشرفين): `/admin` لوحة أزرار، `/set-bot-channel` قناة الأوامر، `/set-notifications-channel` قناة إشعارات الحلقات. إشعارات الحلقات تغطي كل الأنمي تلقائيًا، والتصفية من لوحة الإدارة.
+
+### دليل المستخدم
+- **`/profile`**: رسالة واحدة: الغلاف (يدعم GIF متحرك)، بطاقة المعلومات، بطاقة العنصر. الصف الأول `⏮ ◀ زر التبديل ▶ ⏭` (يعرض اسم الوضع الآخر: «أعمال» أو «شخصيات»)، والثاني قائمة للقفز إلى أي عنصر في الصفحة، والثالث قائمة لتغيير الصفحة.
+- **`/edit`**: كل التعديلات. للغلاف: بدون قيمة تفتح قائمة 16 غلافًا جاهزًا مع معاينة، أو أرفق صورة/GIF (حتى 3MB)، أو لونًا مثل `#ff8800`، أو `reset`.
+- **أزرار الشخصية** تحت كل صورة شخصية (خارج البروفايل): إضافة/إزالة من بروفايلي، الأعمال، رابط المصدر، رجوع.
+- **زر «ذكّرني»** على بطاقة الأنمي: رسالة خاصة عند صدور حلقة جديدة؛ قائمة تذكيراتك من `/settings setting:reminders`.
+- **`/suggest`**: `add` لربط عملين من أي نوع مع السبب، `random` اقتراح عشوائي من السيرفر، `mine` اقتراحاتك مع الحذف.
+
+### دليل المشرف
+- **`/set-bot-channel`** القناة الوحيدة لأوامر البوت (المشرفون مستثنون)، و**`/set-notifications-channel`** قناة إشعارات الحلقات. يتحقق البوت من صلاحياته في القناة.
+- **`/admin`** (لوحة أزرار خاصة بك): الأمان، الإشعارات (التشغيل، نوع التصفية، تنبيه التذكير بالقناة)، الصور المخصصة (التفعيل ومن يرفع)، الرتب، القنوات (عرض وإلغاء التحديد)، الحدود (مهلة الأوامر وحد الاقتراحات اليومي)، إعادة ضبط بيانات السيرفر بتأكيد.
+- ما حُذف في الجولة الخامسة موثّق في `CLEANUP.md`.
 `/search` للأعمال فقط و`/character` للشخصيات (أنمي/مانجا وألعاب). الألعاب اختيارية: ضع `IGDB_CLIENT_ID` و`IGDB_CLIENT_SECRET` من <https://dev.twitch.tv/console> (تطبيق من نوع Confidential، رابط OAuth: `http://localhost`، وحساب Twitch بتحقق ثنائي) ويعمل VNDB بدون مفتاح. اكتب `/help` لرؤية الأمثلة. أوامر الإدارة تحتاج صلاحية إدارة السيرفر.
 
 > **تنبيه أمني:** نُشر توكن حقيقي سابقًا داخل `.env` في تاريخ المستودع. أعد ضبط التوكن من لوحة المطورين ولا ترفع `.env` أبدًا.
