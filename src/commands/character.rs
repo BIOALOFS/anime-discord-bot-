@@ -6,6 +6,7 @@ use crate::{
         models::{Character, MediaRef},
         safety, AniError, CharacterLookup, ContentPolicy, SafeAniList,
     },
+    db::profile as db,
     error::{Context, Error},
     i18n,
     ui::{
@@ -18,13 +19,18 @@ use crate::{
         },
         select::{character_choices, pick_row, PICK_ID},
         session::{self, Outcome, Page, View},
+        text::clean_description_max,
     },
 };
 use poise::serenity_prelude as serenity;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 
 const BTN_WORKS: &str = "works";
 const BTN_RANDOM: &str = "random_character";
+const BTN_DESCRIBE: &str = "describe";
+const BTN_ADD: &str = "add_to_profile";
+const DESCRIPTION_CHARS: usize = 200;
 const WORKS_PER_PAGE: usize = 10;
 
 #[derive(Clone)]
@@ -40,6 +46,8 @@ pub struct CharacterView {
     mode: Mode,
     history: Vec<Mode>,
     notice: Option<String>,
+    pool: SqlitePool,
+    user: i64,
 }
 
 /// Appearances that may be shown under the given policy.
@@ -56,14 +64,44 @@ fn works_of(c: &Character, policy: ContentPolicy) -> Vec<&MediaRef> {
 }
 
 impl CharacterView {
-    pub fn new(api: Arc<SafeAniList>, policy: ContentPolicy, mode: Mode) -> Self {
+    pub fn new(
+        api: Arc<SafeAniList>,
+        policy: ContentPolicy,
+        mode: Mode,
+        pool: SqlitePool,
+        user: i64,
+    ) -> Self {
         Self {
             api,
             policy,
             mode,
             history: Vec::new(),
             notice: None,
+            pool,
+            user,
         }
+    }
+
+    /// Add the shown character to the presser's own profile.
+    async fn add_to_profile(&mut self) -> Outcome {
+        let Mode::Card(c) = &self.mode else {
+            return Outcome::Keep;
+        };
+        self.notice = Some(match db::get_profile(&self.pool, self.user).await {
+            Ok(Some(_)) => match super::profile::add_and_cache(&self.pool, self.user, c).await {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!("could not add character to profile: {e:#}");
+                    i18n::ERR_GENERIC.to_string()
+                }
+            },
+            Ok(None) => i18n::PROFILE_NONE_SELF.to_string(),
+            Err(e) => {
+                tracing::warn!("profile lookup failed: {e}");
+                i18n::ERR_GENERIC.to_string()
+            }
+        });
+        Outcome::Update
     }
 
     fn fail(&mut self, e: AniError) -> Outcome {
@@ -101,19 +139,22 @@ impl View for CharacterView {
                 (Emb::new().title(i18n::PICK_PROMPT).description(body), rows)
             }
             Mode::Card(c) => {
-                let works = works_of(c, self.policy);
                 let secondary = serenity::ButtonStyle::Secondary;
                 let mut main = vec![
                     serenity::CreateButton::new(BTN_WORKS)
                         .label(i18n::BTN_WORKS)
                         .style(secondary)
                         .disabled(!enabled),
-                    // Placeholder until profiles exist (milestone 4).
-                    serenity::CreateButton::new("add_to_profile")
+                    serenity::CreateButton::new(BTN_DESCRIBE)
+                        .label(i18n::BTN_DESCRIPTION)
+                        .emoji('📖')
+                        .style(secondary)
+                        .disabled(!enabled),
+                    serenity::CreateButton::new(BTN_ADD)
                         .label(i18n::BTN_ADD_TO_PROFILE)
                         .emoji('➕')
                         .style(secondary)
-                        .disabled(true),
+                        .disabled(!enabled),
                     serenity::CreateButton::new(BTN_RANDOM)
                         .label(i18n::BTN_RANDOM_CHARACTER)
                         .emoji('🎲')
@@ -131,9 +172,8 @@ impl View for CharacterView {
                     extra.push(back_button(enabled));
                 }
                 extra.push(close_button(enabled));
-                // Server favourites become real in milestone 4.
                 (
-                    cards::character_embed(c, &works, 0),
+                    cards::character_card(c),
                     vec![buttons(main), buttons(extra)],
                 )
             }
@@ -174,6 +214,20 @@ impl View for CharacterView {
                     page: 0,
                 };
                 Outcome::Update
+            }
+            BTN_ADD => self.add_to_profile().await,
+            BTN_DESCRIBE => {
+                let Mode::Card(c) = &self.mode else {
+                    return Outcome::Keep;
+                };
+                let text = c
+                    .description
+                    .as_deref()
+                    .and_then(|d| {
+                        clean_description_max(d, c.site_url.as_deref(), DESCRIPTION_CHARS)
+                    })
+                    .unwrap_or_else(|| i18n::NO_DESCRIPTION.to_string());
+                Outcome::Whisper(text)
             }
             BTN_RANDOM => match self.api.random_character(self.policy).await {
                 Ok(Some(c)) => {
@@ -294,5 +348,15 @@ pub async fn search(
             Err(e) => return fail(ctx, e).await,
         }
     };
-    session::run(ctx, CharacterView::new(api, policy, mode)).await
+    session::run(
+        ctx,
+        CharacterView::new(
+            api,
+            policy,
+            mode,
+            ctx.data().db.clone(),
+            ctx.author().id.get() as i64,
+        ),
+    )
+    .await
 }

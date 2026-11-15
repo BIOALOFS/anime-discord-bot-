@@ -61,16 +61,6 @@ pub fn episodes_n(n: i32) -> String {
 }
 
 // ---- character card ----
-pub const F_AGE: &str = "العمر";
-pub const F_GENDER: &str = "الجنس";
-pub const F_BIRTHDAY: &str = "تاريخ الميلاد";
-pub const F_BLOOD: &str = "فصيلة الدم";
-pub const F_APPEARANCES: &str = "أبرز الأعمال";
-pub const F_ANILIST_FAVS: &str = "المفضلة على AniList";
-pub const F_SERVER_FAVS: &str = "في مفضلة السيرفر";
-pub fn server_favs(n: i64) -> String {
-    format!("مفضلة عند {n} من أعضاء السيرفر")
-}
 pub const TITLE_WORKS: &str = "أعمال";
 
 // ---- airing ----
@@ -238,3 +228,5 @@ pub fn more_n(n: i64) -> String {
 }
 pub const TIER_NONE: &str = "لم تضع أي شخصية في فئة بعد، استخدم `/profile rank` أولًا.";
 pub const SHARE_TITLE: &str = "صورة بروفايلك جاهزة للمشاركة 📸";
+pub const BTN_DESCRIPTION: &str = "الوصف";
+pub const NO_DESCRIPTION: &str = "لا يوجد وصف متاح لهذه الشخصية.";

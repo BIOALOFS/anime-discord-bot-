@@ -134,7 +134,19 @@ pub async fn random_character(ctx: Context<'_>) -> Result<(), Error> {
     let api = ctx.data().anilist.clone();
     let policy = policy(ctx);
     match api.random_character(policy).await {
-        Ok(Some(c)) => session::run(ctx, CharacterView::new(api, policy, CharMode::Card(c))).await,
+        Ok(Some(c)) => {
+            session::run(
+                ctx,
+                CharacterView::new(
+                    api,
+                    policy,
+                    CharMode::Card(c),
+                    ctx.data().db.clone(),
+                    ctx.author().id.get() as i64,
+                ),
+            )
+            .await
+        }
         Ok(None) => say_ephemeral(ctx, i18n::RANDOM_FAILED).await,
         Err(e) => fail(ctx, e).await,
     }

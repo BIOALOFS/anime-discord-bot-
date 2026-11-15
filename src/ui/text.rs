@@ -114,11 +114,16 @@ fn balance_markup(mut s: String) -> String {
 /// Cleaned description for embeds. `None` when empty or when it contains explicit terms.
 /// Truncated text ends with "..." and, when `url` is given, a "read more" link.
 pub fn clean_description(raw: &str, url: Option<&str>) -> Option<String> {
+    clean_description_max(raw, url, MAX_DESCRIPTION_CHARS)
+}
+
+/// Same as `clean_description` with an explicit length cap.
+pub fn clean_description_max(raw: &str, url: Option<&str>, max: usize) -> Option<String> {
     let text = collapse_blank_lines(&html_to_markdown(raw));
     if text.is_empty() || safety::contains_explicit_term(&text) {
         return None;
     }
-    let (body, cut) = cut_at_boundary(&text, MAX_DESCRIPTION_CHARS);
+    let (body, cut) = cut_at_boundary(&text, max);
     let mut out = balance_markup(body);
     if cut {
         out.push_str("...");
@@ -185,6 +190,14 @@ mod tests {
         let raw = format!("<b>{}</b>", "word ".repeat(100));
         let d = clean_description(&raw, None).expect("d");
         assert_eq!(d.replace("||", "").matches("**").count() % 2, 0);
+    }
+
+    #[test]
+    fn custom_cap_is_respected() {
+        let long = "word ".repeat(100);
+        let d = clean_description_max(&long, None, 200).expect("d");
+        assert!(d.trim_end_matches("...").chars().count() <= 200);
+        assert!(d.ends_with("..."));
     }
 
     #[test]

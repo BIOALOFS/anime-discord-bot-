@@ -5,8 +5,8 @@ use crate::{error::Context, error::Error, i18n};
 use poise::serenity_prelude as serenity;
 use serenity::{
     ComponentInteractionCollector, ComponentInteractionDataKind, CreateActionRow, CreateAttachment,
-    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage,
-    EditInteractionResponse,
+    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, EditInteractionResponse,
 };
 use std::{future::Future, time::Duration};
 
@@ -66,7 +66,7 @@ impl Page {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// Re-render the message.
     Update,
@@ -74,6 +74,8 @@ pub enum Outcome {
     Keep,
     /// Disable the components and end the session.
     Close,
+    /// Leave the message as is and show this text to the presser only (ephemeral follow-up).
+    Whisper(String),
 }
 
 pub trait View: Send {
@@ -134,6 +136,15 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
             _ => Vec::new(),
         };
         let outcome = view.on_interaction(&i.data.custom_id, &values).await;
+        if let Outcome::Whisper(text) = &outcome {
+            let followup = CreateInteractionResponseFollowup::new()
+                .content(text)
+                .ephemeral(true);
+            if let Err(e) = i.create_followup(sctx, followup).await {
+                tracing::debug!("could not send ephemeral follow-up: {e}");
+            }
+            continue;
+        }
         if outcome != Outcome::Keep {
             let page = view.render(outcome != Outcome::Close).into_edit();
             if let Err(e) = i.edit_response(sctx, page).await {

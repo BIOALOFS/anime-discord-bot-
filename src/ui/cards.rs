@@ -322,21 +322,6 @@ pub fn seasonal_embed(title: &str, items: &[Media], page: usize, pages: usize) -
     ))
 }
 
-fn birthday(c: &Character) -> Option<String> {
-    let d = c.date_of_birth.as_ref()?;
-    let mut parts = Vec::new();
-    if let Some(day) = d.day {
-        parts.push(day.to_string());
-    }
-    if let Some(m) = d.month.map(month_ar).filter(|m| !m.is_empty()) {
-        parts.push(m.to_string());
-    }
-    if let Some(y) = d.year {
-        parts.push(y.to_string());
-    }
-    (!parts.is_empty()).then(|| parts.join(" "))
-}
-
 fn work_line(r: &MediaRef) -> Option<String> {
     let title = r.title.as_ref()?.main();
     let mut meta = Vec::new();
@@ -355,71 +340,6 @@ fn work_line(r: &MediaRef) -> Option<String> {
     } else {
         format!("• {label} ({})", meta.join(" · "))
     })
-}
-
-/// `server_favourites` is a placeholder (0) until profiles exist in milestone 4.
-pub fn character_embed(c: &Character, works: &[&MediaRef], server_favourites: i64) -> Emb {
-    let mut names = vec![format!("**{}**", c.display_name())];
-    if let Some(n) = c.name.native.as_deref().filter(|n| !n.is_empty()) {
-        names.push(n.to_string());
-    }
-    let mut alts: Vec<String> = c
-        .name
-        .alternative
-        .iter()
-        .filter(|a| !a.is_empty())
-        .cloned()
-        .collect();
-    alts.extend(
-        c.name
-            .alternative_spoiler
-            .iter()
-            .filter(|a| !a.is_empty())
-            .map(|a| format!("||{a}||")),
-    );
-    let mut desc = names.join(" / ");
-    if !alts.is_empty() {
-        desc.push_str(&format!("\n*{}*", alts.join("، ")));
-    }
-    if let Some(d) = c
-        .description
-        .as_deref()
-        .and_then(|d| clean_description(d, c.site_url.as_deref()))
-    {
-        desc.push_str("\n\n");
-        desc.push_str(&d);
-    }
-    let mut e = Emb::new()
-        .title(c.display_name())
-        .url(c.site_url.clone())
-        .description(desc)
-        .image(c.image_url().map(str::to_string));
-    if let Some(a) = c.age.as_deref().filter(|a| !a.is_empty()) {
-        e = e.field(i18n::F_AGE, a, true);
-    }
-    if let Some(g) = c.gender.as_deref().filter(|g| !g.is_empty()) {
-        e = e.field(i18n::F_GENDER, gender_ar(g), true);
-    }
-    if let Some(b) = birthday(c) {
-        e = e.field(i18n::F_BIRTHDAY, b, true);
-    }
-    if let Some(b) = c.blood_type.as_deref().filter(|b| !b.is_empty()) {
-        e = e.field(i18n::F_BLOOD, b, true);
-    }
-    let top: Vec<String> = works.iter().filter_map(|r| work_line(r)).take(5).collect();
-    if !top.is_empty() {
-        e = e.field(i18n::F_APPEARANCES, top.join("\n"), false);
-    }
-    e = e.field(
-        i18n::F_ANILIST_FAVS,
-        c.favourites.map_or(i18n::NONE.to_string(), thousands),
-        true,
-    );
-    e.field(
-        i18n::F_SERVER_FAVS,
-        i18n::server_favs(server_favourites),
-        true,
-    )
 }
 
 /// Up to 5 nicknames: plain alternatives first, then spoiler ones wrapped in `||`.
@@ -633,30 +553,6 @@ mod tests {
         let mut e = media_embed(&m);
         e.enforce();
         assert!(e.total_len() <= super::super::embeds::MAX_TOTAL);
-    }
-
-    #[test]
-    fn character_card_has_spoilers_and_placeholder_count() {
-        let c: Character = serde_json::from_value(json!({
-            "id": 5, "name": {"full": "Hero", "native": "勇者", "alternative": ["Yuu"], "alternativeSpoiler": ["Secret"]},
-            "age": "17", "gender": "Female", "dateOfBirth": {"year": null, "month": 11, "day": 14},
-            "bloodType": "A", "favourites": 4321, "description": "Brave ~!and strong!~",
-            "media": {"nodes": [{"id": 1, "title": {"romaji": "Show"}, "format": "TV", "seasonYear": 2020, "isAdult": false, "genres": []}]}
-        }))
-        .expect("character");
-        let works: Vec<&MediaRef> = c.media.as_ref().expect("m").nodes.iter().collect();
-        let e = character_embed(&c, &works, 0);
-        let d = e.description.as_deref().expect("desc");
-        assert!(d.contains("||Secret||") && d.contains("||and strong||"));
-        let get = |n: &str| e.fields.iter().find(|f| f.0 == n).map(|f| f.1.clone());
-        assert_eq!(get("الجنس").as_deref(), Some("أنثى"));
-        assert_eq!(get("تاريخ الميلاد").as_deref(), Some("14 نوفمبر"));
-        assert_eq!(get("المفضلة على AniList").as_deref(), Some("4,321"));
-        assert_eq!(
-            get("في مفضلة السيرفر").as_deref(),
-            Some("مفضلة عند 0 من أعضاء السيرفر")
-        );
-        assert!(get("أبرز الأعمال").is_some_and(|w| w.contains("Show")));
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::{
     ui::styles::Style,
 };
 use groups::group;
+pub use manage::add_and_cache;
 use manage::{
     add, bulk_add, clear, create, move_to, note, privacy, rank, remove, set_banner, set_bio,
     set_color, style,
