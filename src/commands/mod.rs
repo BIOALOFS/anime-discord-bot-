@@ -1,11 +1,16 @@
 pub mod airing;
 pub mod character;
+pub mod fallback;
+pub mod game;
+pub mod help;
 pub mod media;
 pub mod profile;
 pub mod random;
+pub mod recommend;
 pub mod roster;
-pub mod seasonal;
-pub mod setup;
+pub mod search;
+pub mod settings;
+pub mod top;
 
 use crate::{
     anilist::{AniError, ContentPolicy},
@@ -13,17 +18,6 @@ use crate::{
     i18n,
 };
 use poise::serenity_prelude as serenity;
-
-/// Health check.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "بينغ"),
-    description_localized("ar", "فحص سرعة استجابة البوت")
-)]
-pub async fn ping(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say(i18n::PING_REPLY).await?;
-    Ok(())
-}
 
 /// Content policy for the current guild. Always safe until `/settings` exists (milestone 8).
 pub fn policy(_ctx: Context<'_>) -> ContentPolicy {
@@ -74,6 +68,25 @@ pub fn buttons(list: Vec<serenity::CreateButton>) -> serenity::CreateActionRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_error_shown_to_users_is_arabic() {
+        let has_arabic = |s: &str| s.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c));
+        for e in [
+            AniError::Busy,
+            AniError::NotFound,
+            AniError::Http("connection reset by peer".into()),
+            AniError::Api("GraphQL: Max query complexity".into()),
+        ] {
+            let msg = ani_message(&e);
+            assert!(has_arabic(msg), "{e:?} -> {msg}");
+            assert!(
+                !msg.contains("connection") && !msg.contains("GraphQL"),
+                "raw error text must not leak"
+            );
+        }
+        assert!(has_arabic(i18n::ERR_GENERIC));
+    }
 
     #[test]
     fn ids_come_from_autocomplete_values_only() {

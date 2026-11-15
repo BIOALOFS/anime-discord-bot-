@@ -398,7 +398,7 @@ async fn export_import_round_trip_and_validation() {
     );
 
     let mut bad = parsed.clone();
-    bad.version = 2;
+    bad.version = 3;
     assert!(matches!(
         import(&pool, V, &bad, &[]).await,
         Err(ProfileError::Invalid(_))
@@ -439,6 +439,17 @@ async fn compare_top_and_server_counters() {
     assert_eq!(compatibility(2, 4, 3), 67);
     assert_eq!(compatibility(0, 0, 3), 0);
     assert_eq!(compatibility(5, 5, 5), 100);
+    assert_eq!(
+        combined_compatibility(2, 4, 3, 1, 2, 2),
+        60,
+        "0.6 * 67 + 0.4 * 50"
+    );
+    assert_eq!(
+        combined_compatibility(2, 4, 3, 0, 0, 5),
+        67,
+        "an empty works side is ignored"
+    );
+    assert_eq!(combined_compatibility(0, 0, 0, 0, 0, 0), 0);
 
     touch_user_guild(&pool, 7, U).await.expect("guild");
     touch_user_guild(&pool, 7, V).await.expect("guild");
@@ -510,4 +521,51 @@ async fn search_own_matches_names_safely() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn delete_user_data_removes_everything_about_the_user() {
+    use crate::db::{custom, game, works};
+    let pool = db_with_profile().await;
+    create_profile(&pool, V).await.expect("v");
+    add_character(&pool, U, 1).await.expect("add");
+    add_character(&pool, V, 1).await.expect("add");
+    works::add_work(&pool, U, "anilist:5", "anime")
+        .await
+        .expect("w");
+    create_group(&pool, U, "G").await.expect("g");
+    touch_user_guild(&pool, 9, U).await.expect("ug");
+    game::record_result(&pool, 9, U, true).await.expect("game");
+    game::hide_recommendation(&pool, U, 7).await.expect("hide");
+    let image = custom::NewImage {
+        hash: "h".into(),
+        mime: "image/png".into(),
+        bytes: vec![1],
+        width: 1,
+        height: 1,
+        animated: false,
+    };
+    let custom::StoreOutcome::Stored(id) =
+        custom::store_image(&pool, U, &image, 5).await.expect("img")
+    else {
+        panic!()
+    };
+    custom::set_character_image(&pool, U, 1, id)
+        .await
+        .expect("attach");
+
+    delete_user_data(&pool, U).await.expect("delete");
+    assert!(get_profile(&pool, U).await.expect("p").is_none());
+    assert_eq!(works::count(&pool, U).await.expect("n"), 0);
+    assert_eq!(custom::image_count(&pool, U).await.expect("n"), 0);
+    assert_eq!(game::total_correct(&pool, U).await.expect("n"), 0);
+    assert!(game::hidden_recommendations(&pool, U)
+        .await
+        .expect("h")
+        .is_empty());
+    assert!(list_groups(&pool, U).await.expect("g").is_empty());
+    assert!(!shares_guild(&pool, U, V).await.expect("s"));
+    // Other users are untouched.
+    assert!(get_profile(&pool, V).await.expect("p").is_some());
+    assert!(has_character(&pool, V, 1).await.expect("c"));
 }

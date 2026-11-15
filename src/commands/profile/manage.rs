@@ -1,18 +1,15 @@
 //! Profile management commands: create, add, bulk-add, remove, clear, move, rank, note, bio, colour, banner,
 //! style, privacy.
 
-use super::{
-    util::{
-        ac_own, banner_url_ok, begin_private, cache_row, now, own_or_reply, parse_color, pool,
-        private_reply, require_own, resolve_character, uid, Resolved,
-    },
-    PrivacyChoice, StyleChoice,
+use super::util::{
+    banner_url_ok, begin_private, cache_row, now, own_or_reply, parse_color, pool, private_reply,
+    require_own, resolve_character, uid, Resolved,
 };
 use crate::{
     anilist::{
         models::Character, safety::contains_explicit_term, AniError, ContentPolicy, SafeAniList,
     },
-    commands::{character::ac_character, policy},
+    commands::policy,
     db::profile::{self as db, AddOutcome},
     error::{Context, Error},
     i18n,
@@ -34,7 +31,7 @@ fn is_clear(s: &str) -> bool {
     CLEAR_WORDS.contains(&s.trim())
 }
 
-pub async fn fail_private(ctx: Context<'_>, e: AniError) -> Result<(), Error> {
+pub(super) async fn fail_private(ctx: Context<'_>, e: AniError) -> Result<(), Error> {
     tracing::warn!(
         command = %ctx.command().name,
         user = %ctx.author().id,
@@ -44,7 +41,6 @@ pub async fn fail_private(ctx: Context<'_>, e: AniError) -> Result<(), Error> {
     private_reply(ctx, crate::commands::ani_message(&e)).await
 }
 
-/// Cache the (already safety-checked) character, then add it to the profile.
 pub async fn add_and_cache(pool: &SqlitePool, user: i64, c: &Character) -> Result<String, Error> {
     db::upsert_cache(pool, &cache_row(c, now())).await?;
     Ok(match db::add_character(pool, user, c.id).await? {
@@ -54,74 +50,6 @@ pub async fn add_and_cache(pool: &SqlitePool, user: i64, c: &Character) -> Resul
 }
 
 // ---- create -----------------------------------------------------------------------------
-
-#[derive(Debug, poise::Modal)]
-#[name = "تخصيص البروفايل"]
-struct CreateModal {
-    #[name = "النبذة"]
-    #[paragraph]
-    #[max_length = 500]
-    bio: Option<String>,
-    #[name = "اللون (مثل #3DB4F2)"]
-    #[max_length = 7]
-    color: Option<String>,
-    #[name = "اقتباس مفضل"]
-    #[max_length = 200]
-    quote: Option<String>,
-}
-
-/// Create your profile.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "إنشاء"),
-    description_localized("ar", "أنشئ بروفايلك")
-)]
-pub async fn create(
-    ctx: Context<'_>,
-    #[description = "Customize bio, colour and quote now"]
-    #[description_localized("ar", "خصّص النبذة واللون والاقتباس الآن")]
-    #[name_localized("ar", "تخصيص")]
-    customize: Option<bool>,
-) -> Result<(), Error> {
-    let pool = pool(ctx);
-    let user = uid(ctx);
-    let mut modal = None;
-    if customize == Some(true) {
-        if let Context::Application(app) = ctx {
-            modal = poise::execute_modal(app, None::<CreateModal>, Some(Duration::from_secs(300)))
-                .await?;
-            if modal.is_none() {
-                return Ok(());
-            }
-        }
-    } else {
-        begin_private(ctx).await?;
-    }
-    let created = db::create_profile(&pool, user).await?;
-    if let Some(m) = modal {
-        if let Some(bio) = m.bio.as_deref() {
-            db::set_bio(&pool, user, Some(bio)).await?;
-        }
-        if let Some(q) = m.quote.as_deref() {
-            db::set_quote(&pool, user, Some(q)).await?;
-        }
-        if let Some(c) = m.color.as_deref().filter(|c| !c.trim().is_empty()) {
-            match parse_color(c) {
-                Some(col) => db::set_color(&pool, user, Some(col)).await?,
-                None => return private_reply(ctx, i18n::COLOR_INVALID).await,
-            }
-        }
-    }
-    private_reply(
-        ctx,
-        if created {
-            i18n::PROFILE_CREATED
-        } else {
-            i18n::PROFILE_EXISTS
-        },
-    )
-    .await
-}
 
 // ---- add --------------------------------------------------------------------------------
 
@@ -163,20 +91,7 @@ impl View for PickAddView {
     }
 }
 
-/// Add a character to your profile.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "إضافة"),
-    description_localized("ar", "أضف شخصية إلى بروفايلك")
-)]
-pub async fn add(
-    ctx: Context<'_>,
-    #[description = "Character name"]
-    #[description_localized("ar", "اسم الشخصية")]
-    #[name_localized("ar", "الشخصية")]
-    #[autocomplete = "ac_character"]
-    character: String,
-) -> Result<(), Error> {
+pub(super) async fn add(ctx: Context<'_>, character: String) -> Result<(), Error> {
     begin_private(ctx).await?;
     if require_own(ctx).await?.is_none() {
         return Ok(());
@@ -231,8 +146,7 @@ pub fn bulk_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Add each line (id, `id:N` or name -> best match). At most `MAX_BULK` lookups per run.
-pub async fn bulk_add_lines(
+pub(super) async fn bulk_add_lines(
     api: &SafeAniList,
     pool: &SqlitePool,
     user: i64,
@@ -291,14 +205,7 @@ async fn push_add(
     Ok(())
 }
 
-/// Add several characters at once.
-#[poise::command(
-    slash_command,
-    rename = "bulk-add",
-    name_localized("ar", "إضافة-متعددة"),
-    description_localized("ar", "أضف عدة شخصيات دفعة واحدة")
-)]
-pub async fn bulk_add(ctx: Context<'_>) -> Result<(), Error> {
+pub(super) async fn bulk_add(ctx: Context<'_>) -> Result<(), Error> {
     let Context::Application(app) = ctx else {
         return Ok(());
     };
@@ -325,20 +232,7 @@ pub async fn bulk_add(ctx: Context<'_>) -> Result<(), Error> {
 
 // ---- remove / clear / move --------------------------------------------------------------
 
-/// Remove a character from your profile.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "إزالة"),
-    description_localized("ar", "أزل شخصية من بروفايلك")
-)]
-pub async fn remove(
-    ctx: Context<'_>,
-    #[description = "Character"]
-    #[description_localized("ar", "الشخصية")]
-    #[name_localized("ar", "الشخصية")]
-    #[autocomplete = "ac_own"]
-    character: String,
-) -> Result<(), Error> {
+pub(super) async fn remove(ctx: Context<'_>, character: String) -> Result<(), Error> {
     begin_private(ctx).await?;
     if require_own(ctx).await?.is_none() {
         return Ok(());
@@ -354,6 +248,8 @@ struct ConfirmView {
     pool: SqlitePool,
     user: i64,
     text: String,
+    /// Clear the favourite works instead of the characters.
+    works: bool,
 }
 
 impl View for ConfirmView {
@@ -379,7 +275,12 @@ impl View for ConfirmView {
     async fn on_interaction(&mut self, id: &str, _values: &[String]) -> Outcome {
         match id {
             "confirm" => {
-                self.text = match db::clear(&self.pool, self.user).await {
+                let cleared = if self.works {
+                    crate::db::works::clear(&self.pool, self.user).await
+                } else {
+                    db::clear(&self.pool, self.user).await
+                };
+                self.text = match cleared {
                     Ok(n) => i18n::cleared(n),
                     Err(e) => {
                         tracing::warn!("clear failed: {e}");
@@ -397,13 +298,7 @@ impl View for ConfirmView {
     }
 }
 
-/// Delete all characters from your profile (asks for confirmation).
-#[poise::command(
-    slash_command,
-    name_localized("ar", "مسح"),
-    description_localized("ar", "احذف كل شخصيات بروفايلك (مع تأكيد)")
-)]
-pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
+pub(super) async fn clear(ctx: Context<'_>) -> Result<(), Error> {
     begin_private(ctx).await?;
     if require_own(ctx).await?.is_none() {
         return Ok(());
@@ -412,28 +307,14 @@ pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
         pool: pool(ctx),
         user: uid(ctx),
         text: i18n::CLEAR_CONFIRM.to_string(),
+        works: false,
     };
     session::run(ctx, view).await
 }
 
-/// Move a character to a position.
-#[poise::command(
-    slash_command,
-    rename = "move",
-    name_localized("ar", "نقل"),
-    description_localized("ar", "انقل شخصية إلى مركز معين")
-)]
-pub async fn move_to(
+pub(super) async fn move_to(
     ctx: Context<'_>,
-    #[description = "Character"]
-    #[description_localized("ar", "الشخصية")]
-    #[name_localized("ar", "الشخصية")]
-    #[autocomplete = "ac_own"]
     character: String,
-    #[description = "New position (1 = first)"]
-    #[description_localized("ar", "المركز الجديد (1 = الأول)")]
-    #[name_localized("ar", "المركز")]
-    #[min = 1]
     position: i64,
 ) -> Result<(), Error> {
     begin_private(ctx).await?;
@@ -449,43 +330,7 @@ pub async fn move_to(
 
 // ---- rank / note ------------------------------------------------------------------------
 
-async fn ac_tier(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
-    if !crate::guild::autocomplete_allowed(ctx).await {
-        return Vec::new();
-    }
-    let mut options: Vec<String> = ["S", "A", "B", "C"].iter().map(|s| s.to_string()).collect();
-    if let Ok(groups) = db::list_groups(&ctx.data().db, uid(ctx)).await {
-        options.extend(groups.into_iter().map(|g| g.name));
-    }
-    options.push("حذف".into());
-    let needle = partial.trim().to_lowercase();
-    options
-        .into_iter()
-        .filter(|o| o.to_lowercase().contains(&needle))
-        .take(25)
-        .map(|o| serenity::AutocompleteChoice::new(o.clone(), o))
-        .collect()
-}
-
-/// Rank a character in a tier (S/A/B/C or a custom name).
-#[poise::command(
-    slash_command,
-    name_localized("ar", "تصنيف"),
-    description_localized("ar", "ضع شخصية في فئة (S/A/B/C أو اسم مخصص)")
-)]
-pub async fn rank(
-    ctx: Context<'_>,
-    #[description = "Character"]
-    #[description_localized("ar", "الشخصية")]
-    #[name_localized("ar", "الشخصية")]
-    #[autocomplete = "ac_own"]
-    character: String,
-    #[description = "Tier, or '-' to clear"]
-    #[description_localized("ar", "الفئة، أو - للحذف")]
-    #[name_localized("ar", "الفئة")]
-    #[autocomplete = "ac_tier"]
-    tier: String,
-) -> Result<(), Error> {
+pub(super) async fn rank(ctx: Context<'_>, character: String, tier: String) -> Result<(), Error> {
     begin_private(ctx).await?;
     if require_own(ctx).await?.is_none() {
         return Ok(());
@@ -501,24 +346,7 @@ pub async fn rank(
     private_reply(ctx, i18n::tier_set(&name, tier.trim())).await
 }
 
-/// Add a private note to a character.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "ملاحظة"),
-    description_localized("ar", "أضف ملاحظة خاصة على شخصية")
-)]
-pub async fn note(
-    ctx: Context<'_>,
-    #[description = "Character"]
-    #[description_localized("ar", "الشخصية")]
-    #[name_localized("ar", "الشخصية")]
-    #[autocomplete = "ac_own"]
-    character: String,
-    #[description = "Note, or '-' to clear"]
-    #[description_localized("ar", "الملاحظة، أو - للحذف")]
-    #[name_localized("ar", "النص")]
-    text: String,
-) -> Result<(), Error> {
+pub(super) async fn note(ctx: Context<'_>, character: String, text: String) -> Result<(), Error> {
     begin_private(ctx).await?;
     if require_own(ctx).await?.is_none() {
         return Ok(());
@@ -536,20 +364,7 @@ pub async fn note(
 
 // ---- bio / colour / banner / style / privacy --------------------------------------------
 
-/// Set your bio.
-#[poise::command(
-    slash_command,
-    rename = "set-bio",
-    name_localized("ar", "تعيين-النبذة"),
-    description_localized("ar", "غيّر نبذة بروفايلك")
-)]
-pub async fn set_bio(
-    ctx: Context<'_>,
-    #[description = "Bio, or '-' to clear"]
-    #[description_localized("ar", "النبذة، أو - للحذف")]
-    #[name_localized("ar", "النص")]
-    text: String,
-) -> Result<(), Error> {
+pub(super) async fn set_bio(ctx: Context<'_>, text: String) -> Result<(), Error> {
     begin_private(ctx).await?;
     if require_own(ctx).await?.is_none() {
         return Ok(());
@@ -566,20 +381,7 @@ pub async fn set_bio(
     private_reply(ctx, i18n::BIO_SET).await
 }
 
-/// Set your accent colour.
-#[poise::command(
-    slash_command,
-    rename = "set-color",
-    name_localized("ar", "تعيين-اللون"),
-    description_localized("ar", "غيّر لون بروفايلك")
-)]
-pub async fn set_color(
-    ctx: Context<'_>,
-    #[description = "Hex colour like #3DB4F2, or '-' to reset"]
-    #[description_localized("ar", "لون مثل #3DB4F2، أو - للإعادة")]
-    #[name_localized("ar", "اللون")]
-    color: String,
-) -> Result<(), Error> {
+pub(super) async fn set_color(ctx: Context<'_>, color: String) -> Result<(), Error> {
     begin_private(ctx).await?;
     if require_own(ctx).await?.is_none() {
         return Ok(());
@@ -604,21 +406,7 @@ async fn banner_size_ok(http: &reqwest::Client, url: &str) -> bool {
     }
 }
 
-/// Set your banner from a character or an image link.
-#[poise::command(
-    slash_command,
-    rename = "set-banner",
-    name_localized("ar", "تعيين-الغلاف"),
-    description_localized("ar", "اختر غلاف بروفايلك من شخصية أو رابط صورة")
-)]
-pub async fn set_banner(
-    ctx: Context<'_>,
-    #[description = "Character or image link ('-' to clear)"]
-    #[description_localized("ar", "شخصية أو رابط صورة (- للحذف)")]
-    #[name_localized("ar", "المصدر")]
-    #[autocomplete = "ac_character"]
-    source: String,
-) -> Result<(), Error> {
+pub(super) async fn set_banner(ctx: Context<'_>, source: String) -> Result<(), Error> {
     begin_private(ctx).await?;
     if require_own(ctx).await?.is_none() {
         return Ok(());
@@ -653,46 +441,19 @@ pub async fn set_banner(
     private_reply(ctx, i18n::BANNER_SET).await
 }
 
-/// Set your default display style.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "نمط"),
-    description_localized("ar", "اختر نمط عرض بروفايلك الافتراضي")
-)]
-pub async fn style(
-    ctx: Context<'_>,
-    #[description = "Style"]
-    #[description_localized("ar", "النمط")]
-    #[name_localized("ar", "النمط")]
-    style: StyleChoice,
-) -> Result<(), Error> {
+/// Delete all favourite works (asks for confirmation).
+pub(super) async fn clear_works(ctx: Context<'_>) -> Result<(), Error> {
     begin_private(ctx).await?;
     if require_own(ctx).await?.is_none() {
         return Ok(());
     }
-    db::set_style(&pool(ctx), uid(ctx), style.style().as_str()).await?;
-    private_reply(ctx, i18n::STYLE_SET).await
-}
-
-/// Choose who can see your profile.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "الخصوصية"),
-    description_localized("ar", "من يستطيع رؤية بروفايلك")
-)]
-pub async fn privacy(
-    ctx: Context<'_>,
-    #[description = "Visibility"]
-    #[description_localized("ar", "مستوى الخصوصية")]
-    #[name_localized("ar", "المستوى")]
-    level: PrivacyChoice,
-) -> Result<(), Error> {
-    begin_private(ctx).await?;
-    if require_own(ctx).await?.is_none() {
-        return Ok(());
-    }
-    db::set_privacy(&pool(ctx), uid(ctx), level.privacy()).await?;
-    private_reply(ctx, i18n::PRIVACY_SET).await
+    let view = ConfirmView {
+        pool: pool(ctx),
+        user: uid(ctx),
+        text: i18n::CLEAR_WORKS_CONFIRM.to_string(),
+        works: true,
+    };
+    session::run(ctx, view).await
 }
 
 #[cfg(test)]

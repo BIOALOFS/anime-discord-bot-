@@ -64,13 +64,17 @@ fn a_deleted_command_channel_disables_the_lock() {
 }
 
 #[test]
-fn setup_and_help_are_always_exempt() {
-    assert!(is_exempt("setup"));
-    assert!(is_exempt("setup channel"));
+fn settings_and_help_are_always_exempt() {
+    assert!(is_exempt("settings"));
+    assert!(is_exempt("settings channel"));
+    assert!(
+        !is_exempt("setup"),
+        "the old /setup command no longer exists"
+    );
     assert!(is_exempt("help"));
     assert!(!is_exempt("profile view"));
     assert!(!is_exempt("anime"));
-    assert!(!is_exempt("setupx"));
+    assert!(!is_exempt("settingsx"));
 }
 
 #[tokio::test]

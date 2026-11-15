@@ -1,33 +1,40 @@
-//! `/anime`, `/manga` and the interactive media card shared with `/seasonal` and `/random`.
+//! The interactive work card (anime, manga, manhwa, manhua, novel) and its cast list.
+//! Entry points live in `/search`, `/random` and `/profile`.
 
 use super::{buttons, fail, parse_id, policy, say_ephemeral};
 use crate::{
     anilist::{
+        kind_of,
         models::{Character, Media},
-        AniError, ContentPolicy, MediaKind, SafeAniList, SeasonalQuery,
+        AniError, ContentPolicy, MediaKind, SafeAniList,
+    },
+    db::{
+        feed::{self, ListMode},
+        profile as pdb,
+        works::{self, MediaCacheRow},
     },
     error::{Context, Error},
     i18n,
     ui::{
         autocomplete::to_choices,
         cards,
-        format::{format_ar, season_ar},
+        format::format_ar,
         pagination::{apply_nav, back_button, close_button, nav_row, parse_nav, BACK, CLOSE},
-        select::{media_choices, pick_row, select_row, PICK_ID},
-        session::{self, Outcome, Page, View},
+        select::{media_choices, pick_row, PICK_ID},
+        session::{self, Outcome, Page, UndoFuture, View, Whisper},
     },
 };
 use poise::serenity_prelude as serenity;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 
 const BTN_CHARACTERS: &str = "characters";
-const BTN_SIMILAR: &str = "similar";
-const BTN_RELATED: &str = "related";
+const BTN_STAR: &str = "star";
+const BTN_BELL: &str = "bell";
 const BTN_REROLL: &str = "reroll";
 const MAX_HISTORY: usize = 8;
-const MAX_RELATED: usize = 10;
 
-/// Where a card came from; decides which extra buttons and paging it has.
+/// Where a card came from; decides which extra buttons it gets.
 #[derive(Clone)]
 pub enum Source {
     Plain,
@@ -36,65 +43,98 @@ pub enum Source {
         genre: Option<String>,
         min_score: Option<u8>,
     },
-    Seasonal(SeasonalQuery),
 }
 
 #[derive(Clone)]
 pub enum Mode {
     Pick(Vec<Media>),
-    Card(Media),
+    Card(Box<Media>),
     Characters {
-        media: Media,
+        media: Box<Media>,
         page: usize,
         pages: usize,
         items: Vec<(Character, String)>,
-    },
-    Similar {
-        media: Media,
-        page: usize,
-        pages: usize,
-        items: Vec<Media>,
-    },
-    Related {
-        media: Media,
-        items: Vec<(String, Media)>,
-    },
-    Seasonal {
-        page: usize,
-        pages: usize,
-        items: Vec<Media>,
     },
 }
 
 pub struct MediaView {
     api: Arc<SafeAniList>,
+    pool: SqlitePool,
+    user: i64,
+    guild: Option<i64>,
+    is_admin: bool,
     policy: ContentPolicy,
     source: Source,
     mode: Mode,
     history: Vec<Mode>,
     notice: Option<String>,
+    /// Is the shown card in the viewer's favourites (drives the ⭐ / ✅ toggle)?
+    added: bool,
+    whisper: Option<Whisper>,
 }
 
-pub(super) fn pages_of(last_page: Option<usize>, has_next: bool, page: usize) -> usize {
+pub fn pages_of(last_page: Option<usize>, has_next: bool, page: usize) -> usize {
     last_page
         .unwrap_or(page + 1 + usize::from(has_next))
         .max(page + 1)
 }
 
+pub fn work_key_of(m: &Media) -> String {
+    works::work_key(m.id)
+}
+
+/// Lightweight metadata so the profile renders even when AniList is down. The media already passed
+/// the safety filter, so it is cached as safe.
+pub fn media_cache_row(m: &Media, now: i64) -> MediaCacheRow {
+    MediaCacheRow {
+        work_id: work_key_of(m),
+        title_romaji: m.title.main().to_string(),
+        title_english: m.title.english.clone(),
+        cover_url: m.cover().map(str::to_string),
+        kind: kind_of(m).key().to_string(),
+        format: m.format.clone(),
+        country: m.country_of_origin.clone(),
+        year: m.year().map(i64::from),
+        score: m.average_score.map(i64::from),
+        status: m.status.clone(),
+        is_safe: true,
+        source: "anilist".into(),
+        fetched_at: now,
+    }
+}
+
 impl MediaView {
-    pub fn new(api: Arc<SafeAniList>, policy: ContentPolicy, source: Source, mode: Mode) -> Self {
-        Self {
-            api,
-            policy,
+    pub async fn new(ctx: Context<'_>, source: Source, mode: Mode) -> Self {
+        let admin = crate::guild::is_admin(ctx.author_member().await.and_then(|m| m.permissions));
+        let mut v = Self {
+            api: ctx.data().anilist.clone(),
+            pool: ctx.data().db.clone(),
+            user: ctx.author().id.get() as i64,
+            guild: ctx.guild_id().map(|g| g.get() as i64),
+            is_admin: admin,
+            policy: policy(ctx),
             source,
             mode,
             history: Vec::new(),
             notice: None,
-        }
+            added: false,
+            whisper: None,
+        };
+        v.refresh_added().await;
+        v
+    }
+
+    async fn refresh_added(&mut self) {
+        self.added = match &self.mode {
+            Mode::Card(m) => works::has_work(&self.pool, self.user, &work_key_of(m))
+                .await
+                .unwrap_or(false),
+            _ => false,
+        };
     }
 
     fn fail(&mut self, e: AniError) -> Outcome {
-        tracing::warn!("anilist error in media view: {e}");
+        tracing::warn!("anilist error in work view: {e}");
         self.notice = Some(super::ani_message(&e).to_string());
         Outcome::Update
     }
@@ -108,18 +148,8 @@ impl MediaView {
 
     fn current_card(&self) -> Option<Media> {
         match &self.mode {
-            Mode::Card(m) => Some(m.clone()),
+            Mode::Card(m) => Some((**m).clone()),
             _ => None,
-        }
-    }
-
-    fn list_media(&self) -> Vec<Media> {
-        match &self.mode {
-            Mode::Pick(l) | Mode::Similar { items: l, .. } | Mode::Seasonal { items: l, .. } => {
-                l.clone()
-            }
-            Mode::Related { items, .. } => items.iter().map(|(_, m)| m.clone()).collect(),
-            _ => Vec::new(),
         }
     }
 
@@ -132,47 +162,11 @@ impl MediaView {
                 let pages = pages_of(p.last_page, p.has_next, 0);
                 self.push_history();
                 self.mode = Mode::Characters {
-                    media,
+                    media: Box::new(media),
                     page: 0,
                     pages,
                     items: p.items,
                 };
-                Outcome::Update
-            }
-            Err(e) => self.fail(e),
-        }
-    }
-
-    async fn open_similar(&mut self) -> Outcome {
-        let Some(media) = self.current_card() else {
-            return Outcome::Keep;
-        };
-        match self.api.recommendations(media.id, 1, self.policy).await {
-            Ok(p) => {
-                let pages = pages_of(p.last_page, p.has_next, 0);
-                self.push_history();
-                self.mode = Mode::Similar {
-                    media,
-                    page: 0,
-                    pages,
-                    items: p.items,
-                };
-                Outcome::Update
-            }
-            Err(e) => self.fail(e),
-        }
-    }
-
-    async fn open_related(&mut self) -> Outcome {
-        let Some(media) = self.current_card() else {
-            return Outcome::Keep;
-        };
-        match self.api.relations(media.id, self.policy).await {
-            Ok(mut items) => {
-                items.sort_by_key(|(rel, _)| cards::relation_rank(rel));
-                items.truncate(MAX_RELATED);
-                self.push_history();
-                self.mode = Mode::Related { media, items };
                 Outcome::Update
             }
             Err(e) => self.fail(e),
@@ -195,7 +189,8 @@ impl MediaView {
         {
             Ok(Some(m)) => {
                 self.history.clear();
-                self.mode = Mode::Card(m);
+                self.mode = Mode::Card(Box::new(m));
+                self.refresh_added().await;
             }
             Ok(None) => self.notice = Some(i18n::RANDOM_FAILED.to_string()),
             Err(e) => return self.fail(e),
@@ -203,117 +198,168 @@ impl MediaView {
         Outcome::Update
     }
 
-    fn open_picked(&mut self, values: &[String]) -> Outcome {
+    async fn open_picked(&mut self, values: &[String]) -> Outcome {
         let Some(id) = values.first().and_then(|v| v.parse::<i64>().ok()) else {
             return Outcome::Keep;
         };
-        let Some(media) = self.list_media().into_iter().find(|m| m.id == id) else {
+        let found = match &self.mode {
+            Mode::Pick(list) => list.iter().find(|m| m.id == id).cloned(),
+            _ => None,
+        };
+        let Some(media) = found else {
             return Outcome::Keep;
         };
         self.push_history();
-        self.mode = Mode::Card(media);
+        self.mode = Mode::Card(Box::new(media));
+        self.refresh_added().await;
         Outcome::Update
     }
 
     async fn navigate(&mut self, nav: crate::ui::pagination::Nav) -> Outcome {
-        enum Target {
-            Characters(i64),
-            Similar(i64),
-            Seasonal,
-        }
-        let (current, pages, target) = match &self.mode {
-            Mode::Characters {
-                media, page, pages, ..
-            } => (*page, *pages, Target::Characters(media.id)),
-            Mode::Similar {
-                media, page, pages, ..
-            } => (*page, *pages, Target::Similar(media.id)),
-            Mode::Seasonal { page, pages, .. } => (*page, *pages, Target::Seasonal),
-            _ => return Outcome::Keep,
+        let Mode::Characters {
+            media, page, pages, ..
+        } = &self.mode
+        else {
+            return Outcome::Keep;
         };
+        let (media, current, pages) = ((**media).clone(), *page, *pages);
         let next = apply_nav(nav, current, pages);
         if next == current {
             return Outcome::Keep;
         }
-        let api_page = (next + 1) as u32;
-        let result: Result<Mode, AniError> = match (&self.mode, target) {
-            (Mode::Characters { media, .. }, Target::Characters(id)) => self
-                .api
-                .media_characters(id, api_page, self.policy)
-                .await
-                .map(|p| Mode::Characters {
-                    media: media.clone(),
-                    page: next,
+        match self
+            .api
+            .media_characters(media.id, (next + 1) as u32, self.policy)
+            .await
+        {
+            Ok(p) => {
+                self.mode = Mode::Characters {
                     pages: pages_of(p.last_page, p.has_next, next).max(pages),
-                    items: p.items,
-                }),
-            (Mode::Similar { media, .. }, Target::Similar(id)) => self
-                .api
-                .recommendations(id, api_page, self.policy)
-                .await
-                .map(|p| Mode::Similar {
-                    media: media.clone(),
+                    media: Box::new(media),
                     page: next,
-                    pages: pages_of(p.last_page, p.has_next, next).max(pages),
                     items: p.items,
-                }),
-            (Mode::Seasonal { .. }, Target::Seasonal) => {
-                let Source::Seasonal(q) = &self.source else {
-                    return Outcome::Keep;
                 };
-                self.api
-                    .seasonal(q, api_page, self.policy)
-                    .await
-                    .map(|p| Mode::Seasonal {
-                        page: next,
-                        pages: pages_of(p.last_page, p.has_next, next).max(pages),
-                        items: p.items,
-                    })
-            }
-            _ => return Outcome::Keep,
-        };
-        match result {
-            Ok(mode) => {
-                self.mode = mode;
                 Outcome::Update
             }
             Err(e) => self.fail(e),
         }
     }
 
+    /// ⭐ / ✅: add or remove the work from the viewer's favourites, with an undo button.
+    async fn toggle_favourite(&mut self) -> Outcome {
+        let Some(m) = self.current_card() else {
+            return Outcome::Keep;
+        };
+        let key = work_key_of(&m);
+        let kind = kind_of(&m).key().to_string();
+        let (pool, user) = (self.pool.clone(), self.user);
+        let result: Result<(String, bool), Error> = async {
+            if self.added {
+                works::remove_work(&pool, user, &key).await?;
+                Ok((i18n::WORK_REMOVED.to_string(), false))
+            } else {
+                pdb::create_profile(&pool, user).await?;
+                works::upsert_media_cache(&pool, &media_cache_row(&m, super::profile::now()))
+                    .await?;
+                works::add_work(&pool, user, &key, &kind).await?;
+                Ok((i18n::WORK_ADDED.to_string(), true))
+            }
+        }
+        .await;
+        match result {
+            Ok((text, now_added)) => {
+                self.added = now_added;
+                let (undo_pool, undo_key, undo_kind) = (pool, key, kind);
+                let undo: Box<dyn FnOnce() -> UndoFuture + Send + Sync> = Box::new(move || {
+                    Box::pin(async move {
+                        let r = if now_added {
+                            works::remove_work(&undo_pool, user, &undo_key)
+                                .await
+                                .map(|_| i18n::UNDONE)
+                        } else {
+                            works::add_work(&undo_pool, user, &undo_key, &undo_kind)
+                                .await
+                                .map(|_| i18n::UNDONE)
+                        };
+                        r.unwrap_or(i18n::ERR_GENERIC).to_string()
+                    })
+                });
+                self.whisper = Some(Whisper {
+                    text,
+                    undo: Some(undo),
+                });
+            }
+            Err(e) => {
+                tracing::warn!("favourite toggle failed: {e:#}");
+                self.whisper = Some(Whisper::text(i18n::ERR_GENERIC));
+            }
+        }
+        Outcome::Update
+    }
+
+    /// 🔔: admins add the anime to the notification list; members send a request for approval.
+    async fn bell(&mut self) -> Outcome {
+        let (Some(m), Some(guild)) = (self.current_card(), self.guild) else {
+            self.whisper = Some(Whisper::text(i18n::GUILD_ONLY));
+            return Outcome::Keep;
+        };
+        let title = m.title.main().to_string();
+        let text = if self.is_admin {
+            match feed::set_list_entry(&self.pool, guild, m.id, &title, ListMode::Listed).await {
+                Ok(()) => i18n::ALERT_ADDED.to_string(),
+                Err(e) => {
+                    tracing::warn!("alert list update failed: {e}");
+                    i18n::ERR_GENERIC.to_string()
+                }
+            }
+        } else {
+            match feed::add_request(&self.pool, guild, m.id, &title, self.user).await {
+                Ok(true) => i18n::ALERT_REQUESTED.to_string(),
+                Ok(false) => i18n::ALERT_ALREADY_REQUESTED.to_string(),
+                Err(e) => {
+                    tracing::warn!("alert request failed: {e}");
+                    i18n::ERR_GENERIC.to_string()
+                }
+            }
+        };
+        self.whisper = Some(Whisper::text(text));
+        Outcome::Keep
+    }
+
     fn card_rows(&self, m: &Media, enabled: bool) -> Vec<serenity::CreateActionRow> {
         let secondary = serenity::ButtonStyle::Secondary;
+        let (star_label, star_style) = if self.added {
+            (i18n::BTN_ADDED, serenity::ButtonStyle::Success)
+        } else {
+            (i18n::BTN_FAVOURITE, secondary)
+        };
         let mut main = vec![
+            serenity::CreateButton::new(BTN_STAR)
+                .label(star_label)
+                .emoji(if self.added { '✅' } else { '⭐' })
+                .style(star_style)
+                .disabled(!enabled),
             serenity::CreateButton::new(BTN_CHARACTERS)
                 .label(i18n::BTN_CHARACTERS)
+                .emoji('👥')
                 .style(secondary)
                 .disabled(!enabled),
-            serenity::CreateButton::new(BTN_SIMILAR)
-                .label(i18n::BTN_SIMILAR)
-                .style(secondary)
-                .disabled(!enabled),
-            serenity::CreateButton::new(BTN_RELATED)
-                .label(i18n::BTN_RELATED)
-                .style(secondary)
-                .disabled(!enabled),
-            // Placeholder until profiles exist (milestone 4).
-            serenity::CreateButton::new("favourite")
-                .label(i18n::BTN_FAVOURITE)
-                .emoji('⭐')
-                .style(secondary)
-                .disabled(true),
         ];
+        if kind_of(m) == MediaKind::Anime && self.guild.is_some() {
+            main.push(
+                serenity::CreateButton::new(BTN_BELL)
+                    .label(i18n::BTN_ALERTS)
+                    .emoji('🔔')
+                    .style(secondary)
+                    .disabled(!enabled),
+            );
+        }
         if let Some(url) = &m.site_url {
             main.push(
                 serenity::CreateButton::new_link(url).label(format!("🔗 {}", i18n::BTN_ANILIST)),
             );
         }
         let mut extra = Vec::new();
-        if let Some(url) = m.trailer_url() {
-            extra.push(
-                serenity::CreateButton::new_link(url).label(format!("▶ {}", i18n::BTN_TRAILER)),
-            );
-        }
         if matches!(self.source, Source::Random { .. }) {
             extra.push(
                 serenity::CreateButton::new(BTN_REROLL)
@@ -329,32 +375,22 @@ impl MediaView {
         extra.push(close_button(enabled));
         vec![buttons(main), buttons(extra)]
     }
-
-    fn actions(&self, enabled: bool) -> serenity::CreateActionRow {
-        let mut row = Vec::new();
-        if !self.history.is_empty() {
-            row.push(back_button(enabled));
-        }
-        row.push(close_button(enabled));
-        buttons(row)
-    }
-
-    fn seasonal_title(&self) -> String {
-        match &self.source {
-            Source::Seasonal(q) => i18n::seasonal_title(season_ar(q.season), q.year),
-            _ => String::new(),
-        }
-    }
 }
 
 impl View for MediaView {
+    fn take_whisper(&mut self) -> Option<Whisper> {
+        self.whisper.take()
+    }
+
     fn render(&self, enabled: bool) -> Page {
         let (embed, mut rows) = match &self.mode {
             Mode::Pick(list) => (
                 cards::picker_embed(list),
-                pick_row(media_choices(list), enabled).into_iter().collect(),
+                pick_row(media_choices(list), enabled)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
             ),
-            Mode::Card(m) => (cards::media_embed(m), self.card_rows(m, enabled)),
+            Mode::Card(m) => (cards::work_card(m), self.card_rows(m, enabled)),
             Mode::Characters {
                 media,
                 page,
@@ -364,45 +400,14 @@ impl View for MediaView {
                 cards::characters_embed(media, items, *page, *pages),
                 vec![nav_row(*page, *pages, enabled)],
             ),
-            Mode::Similar {
-                media,
-                page,
-                pages,
-                items,
-            } => {
-                let mut rows: Vec<_> = pick_row(media_choices(items), enabled)
-                    .into_iter()
-                    .collect();
-                rows.push(nav_row(*page, *pages, enabled));
-                (cards::similar_embed(media, items, *page, *pages), rows)
-            }
-            Mode::Related { media, items } => {
-                let list: Vec<Media> = items.iter().map(|(_, m)| m.clone()).collect();
-                (
-                    cards::related_embed(media, items),
-                    pick_row(media_choices(&list), enabled)
-                        .into_iter()
-                        .collect(),
-                )
-            }
-            Mode::Seasonal { page, pages, items } => {
-                let mut rows: Vec<_> = select_row(
-                    PICK_ID,
-                    i18n::SEASONAL_PLACEHOLDER,
-                    media_choices(items),
-                    enabled,
-                )
-                .into_iter()
-                .collect();
-                rows.push(nav_row(*page, *pages, enabled));
-                (
-                    cards::seasonal_embed(&self.seasonal_title(), items, *page, *pages),
-                    rows,
-                )
-            }
         };
         if !matches!(self.mode, Mode::Card(_)) {
-            rows.push(self.actions(enabled));
+            let mut row = Vec::new();
+            if !self.history.is_empty() {
+                row.push(back_button(enabled));
+            }
+            row.push(close_button(enabled));
+            rows.push(buttons(row));
         }
         Page::embed(embed.build(), rows).notice(self.notice.clone())
     }
@@ -414,15 +419,16 @@ impl View for MediaView {
             BACK => match self.history.pop() {
                 Some(previous) => {
                     self.mode = previous;
+                    self.refresh_added().await;
                     Outcome::Update
                 }
                 None => Outcome::Keep,
             },
+            BTN_STAR => self.toggle_favourite().await,
+            BTN_BELL => self.bell().await,
             BTN_CHARACTERS => self.open_characters().await,
-            BTN_SIMILAR => self.open_similar().await,
-            BTN_RELATED => self.open_related().await,
             BTN_REROLL => self.reroll().await,
-            PICK_ID => self.open_picked(values),
+            PICK_ID => self.open_picked(values).await,
             other => match parse_nav(other) {
                 Some(nav) => self.navigate(nav).await,
                 None => Outcome::Keep,
@@ -435,19 +441,21 @@ impl View for MediaView {
 
 fn media_label(m: &Media) -> String {
     let mut bits = Vec::new();
-    if let Some(y) = m.season_year {
+    if let Some(y) = m.year() {
         bits.push(y.to_string());
     }
-    if let Some(f) = &m.format {
+    bits.push(cards::kind_label(kind_of(m)).to_string());
+    if let Some(f) = m
+        .format
+        .as_deref()
+        .filter(|_| kind_of(m) == MediaKind::Anime)
+    {
         bits.push(format_ar(f).to_string());
     }
-    if bits.is_empty() {
-        m.title.main().to_string()
-    } else {
-        format!("{} ({})", m.title.main(), bits.join(" · "))
-    }
+    format!("{} ({})", m.title.main(), bits.join(" · "))
 }
 
+/// Autocomplete over AniList works of `kind` (values are `id:123`).
 pub async fn media_autocomplete(
     ctx: Context<'_>,
     kind: MediaKind,
@@ -457,7 +465,6 @@ pub async fn media_autocomplete(
     if !crate::guild::autocomplete_allowed(ctx).await {
         return Vec::new();
     }
-
     let data = ctx.data();
     let api = data.anilist.clone();
     let items = data
@@ -475,66 +482,55 @@ pub async fn media_autocomplete(
     to_choices(items)
 }
 
-async fn ac_anime(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
-    media_autocomplete(ctx, MediaKind::Anime, "anime", partial).await
-}
-
-async fn ac_manga(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
-    media_autocomplete(ctx, MediaKind::Manga, "manga", partial).await
+/// Autocomplete across every work kind at once (profile favourites); values are `id:123`.
+pub async fn any_autocomplete(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
+    let data = ctx.data();
+    let api = data.anilist.clone();
+    let items = data
+        .auto
+        .items(ctx.author().id.get(), "work", partial, |q| async move {
+            match api.search_any(&q, 10, ContentPolicy::SAFE).await {
+                Ok(list) => list
+                    .iter()
+                    .map(|m| (media_label(m), format!("id:{}", m.id)))
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        })
+        .await;
+    to_choices(items)
 }
 
 /// Resolve the typed value (autocomplete id or free text) and run the interactive card.
-async fn run_media(ctx: Context<'_>, kind: MediaKind, input: String) -> Result<(), Error> {
+pub async fn run_media(ctx: Context<'_>, kind: MediaKind, input: String) -> Result<(), Error> {
     ctx.defer().await?;
     let api = ctx.data().anilist.clone();
     let policy = policy(ctx);
     let mode = if let Some(id) = parse_id(&input) {
         match api.media_by_id(id, policy).await {
-            Ok(Some(m)) => Mode::Card(m),
+            Ok(Some(m)) => Mode::Card(Box::new(m)),
             Ok(None) => return say_ephemeral(ctx, i18n::NOT_FOUND).await,
             Err(e) => return fail(ctx, e).await,
         }
     } else {
         match api.search_media(input.trim(), kind, 10, policy).await {
-            Ok(mut v) if v.len() == 1 => Mode::Card(v.remove(0)),
-            Ok(v) if v.is_empty() => return say_ephemeral(ctx, i18n::NO_RESULTS).await,
+            Ok(mut v) if v.len() == 1 => Mode::Card(Box::new(v.remove(0))),
+            Ok(v) if v.is_empty() => {
+                // AniList has nothing: try the (opt-in) fallback catalogs for written works.
+                if kind.is_written() && super::fallback::run(ctx, input.trim()).await? {
+                    return Ok(());
+                }
+                return say_ephemeral(ctx, i18n::NO_RESULTS).await;
+            }
             Ok(v) => Mode::Pick(v),
             Err(e) => return fail(ctx, e).await,
         }
     };
-    session::run(ctx, MediaView::new(api, policy, Source::Plain, mode)).await
-}
-
-/// Search for an anime.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "أنمي"),
-    description_localized("ar", "ابحث عن أنمي")
-)]
-pub async fn anime(
-    ctx: Context<'_>,
-    #[description = "Anime title"]
-    #[description_localized("ar", "اسم الأنمي")]
-    #[name_localized("ar", "الاسم")]
-    #[autocomplete = "ac_anime"]
-    name: String,
-) -> Result<(), Error> {
-    run_media(ctx, MediaKind::Anime, name).await
-}
-
-/// Search for a manga.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "مانغا"),
-    description_localized("ar", "ابحث عن مانغا")
-)]
-pub async fn manga(
-    ctx: Context<'_>,
-    #[description = "Manga title"]
-    #[description_localized("ar", "اسم المانغا")]
-    #[name_localized("ar", "الاسم")]
-    #[autocomplete = "ac_manga"]
-    name: String,
-) -> Result<(), Error> {
-    run_media(ctx, MediaKind::Manga, name).await
+    session::run(ctx, MediaView::new(ctx, Source::Plain, mode).await).await
 }

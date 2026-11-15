@@ -112,9 +112,43 @@ pub struct Media {
     pub next_airing_episode: Option<NextAiring>,
     pub trailer: Option<Trailer>,
     pub staff: Option<StaffConnection>,
+    pub country_of_origin: Option<String>,
+    #[serde(default)]
+    pub external_links: Vec<ExternalLink>,
+    pub volumes: Option<i32>,
+    pub start_date: Option<StartDate>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExternalLink {
+    pub url: Option<String>,
+    pub site: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StartDate {
+    pub year: Option<i32>,
 }
 
 impl Media {
+    /// First legal streaming site, if AniList lists one.
+    pub fn streaming_link(&self) -> Option<&str> {
+        self.external_links
+            .iter()
+            .find(|l| l.kind.as_deref() == Some("STREAMING"))
+            .and_then(|l| l.url.as_deref())
+    }
+
+    /// Release year: the start date, else the season year.
+    pub fn year(&self) -> Option<i32> {
+        self.start_date
+            .as_ref()
+            .and_then(|d| d.year)
+            .or(self.season_year)
+    }
+
     pub fn cover(&self) -> Option<&str> {
         let c = self.cover_image.as_ref()?;
         c.large.as_deref().or(c.extra_large.as_deref())

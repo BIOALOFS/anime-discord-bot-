@@ -21,19 +21,91 @@ impl ContentPolicy {
     pub const SAFE: Self = Self { allow_adult: false };
 }
 
-#[derive(Debug, Clone, Copy)]
+/// What the user searches for. AniList files manhwa/manhua/novels under MANGA, told apart by
+/// `countryOfOrigin` (JP manga, KR manhwa, CN manhua) and `format` (NOVEL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaKind {
     Anime,
     Manga,
+    Manhwa,
+    Manhua,
+    Novel,
 }
 
 impl MediaKind {
-    fn as_str(self) -> &'static str {
+    pub const ALL: [MediaKind; 5] = [
+        Self::Anime,
+        Self::Manga,
+        Self::Manhwa,
+        Self::Manhua,
+        Self::Novel,
+    ];
+
+    pub fn key(self) -> &'static str {
         match self {
-            Self::Anime => "ANIME",
-            Self::Manga => "MANGA",
+            Self::Anime => "anime",
+            Self::Manga => "manga",
+            Self::Manhwa => "manhwa",
+            Self::Manhua => "manhua",
+            Self::Novel => "novel",
         }
     }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.key() == key)
+    }
+
+    fn type_str(self) -> &'static str {
+        if self == Self::Anime {
+            "ANIME"
+        } else {
+            "MANGA"
+        }
+    }
+
+    fn country(self) -> Option<&'static str> {
+        match self {
+            Self::Manga => Some("JP"),
+            Self::Manhwa => Some("KR"),
+            Self::Manhua => Some("CN"),
+            _ => None,
+        }
+    }
+
+    fn formats(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Novel => Some(&["NOVEL"]),
+            Self::Manga | Self::Manhwa | Self::Manhua => Some(&["MANGA", "ONE_SHOT"]),
+            Self::Anime => None,
+        }
+    }
+
+    /// Chapters/volumes instead of episodes.
+    pub fn is_written(self) -> bool {
+        self != Self::Anime
+    }
+}
+
+/// The kind a media belongs to, from its format and country.
+pub fn kind_of(m: &Media) -> MediaKind {
+    match (m.format.as_deref(), m.country_of_origin.as_deref()) {
+        (Some("NOVEL"), _) => MediaKind::Novel,
+        (Some("MANGA" | "ONE_SHOT"), Some("KR")) => MediaKind::Manhwa,
+        (Some("MANGA" | "ONE_SHOT"), Some("CN" | "TW")) => MediaKind::Manhua,
+        (Some("MANGA" | "ONE_SHOT"), _) => MediaKind::Manga,
+        _ => MediaKind::Anime,
+    }
+}
+
+fn kind_vars(mut vars: Value, kind: MediaKind) -> Value {
+    vars["type"] = json!(kind.type_str());
+    if let Some(c) = kind.country() {
+        vars["country"] = json!(c);
+    }
+    if let Some(f) = kind.formats() {
+        vars["formatIn"] = json!(f);
+    }
+    vars
 }
 
 #[derive(Debug, Clone)]
@@ -50,15 +122,6 @@ pub enum CharacterLookup {
     Found(Box<Character>),
     Hidden,
     NotFound,
-}
-
-#[derive(Debug, Clone)]
-pub struct SeasonalQuery {
-    pub season: &'static str,
-    pub year: i32,
-    pub sort: &'static str,
-    /// Empty means all formats.
-    pub formats: &'static [&'static str],
 }
 
 #[derive(Debug, Clone)]
@@ -174,12 +237,39 @@ impl SafeAniList {
         policy: ContentPolicy,
     ) -> Result<Vec<Media>, AniError> {
         let vars = adult_vars(
-            json!({"search": query, "type": kind.as_str(), "perPage": per_page.min(10)}),
+            kind_vars(json!({"search": query, "perPage": per_page.min(10)}), kind),
             policy,
         );
         let key = format!(
             "sm:{}:{}:{per_page}:{}",
-            kind.as_str(),
+            kind.key(),
+            query.to_lowercase(),
+            policy.allow_adult
+        );
+        let list: Vec<Media> = match self
+            .client
+            .get(Which::Search, key, queries::SEARCH_MEDIA, vars)
+            .await?
+        {
+            Some(doc) => parse(&doc, "/Page/media")?,
+            None => Vec::new(),
+        };
+        Ok(filter_media(list, policy))
+    }
+
+    /// Search across anime and every written kind at once (profile favourites).
+    pub async fn search_any(
+        &self,
+        query: &str,
+        per_page: u8,
+        policy: ContentPolicy,
+    ) -> Result<Vec<Media>, AniError> {
+        let vars = adult_vars(
+            json!({"search": query, "perPage": per_page.min(10)}),
+            policy,
+        );
+        let key = format!(
+            "sa:{}:{per_page}:{}",
             query.to_lowercase(),
             policy.allow_adult
         );
@@ -348,47 +438,6 @@ impl SafeAniList {
             .collect())
     }
 
-    pub async fn seasonal(
-        &self,
-        q: &SeasonalQuery,
-        page: u32,
-        policy: ContentPolicy,
-    ) -> Result<Page<Media>, AniError> {
-        let mut vars = json!({
-            "season": q.season, "year": q.year, "page": page, "perPage": 10, "sort": [q.sort],
-        });
-        if !q.formats.is_empty() {
-            vars["formatIn"] = json!(q.formats);
-        }
-        let vars = adult_vars(vars, policy);
-        let key = format!(
-            "se:{}:{}:{page}:{}:{}:{}",
-            q.season,
-            q.year,
-            q.sort,
-            q.formats.join(","),
-            policy.allow_adult
-        );
-        let Some(doc) = self
-            .client
-            .get(Which::Search, key, queries::SEASONAL, vars)
-            .await?
-        else {
-            return Ok(Page {
-                items: Vec::new(),
-                has_next: false,
-                last_page: None,
-            });
-        };
-        let list: Vec<Media> = parse(&doc, "/Page/media")?;
-        let (has_next, last_page) = page_flags(&doc, "/Page");
-        Ok(Page {
-            items: filter_media(list, policy),
-            has_next,
-            last_page,
-        })
-    }
-
     pub async fn airing_for_media(
         &self,
         id: i64,
@@ -478,7 +527,7 @@ impl SafeAniList {
         let mut max_page: usize = 50;
         for _ in 0..5 {
             let page = rand::random_range(1..=max_page.max(1));
-            let mut vars = json!({"page": page, "type": kind.as_str()});
+            let mut vars = kind_vars(json!({"page": page}), kind);
             if let Some(g) = genre.filter(|g| !g.is_empty()) {
                 vars["genre"] = json!(g);
             }
@@ -488,7 +537,7 @@ impl SafeAniList {
             let vars = adult_vars(vars, policy);
             let key = format!(
                 "rm:{}:{}:{}:{page}:{}",
-                kind.as_str(),
+                kind.key(),
                 genre.unwrap_or(""),
                 min_score.unwrap_or(0),
                 policy.allow_adult
@@ -602,6 +651,116 @@ impl SafeAniList {
             }
             if let Some(c) = pick(self.visible(list, policy).await) {
                 return Ok(Some(c));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Safe characters whose birthday is today, most favourited first (one page of up to 10).
+    pub async fn birthdays_today(&self, policy: ContentPolicy) -> Result<Vec<Character>, AniError> {
+        // The key carries the UTC day so the cache never serves yesterday's birthdays.
+        let day = chrono::Utc::now().format("%Y-%m-%d");
+        let key = format!("bd:{day}");
+        let list: Vec<Character> = match self
+            .client
+            .get(Which::Search, key, queries::BIRTHDAYS, json!({"page": 1}))
+            .await?
+        {
+            Some(doc) => parse(&doc, "/Page/characters")?,
+            None => Vec::new(),
+        };
+        Ok(self.visible(list, policy).await)
+    }
+
+    /// The same character for everyone on a given day: `seed` (e.g. a hash of date and server) picks
+    /// a page of the 200 most favourited characters and an entry on it.
+    pub async fn daily_character(
+        &self,
+        seed: u64,
+        policy: ContentPolicy,
+    ) -> Result<Option<Character>, AniError> {
+        let page = 1 + (seed % 20) as usize;
+        let key = format!("rc:{page}");
+        let Some(doc) = self
+            .client
+            .get(
+                Which::Search,
+                key,
+                queries::RANDOM_CHARACTER,
+                json!({ "page": page }),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let list: Vec<Character> = parse(&doc, "/Page/characters")?;
+        let mut visible = self.visible(list, policy).await;
+        if visible.is_empty() {
+            return Ok(None);
+        }
+        let i = ((seed / 20) as usize) % visible.len();
+        Ok(Some(visible.swap_remove(i)))
+    }
+
+    /// Four distinct safe characters of similar popularity (one page): the answer plus three decoys.
+    pub async fn random_character_set(
+        &self,
+        policy: ContentPolicy,
+    ) -> Result<Option<(Character, Vec<Character>)>, AniError> {
+        for _ in 0..5 {
+            let page = rand::random_range(1..=100usize);
+            let key = format!("rc:{page}");
+            let Some(doc) = self
+                .client
+                .get(
+                    Which::Search,
+                    key,
+                    queries::RANDOM_CHARACTER,
+                    json!({ "page": page }),
+                )
+                .await?
+            else {
+                continue;
+            };
+            let list: Vec<Character> = parse(&doc, "/Page/characters")?;
+            let mut visible = self.visible(list, policy).await;
+            visible.retain(|c| c.image_url().is_some());
+            if visible.len() >= 4 {
+                let answer = visible.swap_remove(rand::random_range(0..visible.len()));
+                let decoys = (0..3)
+                    .map(|_| visible.swap_remove(rand::random_range(0..visible.len())))
+                    .collect();
+                return Ok(Some((answer, decoys)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Four distinct safe works of one kind and similar popularity: the answer plus three decoys.
+    pub async fn random_media_set(
+        &self,
+        kind: MediaKind,
+        policy: ContentPolicy,
+    ) -> Result<Option<(Media, Vec<Media>)>, AniError> {
+        for _ in 0..5 {
+            let page = rand::random_range(1..=50usize);
+            let vars = adult_vars(kind_vars(json!({"page": page}), kind), policy);
+            let key = format!("rm:{}::{page}:{}", kind.key(), policy.allow_adult);
+            let Some(doc) = self
+                .client
+                .get(Which::Search, key, queries::RANDOM_MEDIA, vars)
+                .await?
+            else {
+                continue;
+            };
+            let list: Vec<Media> = parse(&doc, "/Page/media")?;
+            let mut safe = filter_media(list, policy);
+            if safe.len() >= 4 {
+                let answer = safe.swap_remove(rand::random_range(0..safe.len()));
+                let decoys = (0..3)
+                    .map(|_| safe.swap_remove(rand::random_range(0..safe.len())))
+                    .collect();
+                return Ok(Some((answer, decoys)));
             }
         }
         Ok(None)

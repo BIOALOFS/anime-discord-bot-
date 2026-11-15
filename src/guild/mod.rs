@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Duration};
 
 pub const MAX_EXTRA_CHANNELS: usize = 5;
 /// Commands that always work so a server can be configured.
-const EXEMPT_ROOTS: &[&str] = &["setup", "help"];
+const EXEMPT_ROOTS: &[&str] = &["settings", "help"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelSettings {

@@ -2,8 +2,6 @@
 
 use crate::{anilist::safety, i18n};
 
-pub const MAX_DESCRIPTION_CHARS: usize = 350;
-
 fn tag_replacement(tag: &str) -> &'static str {
     let name = tag
         .trim()
@@ -111,12 +109,6 @@ fn balance_markup(mut s: String) -> String {
     s
 }
 
-/// Cleaned description for embeds. `None` when empty or when it contains explicit terms.
-/// Truncated text ends with "..." and, when `url` is given, a "read more" link.
-pub fn clean_description(raw: &str, url: Option<&str>) -> Option<String> {
-    clean_description_max(raw, url, MAX_DESCRIPTION_CHARS)
-}
-
 /// Same as `clean_description` with an explicit length cap.
 pub fn clean_description_max(raw: &str, url: Option<&str>, max: usize) -> Option<String> {
     let text = collapse_blank_lines(&html_to_markdown(raw));
@@ -137,6 +129,12 @@ pub fn clean_description_max(raw: &str, url: Option<&str>, max: usize) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MAX_DESCRIPTION_CHARS: usize = 350;
+
+    fn clean_description(raw: &str, url: Option<&str>) -> Option<String> {
+        clean_description_max(raw, url, MAX_DESCRIPTION_CHARS)
+    }
 
     #[test]
     fn html_and_spoilers() {

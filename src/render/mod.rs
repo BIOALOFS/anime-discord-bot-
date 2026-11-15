@@ -28,6 +28,8 @@ const CACHE_BYTES: u64 = 48 * 1024 * 1024;
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct CellSpec {
     pub label: String,
+    /// Personal title shown under the name.
+    pub subtitle: Option<String>,
     /// 1-3 get a gold/silver/bronze badge.
     pub rank: Option<u8>,
     pub image_url: Option<String>,
@@ -36,6 +38,8 @@ pub struct CellSpec {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct HeaderSpec {
     pub name: String,
+    /// Single letters drawn as small badges (C collector, G gamer, W loyal watcher).
+    pub badges: Vec<char>,
     pub bio: Option<String>,
     pub count: i64,
     pub avatar_url: Option<String>,
@@ -57,6 +61,59 @@ pub struct Rendered {
 }
 
 pub type Images = HashMap<String, Arc<RgbaImage>>;
+
+/// Colour/frame theme chosen with `/profile` -> template.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
+pub struct Theme(u8);
+
+pub const THEMES: [&str; 5] = ["classic", "midnight", "sakura", "ocean", "mono"];
+
+impl Theme {
+    pub fn by_name(name: &str) -> Self {
+        Self(THEMES.iter().position(|t| *t == name).unwrap_or(0) as u8)
+    }
+
+    /// Accent used when the profile has no colour of its own.
+    pub fn default_accent(self) -> Option<u32> {
+        match self.0 {
+            1 => Some(0x5865F2),
+            2 => Some(0xF78FB3),
+            3 => Some(0x1ABC9C),
+            4 => Some(0x9AA0A6),
+            _ => None,
+        }
+    }
+
+    /// Outline drawn around every cell.
+    pub fn frame(self) -> Option<[u8; 3]> {
+        match self.0 {
+            1 => Some([0x8C, 0x96, 0xFF]),
+            2 => Some([0xFF, 0xC2, 0xD6]),
+            3 => Some([0x7F, 0xF0, 0xD8]),
+            4 => Some([0xDD, 0xDD, 0xDD]),
+            _ => None,
+        }
+    }
+
+    /// Background brightness factors (top, bottom).
+    pub fn darkness(self) -> (f32, f32) {
+        match self.0 {
+            1 => (0.30, 0.06),
+            2 => (0.55, 0.20),
+            4 => (0.35, 0.10),
+            _ => (0.45, 0.12),
+        }
+    }
+}
+
+pub fn is_theme(name: &str) -> bool {
+    THEMES.contains(&name)
+}
+
+/// First frame of a stored custom image (PNG/JPEG/WebP/GIF), shrunk for grids.
+pub fn first_frame(bytes: &[u8]) -> Option<RgbaImage> {
+    fetch::decode(bytes)
+}
 
 pub struct Renderer {
     http: reqwest::Client,
@@ -114,6 +171,7 @@ impl Renderer {
         &self,
         key: u64,
         urls: Vec<String>,
+        extra: Images,
         draw: F,
     ) -> Option<Arc<Rendered>>
     where
@@ -122,7 +180,8 @@ impl Renderer {
         if let Some(hit) = self.outputs.get(&key).await {
             return Some(hit);
         }
-        let images = self.fetch_all(urls).await;
+        let mut images = self.fetch_all(urls).await;
+        images.extend(extra);
         let rendered = tokio::task::spawn_blocking(move || draw(&images))
             .await
             .ok()??;
@@ -136,15 +195,17 @@ impl Renderer {
         cells: Vec<CellSpec>,
         header: Option<HeaderSpec>,
         accent: Option<u32>,
+        theme: Theme,
         scale: f32,
+        extra: Images,
     ) -> Option<Arc<Rendered>> {
         if cells.is_empty() {
             return None;
         }
-        let key = key_of(&("collage", &cells, &header, accent, scale.to_bits()));
+        let key = key_of(&("collage", &cells, &header, accent, theme, scale.to_bits()));
         let urls = urls_of(cells.iter(), header.as_ref());
-        self.cached_or_render(key, urls, move |imgs| {
-            draw::collage(&cells, header.as_ref(), accent, scale, imgs)
+        self.cached_or_render(key, urls, extra, move |imgs| {
+            draw::collage(&cells, header.as_ref(), accent, theme, scale, imgs)
         })
         .await
     }
@@ -154,16 +215,47 @@ impl Renderer {
         top: Vec<CellSpec>,
         header: Option<HeaderSpec>,
         accent: Option<u32>,
+        theme: Theme,
+        extra: Images,
     ) -> Option<Arc<Rendered>> {
         if top.is_empty() {
             return None;
         }
-        let key = key_of(&("podium", &top, &header, accent));
+        let key = key_of(&("podium", &top, &header, accent, theme));
         let urls = urls_of(top.iter(), header.as_ref());
-        self.cached_or_render(key, urls, move |imgs| {
-            draw::podium(&top, header.as_ref(), accent, imgs)
+        self.cached_or_render(key, urls, extra, move |imgs| {
+            draw::podium(&top, header.as_ref(), accent, theme, imgs)
         })
         .await
+    }
+
+    pub async fn share(
+        &self,
+        cells: Vec<CellSpec>,
+        header: Option<HeaderSpec>,
+        accent: Option<u32>,
+        theme: Theme,
+        extra: Images,
+    ) -> Option<Arc<Rendered>> {
+        if cells.is_empty() {
+            return None;
+        }
+        let key = key_of(&("share", &cells, &header, accent, theme));
+        let urls = urls_of(cells.iter(), header.as_ref());
+        self.cached_or_render(key, urls, extra, move |imgs| {
+            draw::share_image(&cells, header.as_ref(), accent, theme, imgs)
+        })
+        .await
+    }
+
+    /// A cropped, blurred piece of a character picture for the guessing game (never cached: random).
+    pub async fn guess_image(&self, url: &str, level: u8) -> Option<Rendered> {
+        let images = self.fetch_all(vec![url.to_string()]).await;
+        let img = images.get(url)?.clone();
+        let seed = rand::random::<u64>();
+        tokio::task::spawn_blocking(move || draw::guess_image(&img, level, seed))
+            .await
+            .ok()?
     }
 
     pub async fn tier_list(
@@ -171,14 +263,16 @@ impl Renderer {
         rows: Vec<TierRow>,
         header: Option<HeaderSpec>,
         accent: Option<u32>,
+        theme: Theme,
+        extra: Images,
     ) -> Option<Arc<Rendered>> {
         if rows.iter().all(|r| r.cells.is_empty()) {
             return None;
         }
-        let key = key_of(&("tier", &rows, &header, accent));
+        let key = key_of(&("tier", &rows, &header, accent, theme));
         let urls = urls_of(rows.iter().flat_map(|r| r.cells.iter()), header.as_ref());
-        self.cached_or_render(key, urls, move |imgs| {
-            draw::tier_list(&rows, header.as_ref(), accent, imgs)
+        self.cached_or_render(key, urls, extra, move |imgs| {
+            draw::tier_list(&rows, header.as_ref(), accent, theme, imgs)
         })
         .await
     }
@@ -190,6 +284,7 @@ fn urls_of<'a>(
 ) -> Vec<String> {
     cells
         .filter_map(|c| c.image_url.clone())
+        .filter(|u| !u.starts_with("custom:"))
         .chain(header.and_then(|h| h.avatar_url.clone()))
         .collect()
 }
