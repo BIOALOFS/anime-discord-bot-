@@ -26,6 +26,8 @@ pub async fn on_error(err: FrameworkError<'_, Data, Error>) {
                 )
                 .await;
         }
+        // The channel check already told the user why.
+        FrameworkError::CommandCheckFailed { .. } => {}
         FrameworkError::MissingUserPermissions { ctx, .. } => {
             let _ = ctx
                 .send(

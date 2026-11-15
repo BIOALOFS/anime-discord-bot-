@@ -5,6 +5,9 @@ use crate::{db::profile as db, error::Context};
 use poise::serenity_prelude as serenity;
 
 pub async fn ac_group(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
     let needle = partial.trim().to_lowercase();
     match db::list_groups(&ctx.data().db, uid(ctx)).await {
         Ok(groups) => groups

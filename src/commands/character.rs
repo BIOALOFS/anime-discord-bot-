@@ -314,6 +314,9 @@ pub(crate) async fn ac_character(
     ctx: Context<'_>,
     partial: &str,
 ) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
     let data = ctx.data();
     let api = data.anilist.clone();
     let items = data

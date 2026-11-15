@@ -7,6 +7,7 @@ mod commands;
 mod config;
 mod db;
 mod error;
+mod guild;
 mod i18n;
 mod render;
 mod ui;
@@ -23,6 +24,7 @@ pub struct Data {
     pub auto: ui::autocomplete::AutoState,
     pub http: reqwest::Client,
     pub renderer: std::sync::Arc<render::Renderer>,
+    pub guilds: std::sync::Arc<guild::GuildStore>,
 }
 
 #[tokio::main]
@@ -42,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         .options(poise::FrameworkOptions {
             commands: commands_with_cooldown(config.command_cooldown_secs),
             on_error: |e| Box::pin(error::on_error(e)),
+            command_check: Some(|ctx| Box::pin(guild::command_check(ctx))),
             ..Default::default()
         })
         .setup(move |ctx, ready, framework| {
@@ -66,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
                     .user_agent(concat!("anpot-discord-bot/", env!("CARGO_PKG_VERSION")))
                     .build()?;
                 Ok(Data {
+                    guilds: std::sync::Arc::new(guild::GuildStore::new(pool.clone())),
                     renderer: std::sync::Arc::new(render::Renderer::new(http.clone())),
                     http,
                     db: pool,
@@ -126,6 +130,7 @@ fn commands_with_cooldown(secs: u64) -> Vec<Command> {
         commands::random::random(),
         commands::profile::profile(),
         commands::profile::top(),
+        commands::setup::setup(),
     ];
     for c in &mut cmds {
         apply_cooldown(c, secs);
@@ -246,6 +251,13 @@ mod tests {
             "profile compare",
             "top",
             "top characters",
+            "setup",
+            "setup channel",
+            "setup add-channel",
+            "setup remove-channel",
+            "setup show",
+            "setup reset",
+            "setup admin-bypass",
         ] {
             assert!(
                 names.iter().any(|n| n == want),

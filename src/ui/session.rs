@@ -141,6 +141,27 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
     let owner = ctx.author().id;
 
     while let Some(i) = next_owner_interaction(sctx, message_id, owner).await {
+        // The channel lock also applies to buttons, selects and modals of older messages.
+        let admin = crate::guild::is_admin(i.member.as_ref().and_then(|m| m.permissions));
+        if let Some(text) = crate::guild::denial(
+            &ctx.data().guilds,
+            &sctx.http,
+            i.guild_id,
+            i.channel_id,
+            admin,
+        )
+        .await
+        {
+            let refusal = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(text)
+                    .ephemeral(true),
+            );
+            if let Err(e) = i.create_response(sctx, refusal).await {
+                tracing::debug!("could not send channel refusal: {e}");
+            }
+            continue;
+        }
         if let Some(spec) = view.modal_for(&i.data.custom_id) {
             let builder = CreateQuickModal::new(spec.title)
                 .timeout(Duration::from_secs(120))

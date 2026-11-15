@@ -454,6 +454,10 @@ pub async fn media_autocomplete(
     label: &'static str,
     partial: &str,
 ) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
+
     let data = ctx.data();
     let api = data.anilist.clone();
     let items = data
