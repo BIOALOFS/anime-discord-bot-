@@ -13,7 +13,6 @@ use crate::{
     db::{
         custom,
         profile::{self as pdb, Privacy, MAX_BIO, MAX_TITLE},
-        works,
     },
     error::{Context, Error},
     i18n,
@@ -626,9 +625,6 @@ pub async fn edit(
         _ => Ok(()),
     }
 }
-
-#[allow(dead_code)]
-fn _keep(_: &works::WorkEntry) {}
 
 #[cfg(test)]
 mod tests {

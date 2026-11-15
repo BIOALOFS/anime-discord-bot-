@@ -117,6 +117,21 @@ pub async fn settings(
     }
     pdb::create_profile(pool, user).await?;
     let value = value.as_deref().map(str::trim).unwrap_or("");
+    if value.is_empty() {
+        // No value: show the current one.
+        let profile = pdb::get_profile(pool, user).await?;
+        let text = match (setting.trim(), profile) {
+            ("language", Some(p)) => i18n::current_language(
+                LANGUAGES
+                    .iter()
+                    .find(|(k, _)| *k == p.language)
+                    .map_or("?", |(_, l)| l),
+            ),
+            ("privacy", Some(p)) => i18n::current_privacy(i18n::privacy_ar(&p.privacy)),
+            _ => i18n::SETTINGS_UNKNOWN.to_string(),
+        };
+        return say_ephemeral(ctx, &text).await;
+    }
     let text = match setting.trim() {
         "privacy" => match Privacy::parse(value) {
             Some(level) => {
@@ -258,11 +273,12 @@ mod tests {
     }
 
     #[test]
-    fn only_language_and_privacy_exist() {
+    fn only_language_privacy_and_reminders_exist() {
         assert_eq!(
             SETTINGS.iter().map(|s| s.0).collect::<Vec<_>>(),
-            vec!["language", "privacy"]
+            vec!["language", "privacy", "reminders"]
         );
+        assert_eq!(values_for("reminders").len(), 1);
         assert_eq!(values_for("language").len(), 2);
         assert_eq!(values_for("privacy").len(), 3);
         assert!(

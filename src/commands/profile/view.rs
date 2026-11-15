@@ -295,7 +295,7 @@ impl ProfileView {
             BannerSpec::Image(_) => BannerSpec::parse(None),
             other => other,
         };
-        let r = self.renderer.banner(spec, None, String::new()).await?;
+        let r = self.renderer.banner(spec, String::new()).await?;
         Some(BannerFile {
             name: format!("{BANNER_NAME}.{}", r.ext),
             bytes: r.bytes,

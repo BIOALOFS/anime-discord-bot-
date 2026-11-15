@@ -5,14 +5,13 @@
 
 use moka::future::Cache;
 use poise::serenity_prelude as serenity;
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-pub const MAX_EXTRA_CHANNELS: usize = 5;
 /// Commands that always work so a server can be configured.
 const EXEMPT_ROOTS: &[&str] = &[
     "settings",
@@ -25,8 +24,6 @@ const EXEMPT_ROOTS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelSettings {
     pub command_channel: Option<i64>,
-    pub extra: Vec<i64>,
-    pub admin_bypass: bool,
     /// False when the configured command channel no longer exists (deleted).
     pub channel_exists: bool,
 }
@@ -35,8 +32,6 @@ impl Default for ChannelSettings {
     fn default() -> Self {
         Self {
             command_channel: None,
-            extra: Vec::new(),
-            admin_bypass: true,
             channel_exists: true,
         }
     }
@@ -51,33 +46,22 @@ pub enum Decision {
     },
 }
 
-/// The rules: no channel set -> everywhere; the command channel and extras are allowed; admins may bypass
-/// (default on); a deleted command channel falls back to "no restriction".
+/// The rules: no channel set -> everywhere; the bot channel is allowed; admins always bypass; a deleted bot channel
+/// falls back to "no restriction".
 pub fn is_allowed(channel: i64, s: &ChannelSettings, is_admin: bool) -> Decision {
     let Some(main) = s.command_channel else {
         return Decision::Allowed;
     };
-    if !s.channel_exists
-        || channel == main
-        || s.extra.contains(&channel)
-        || (is_admin && s.admin_bypass)
-    {
+    if !s.channel_exists || channel == main || is_admin {
         return Decision::Allowed;
     }
     Decision::Denied { channel: main }
 }
 
-/// Commands that must work in every channel (`/setup ...`, `/help`).
+/// Commands that must work in every channel (administration and `/help`).
 pub fn is_exempt(qualified_name: &str) -> bool {
     let root = qualified_name.split_whitespace().next().unwrap_or("");
     EXEMPT_ROOTS.contains(&root)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ExtraResult {
-    Added,
-    AlreadyThere,
-    Full,
 }
 
 pub struct GuildStore {
@@ -125,26 +109,14 @@ impl GuildStore {
         if let Some(hit) = self.cache.get(&guild).await {
             return Ok(hit);
         }
-        let row = sqlx::query(
-            "SELECT command_channel_id, admin_bypass FROM guild_settings WHERE guild_id = ?1",
-        )
-        .bind(guild)
-        .fetch_optional(&self.pool)
-        .await?;
-        let extra: Vec<i64> = sqlx::query_scalar(
-            "SELECT channel_id FROM guild_extra_channels WHERE guild_id = ?1 ORDER BY channel_id",
-        )
-        .bind(guild)
-        .fetch_all(&self.pool)
-        .await?;
+        let channel: Option<i64> =
+            sqlx::query_scalar("SELECT command_channel_id FROM guild_settings WHERE guild_id = ?1")
+                .bind(guild)
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten();
         let s = Arc::new(ChannelSettings {
-            command_channel: row
-                .as_ref()
-                .and_then(|r| r.get::<Option<i64>, _>("command_channel_id")),
-            admin_bypass: row
-                .as_ref()
-                .is_none_or(|r| r.get::<bool, _>("admin_bypass")),
-            extra,
+            command_channel: channel,
             channel_exists: true,
         });
         self.cache.insert(guild, s.clone()).await;
@@ -173,64 +145,13 @@ impl GuildStore {
             .bind(channel)
             .execute(&self.pool)
             .await?;
-        // The command channel never needs to be listed as an extra too.
-        sqlx::query("DELETE FROM guild_extra_channels WHERE guild_id = ?1 AND channel_id = ?2")
-            .bind(guild)
-            .bind(channel)
-            .execute(&self.pool)
-            .await?;
         self.cache.invalidate(&guild).await;
         Ok(())
     }
 
-    pub async fn add_extra(&self, guild: i64, channel: i64) -> Result<ExtraResult, sqlx::Error> {
-        let current = self.settings(guild).await?;
-        if current.extra.contains(&channel) || current.command_channel == Some(channel) {
-            return Ok(ExtraResult::AlreadyThere);
-        }
-        if current.extra.len() >= MAX_EXTRA_CHANNELS {
-            return Ok(ExtraResult::Full);
-        }
-        sqlx::query(
-            "INSERT OR IGNORE INTO guild_extra_channels (guild_id, channel_id) VALUES (?1, ?2)",
-        )
-        .bind(guild)
-        .bind(channel)
-        .execute(&self.pool)
-        .await?;
-        self.cache.invalidate(&guild).await;
-        Ok(ExtraResult::Added)
-    }
-
-    pub async fn remove_extra(&self, guild: i64, channel: i64) -> Result<bool, sqlx::Error> {
-        let r =
-            sqlx::query("DELETE FROM guild_extra_channels WHERE guild_id = ?1 AND channel_id = ?2")
-                .bind(guild)
-                .bind(channel)
-                .execute(&self.pool)
-                .await?;
-        self.cache.invalidate(&guild).await;
-        Ok(r.rows_affected() > 0)
-    }
-
-    pub async fn set_admin_bypass(&self, guild: i64, on: bool) -> Result<(), sqlx::Error> {
-        self.ensure_row(guild).await?;
-        sqlx::query("UPDATE guild_settings SET admin_bypass = ?2 WHERE guild_id = ?1")
-            .bind(guild)
-            .bind(on)
-            .execute(&self.pool)
-            .await?;
-        self.cache.invalidate(&guild).await;
-        Ok(())
-    }
-
-    /// Clears the command channel and the extras (the admin-bypass choice is kept).
+    /// Clears the bot channel (commands work everywhere again).
     pub async fn reset(&self, guild: i64) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE guild_settings SET command_channel_id = NULL WHERE guild_id = ?1")
-            .bind(guild)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM guild_extra_channels WHERE guild_id = ?1")
             .bind(guild)
             .execute(&self.pool)
             .await?;

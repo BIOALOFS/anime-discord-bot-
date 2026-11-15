@@ -6,7 +6,6 @@ use crate::{
     commands::buttons,
     i18n,
     ui::{
-        cards,
         embeds::Emb,
         format::role_ar,
         pagination::{
@@ -99,8 +98,6 @@ pub enum Step {
     /// Leave the roster and return to the host view.
     Exit,
     Close,
-    /// Private message to the presser only.
-    Whisper(String),
     /// A character was picked: the host view opens it (with its own action buttons) and may come back here.
     Open(Box<Character>),
 }
@@ -110,7 +107,6 @@ impl PartialEq for Step {
         use Step::*;
         match (self, other) {
             (Update, Update) | (Keep, Keep) | (Exit, Exit) | (Close, Close) => true,
-            (Whisper(a), Whisper(b)) => a == b,
             (Open(a), Open(b)) => a.id == b.id,
             _ => false,
         }
@@ -124,7 +120,6 @@ impl Step {
             Step::Update => Outcome::Update,
             Step::Keep => Outcome::Keep,
             Step::Close => Outcome::Close,
-            Step::Whisper(t) => Outcome::Whisper(t),
             // Hosts handle `Open` themselves before calling `apply`.
             Step::Open(_) => Outcome::Keep,
             Step::Exit => {

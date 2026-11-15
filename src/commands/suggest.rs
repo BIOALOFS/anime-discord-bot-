@@ -3,7 +3,7 @@
 
 use super::{buttons, fail, fallback::game_flags, media::media_label_for_suggest, say_ephemeral};
 use crate::{
-    anilist::{kind_of, ContentPolicy},
+    anilist::ContentPolicy,
     db::{
         admin as adb,
         custom::sanitize_text,
@@ -597,11 +597,6 @@ impl View for MineView {
         }
         Outcome::Update
     }
-}
-
-#[allow(dead_code)]
-fn _kind(m: &crate::anilist::models::Media) -> &'static str {
-    kind_of(m).key()
 }
 
 #[cfg(test)]

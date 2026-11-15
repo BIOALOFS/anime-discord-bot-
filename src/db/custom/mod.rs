@@ -1,8 +1,5 @@
 //! Personal customization (title, description, image) for characters in a user's own profile,
 //! plus custom-image storage, reports, upload bans and the audit log.
-//! (Data-layer functions for groups, tiers, notes, lists and compatibility stay with the schema, even though
-//! no command uses them any more.)
-#![allow(dead_code)]
 
 use super::profile::{ProfileError, Result};
 use crate::anilist::safety::contains_explicit_term;
@@ -151,7 +148,6 @@ pub struct NewImage {
 #[derive(Debug, Clone)]
 pub struct StoredImage {
     pub id: i64,
-    pub hash: String,
     pub bytes: Vec<u8>,
     pub animated: bool,
 }
@@ -167,7 +163,6 @@ pub enum StoreOutcome {
 fn image_from_row(r: &sqlx::sqlite::SqliteRow) -> StoredImage {
     StoredImage {
         id: r.get("id"),
-        hash: r.get("hash"),
         bytes: r.get("bytes"),
         animated: r.get("animated"),
     }
@@ -259,26 +254,6 @@ pub async fn set_character_image(
     Ok(())
 }
 
-pub async fn clear_character_image(pool: &SqlitePool, user: i64, character: i64) -> Result<()> {
-    let previous: Option<i64> = sqlx::query_scalar(
-        "SELECT custom_image_id FROM profile_characters WHERE user_id = ?1 AND character_id = ?2",
-    )
-    .bind(user)
-    .bind(character)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(ProfileError::NotFound)?;
-    sqlx::query("UPDATE profile_characters SET custom_image_id = NULL WHERE user_id = ?1 AND character_id = ?2")
-        .bind(user)
-        .bind(character)
-        .execute(pool)
-        .await?;
-    if let Some(id) = previous {
-        drop_if_unused(pool, id).await?;
-    }
-    Ok(())
-}
-
 async fn drop_if_unused(pool: &SqlitePool, image_id: i64) -> Result<()> {
     sqlx::query("DELETE FROM custom_images WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM profile_characters WHERE custom_image_id = ?1)")
         .bind(image_id)
@@ -317,113 +292,6 @@ pub async fn image_count(pool: &SqlitePool, user: i64) -> Result<i64> {
 
 // ---- moderation -------------------------------------------------------------------------------
 
-/// `false` if this member already reported the image.
-pub async fn report_image(
-    pool: &SqlitePool,
-    image_id: i64,
-    reporter: i64,
-    guild: Option<i64>,
-) -> Result<bool> {
-    let owner: i64 = sqlx::query_scalar("SELECT user_id FROM custom_images WHERE id = ?1")
-        .bind(image_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or(ProfileError::NotFound)?;
-    let r = sqlx::query("INSERT OR IGNORE INTO image_reports (image_id, owner_id, reporter_id, guild_id) VALUES (?1, ?2, ?3, ?4)")
-        .bind(image_id)
-        .bind(owner)
-        .bind(reporter)
-        .bind(guild)
-        .execute(pool)
-        .await?;
-    Ok(r.rows_affected() > 0)
-}
-
-/// Unresolved reports of this server: `(image_id, owner_id, reports)`.
-pub async fn open_reports(pool: &SqlitePool, guild: i64) -> Result<Vec<(i64, i64, i64)>> {
-    let rows = sqlx::query(
-        "SELECT image_id, owner_id, count(*) AS n FROM image_reports WHERE guild_id = ?1 AND resolved = 0 \
-         GROUP BY image_id ORDER BY n DESC LIMIT 25",
-    )
-    .bind(guild)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .map(|r| (r.get("image_id"), r.get("owner_id"), r.get("n")))
-        .collect())
-}
-
-/// Moderator removal: detach from every character, delete, resolve reports, write the audit log.
-pub async fn remove_image_as_mod(
-    pool: &SqlitePool,
-    image_id: i64,
-    actor: i64,
-    guild: i64,
-) -> Result<bool> {
-    sqlx::query("UPDATE profile_characters SET custom_image_id = NULL WHERE custom_image_id = ?1")
-        .bind(image_id)
-        .execute(pool)
-        .await?;
-    let r = sqlx::query("DELETE FROM custom_images WHERE id = ?1")
-        .bind(image_id)
-        .execute(pool)
-        .await?;
-    sqlx::query("UPDATE image_reports SET resolved = 1 WHERE image_id = ?1")
-        .bind(image_id)
-        .execute(pool)
-        .await?;
-    if r.rows_affected() > 0 {
-        audit(
-            pool,
-            Some(guild),
-            actor,
-            "remove_image",
-            Some(&image_id.to_string()),
-        )
-        .await?;
-    }
-    Ok(r.rows_affected() > 0)
-}
-
-pub async fn ban_uploads(pool: &SqlitePool, guild: i64, user: i64, by: i64) -> Result<()> {
-    sqlx::query(
-        "INSERT OR REPLACE INTO upload_bans (guild_id, user_id, banned_by) VALUES (?1, ?2, ?3)",
-    )
-    .bind(guild)
-    .bind(user)
-    .bind(by)
-    .execute(pool)
-    .await?;
-    audit(
-        pool,
-        Some(guild),
-        by,
-        "ban_uploads",
-        Some(&user.to_string()),
-    )
-    .await
-}
-
-pub async fn unban_uploads(pool: &SqlitePool, guild: i64, user: i64, by: i64) -> Result<bool> {
-    let r = sqlx::query("DELETE FROM upload_bans WHERE guild_id = ?1 AND user_id = ?2")
-        .bind(guild)
-        .bind(user)
-        .execute(pool)
-        .await?;
-    if r.rows_affected() > 0 {
-        audit(
-            pool,
-            Some(guild),
-            by,
-            "unban_uploads",
-            Some(&user.to_string()),
-        )
-        .await?;
-    }
-    Ok(r.rows_affected() > 0)
-}
-
 pub async fn is_banned(pool: &SqlitePool, guild: i64, user: i64) -> Result<bool> {
     Ok(sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM upload_bans WHERE guild_id = ?1 AND user_id = ?2",
@@ -433,25 +301,6 @@ pub async fn is_banned(pool: &SqlitePool, guild: i64, user: i64) -> Result<bool>
     .fetch_one(pool)
     .await?
         > 0)
-}
-
-pub async fn audit(
-    pool: &SqlitePool,
-    guild: Option<i64>,
-    actor: i64,
-    action: &str,
-    target: Option<&str>,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO audit_log (guild_id, actor_id, action, target) VALUES (?1, ?2, ?3, ?4)",
-    )
-    .bind(guild)
-    .bind(actor)
-    .bind(action)
-    .bind(target)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 // ---- per-server switches ----------------------------------------------------------------------

@@ -123,10 +123,8 @@ pub async fn reset_guild(pool: &SqlitePool, guild: i64) -> Result<()> {
     let mut tx = pool.begin().await?;
     for sql in [
         "DELETE FROM guild_settings WHERE guild_id = ?1",
-        "DELETE FROM guild_extra_channels WHERE guild_id = ?1",
         "DELETE FROM guild_feed WHERE guild_id = ?1",
         "DELETE FROM posted_episodes WHERE guild_id = ?1",
-        "DELETE FROM digest_queue WHERE guild_id = ?1",
         "DELETE FROM suggestions WHERE guild_id = ?1",
         "DELETE FROM user_guilds WHERE guild_id = ?1",
         "DELETE FROM upload_bans WHERE guild_id = ?1",

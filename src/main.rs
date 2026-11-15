@@ -264,6 +264,7 @@ mod tests {
             "random",
             "top",
             "recommend",
+            "suggest",
             "suggest add",
             "suggest random",
             "suggest mine",

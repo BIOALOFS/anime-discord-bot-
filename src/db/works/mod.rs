@@ -1,7 +1,4 @@
 //! Favourite works: anime, manga, manhwa, manhua and novels in a profile (provider-prefixed text ids).
-//! (Data-layer functions for groups, tiers, notes, lists and compatibility stay with the schema, even though
-//! no command uses them any more.)
-#![allow(dead_code)]
 
 use super::profile::{
     cap, require_profile, touch, AddOutcome, ProfileError, Result, MAX_NOTE, MAX_TIER,
@@ -198,15 +195,6 @@ pub async fn remove_work(pool: &SqlitePool, user: i64, work_id: &str) -> Result<
     Ok(true)
 }
 
-pub async fn clear(pool: &SqlitePool, user: i64) -> Result<u64> {
-    let r = sqlx::query("DELETE FROM profile_works WHERE user_id = ?1")
-        .bind(user)
-        .execute(pool)
-        .await?;
-    touch(pool, user).await?;
-    Ok(r.rows_affected())
-}
-
 pub async fn move_work(pool: &SqlitePool, user: i64, work_id: &str, target: i64) -> Result<i64> {
     let mut tx = pool.begin().await?;
     let total: i64 = sqlx::query_scalar("SELECT count(*) FROM profile_works WHERE user_id = ?1")
@@ -248,18 +236,6 @@ pub async fn move_work(pool: &SqlitePool, user: i64, work_id: &str, target: i64)
     Ok(to)
 }
 
-pub async fn position_of(pool: &SqlitePool, user: i64, work_id: &str) -> Result<Option<i64>> {
-    Ok(
-        sqlx::query_scalar(
-            "SELECT position FROM profile_works WHERE user_id = ?1 AND work_id = ?2",
-        )
-        .bind(user)
-        .bind(work_id)
-        .fetch_optional(pool)
-        .await?,
-    )
-}
-
 pub async fn list_page(
     pool: &SqlitePool,
     user: i64,
@@ -288,15 +264,6 @@ pub async fn get_entry(pool: &SqlitePool, user: i64, work_id: &str) -> Result<Op
         .bind(user)
         .bind(work_id)
         .fetch_optional(pool)
-        .await?)
-}
-
-pub async fn tiered(pool: &SqlitePool, user: i64) -> Result<Vec<WorkEntry>> {
-    let sql =
-        format!("{SELECT} WHERE pw.user_id = ?1 AND pw.tier IS NOT NULL ORDER BY pw.position");
-    Ok(sqlx::query_as::<_, WorkEntry>(&sql)
-        .bind(user)
-        .fetch_all(pool)
         .await?)
 }
 
@@ -406,17 +373,6 @@ pub async fn search_own(
         .into_iter()
         .map(|r| (r.get("id"), r.get("title")))
         .collect())
-}
-
-pub async fn shared_works(pool: &SqlitePool, a: i64, b: i64) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar(
-        "SELECT x.work_id FROM profile_works x JOIN profile_works y ON x.work_id = y.work_id \
-         WHERE x.user_id = ?1 AND y.user_id = ?2 ORDER BY x.position",
-    )
-    .bind(a)
-    .bind(b)
-    .fetch_all(pool)
-    .await?)
 }
 
 /// Most favourited works (public/servers profiles only): `(work_id, count)`.

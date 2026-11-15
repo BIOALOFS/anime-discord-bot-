@@ -107,6 +107,44 @@ async fn title_and_description_only_for_own_characters() {
 }
 
 #[tokio::test]
+async fn replacing_an_image_drops_the_old_one() {
+    let pool = setup().await;
+    let StoreOutcome::Stored(a) = store_image(&pool, U, &img("a"), 5).await.expect("a") else {
+        panic!()
+    };
+    let StoreOutcome::Stored(b) = store_image(&pool, U, &img("b"), 5).await.expect("b") else {
+        panic!()
+    };
+    set_character_image(&pool, U, 10, a).await.expect("a");
+    set_character_image(&pool, U, 10, b).await.expect("b");
+    assert!(get_image(&pool, a).await.expect("g").is_none());
+    assert!(get_image(&pool, b).await.expect("g").is_some());
+}
+
+#[tokio::test]
+async fn server_switches_default_to_safe_values() {
+    let pool = connect_memory().await;
+    assert!(
+        !custom_images_enabled(&pool, 1).await.expect("ci"),
+        "custom images are off until an admin enables them"
+    );
+    assert!(games_enabled(&pool, 1).await.expect("g"));
+    assert!(!nsfw_mode(&pool, 1).await.expect("n"));
+    assert!(
+        mature_games(&pool, 1).await.expect("m"),
+        "mature-rated games are allowed by default"
+    );
+    set_mature_games(&pool, 1, false).await.expect("off");
+    assert!(!mature_games(&pool, 1).await.expect("m"));
+    assert!(mature_games(&pool, 2).await.expect("other guild"));
+    set_custom_images(&pool, 1, true).await.expect("on");
+    set_games(&pool, 1, false).await.expect("off");
+    assert!(custom_images_enabled(&pool, 1).await.expect("ci"));
+    assert!(!games_enabled(&pool, 1).await.expect("g"));
+    assert!(!custom_images_enabled(&pool, 2).await.expect("other guild"));
+}
+
+#[tokio::test]
 async fn custom_images_are_deduplicated_capped_and_private() {
     let pool = setup().await;
     let StoreOutcome::Stored(id) = store_image(&pool, U, &img("a"), 2).await.expect("store") else {
@@ -156,79 +194,4 @@ async fn custom_images_are_deduplicated_capped_and_private() {
         set_character_image(&pool, U, 77, id).await,
         Err(ProfileError::NotFound)
     ));
-
-    clear_character_image(&pool, U, 10).await.expect("clear");
-    assert!(
-        get_image(&pool, id).await.expect("g").is_none(),
-        "orphan images are deleted"
-    );
-}
-
-#[tokio::test]
-async fn replacing_an_image_drops_the_old_one() {
-    let pool = setup().await;
-    let StoreOutcome::Stored(a) = store_image(&pool, U, &img("a"), 5).await.expect("a") else {
-        panic!()
-    };
-    let StoreOutcome::Stored(b) = store_image(&pool, U, &img("b"), 5).await.expect("b") else {
-        panic!()
-    };
-    set_character_image(&pool, U, 10, a).await.expect("a");
-    set_character_image(&pool, U, 10, b).await.expect("b");
-    assert!(get_image(&pool, a).await.expect("g").is_none());
-    assert!(get_image(&pool, b).await.expect("g").is_some());
-}
-
-#[tokio::test]
-async fn reports_bans_and_audit() {
-    let pool = setup().await;
-    let StoreOutcome::Stored(id) = store_image(&pool, U, &img("a"), 5).await.expect("a") else {
-        panic!()
-    };
-    set_character_image(&pool, U, 10, id).await.expect("attach");
-    assert!(report_image(&pool, id, V, Some(5)).await.expect("report"));
-    assert!(!report_image(&pool, id, V, Some(5)).await.expect("again"));
-    assert!(matches!(
-        report_image(&pool, 999, V, Some(5)).await,
-        Err(ProfileError::NotFound)
-    ));
-    assert_eq!(open_reports(&pool, 5).await.expect("r"), vec![(id, U, 1)]);
-
-    assert!(remove_image_as_mod(&pool, id, 99, 5).await.expect("remove"));
-    assert!(open_reports(&pool, 5).await.expect("r").is_empty());
-    assert!(image_of_character(&pool, U, 10).await.expect("g").is_none());
-
-    assert!(!is_banned(&pool, 5, U).await.expect("b"));
-    ban_uploads(&pool, 5, U, 99).await.expect("ban");
-    assert!(is_banned(&pool, 5, U).await.expect("b"));
-    assert!(!is_banned(&pool, 6, U).await.expect("other guild"));
-    assert!(unban_uploads(&pool, 5, U, 99).await.expect("unban"));
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE guild_id = 5")
-        .fetch_one(&pool)
-        .await
-        .expect("n");
-    assert_eq!(n, 3, "remove, ban and unban are audited");
-}
-
-#[tokio::test]
-async fn server_switches_default_to_safe_values() {
-    let pool = connect_memory().await;
-    assert!(
-        !custom_images_enabled(&pool, 1).await.expect("ci"),
-        "custom images are off until an admin enables them"
-    );
-    assert!(games_enabled(&pool, 1).await.expect("g"));
-    assert!(!nsfw_mode(&pool, 1).await.expect("n"));
-    assert!(
-        mature_games(&pool, 1).await.expect("m"),
-        "mature-rated games are allowed by default"
-    );
-    set_mature_games(&pool, 1, false).await.expect("off");
-    assert!(!mature_games(&pool, 1).await.expect("m"));
-    assert!(mature_games(&pool, 2).await.expect("other guild"));
-    set_custom_images(&pool, 1, true).await.expect("on");
-    set_games(&pool, 1, false).await.expect("off");
-    assert!(custom_images_enabled(&pool, 1).await.expect("ci"));
-    assert!(!games_enabled(&pool, 1).await.expect("g"));
-    assert!(!custom_images_enabled(&pool, 2).await.expect("other guild"));
 }

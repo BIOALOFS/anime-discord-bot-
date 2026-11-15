@@ -680,13 +680,9 @@ mod tests {
                 enabled: true,
                 min_popularity: 1500,
                 formats: vec!["TV".into()],
-                excluded_genres: vec![],
-                digest_hours: 0,
-                daily_cap: 0,
                 role_id: Some(6),
                 filter: FilterMode::All,
                 kinds: vec!["anime".into()],
-                last_digest_at: 0,
             },
         }
     }

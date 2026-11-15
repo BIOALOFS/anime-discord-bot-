@@ -50,7 +50,7 @@ impl Picker {
         self.chosen = Some(key.to_string());
         self.preview = self
             .renderer
-            .banner(BannerSpec::Preset(key.to_string()), None, String::new())
+            .banner(BannerSpec::Preset(key.to_string()), String::new())
             .await
             .map(|r| (format!("preview.{}", r.ext), r.bytes));
     }

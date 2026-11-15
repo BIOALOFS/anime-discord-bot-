@@ -3,7 +3,6 @@
 use super::{embeds::Emb, format::thousands};
 use crate::{
     commands::profile::items::{Item, Section},
-    db::profile::Profile,
     i18n,
 };
 
@@ -43,43 +42,6 @@ fn subtitle_link(i: &Item) -> Option<String> {
         Some(u) => format!("[{s}]({u})"),
         None => s.to_string(),
     })
-}
-
-/// Profile header shared by the list styles.
-pub fn header(
-    p: &Profile,
-    owner_name: &str,
-    avatar: Option<&str>,
-    counts: (i64, i64),
-    badges: &[Badge],
-) -> Emb {
-    let mut desc = Vec::new();
-    if let Some(b) = &p.bio {
-        desc.push(b.clone());
-    }
-    if let Some(q) = &p.quote {
-        desc.push(format!("*« {q} »*"));
-    }
-    desc.push(i18n::profile_stats(
-        counts.0,
-        counts.1,
-        i18n::privacy_ar(&p.privacy),
-    ));
-    if !badges.is_empty() {
-        desc.push(
-            badges
-                .iter()
-                .map(|b| b.label)
-                .collect::<Vec<_>>()
-                .join(" · "),
-        );
-    }
-    Emb::new()
-        .title(format!("{} {owner_name}", i18n::PROFILE_TITLE))
-        .author(owner_name)
-        .author_icon(avatar.map(str::to_string))
-        .colour(p.accent_color.map(|c| c as u32))
-        .description(desc.join("\n"))
 }
 
 /// One item as a simple card, built from cached data only (no AniList call at render time).

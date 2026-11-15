@@ -1,11 +1,8 @@
-//! Image engine: collage, podium and tier-list renders for profiles.
+//! Image engine: profile banners and the guessing-game crops.
 //!
 //! Network fetching is async and bounded; all drawing is pure CPU work run in `spawn_blocking`.
 //! The bundled font has Latin glyphs only (no Arabic shaping), so text that needs Arabic stays in embeds
 //! and glyphs missing from the font are dropped from the images.
-//! (The grid, podium, tier and share renderers are no longer reachable from a command; the banner and guessing-game
-//! renderers are the live part.)
-#![allow(dead_code)]
 
 mod draw;
 mod fetch;
@@ -13,44 +10,11 @@ mod fetch;
 use futures::StreamExt;
 use image::RgbaImage;
 use moka::future::Cache;
-use std::{
-    collections::HashMap,
-    hash::{Hash, Hasher},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-pub const CELL_W: u32 = 230;
-pub const CELL_H: u32 = 345;
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const FETCH_CONCURRENCY: usize = 8;
 const CACHE_BYTES: u64 = 48 * 1024 * 1024;
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct CellSpec {
-    pub label: String,
-    /// Personal title shown under the name.
-    pub subtitle: Option<String>,
-    /// 1-3 get a gold/silver/bronze badge.
-    pub rank: Option<u8>,
-    pub image_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct HeaderSpec {
-    pub name: String,
-    /// Single letters drawn as small badges (C collector, G gamer, W loyal watcher).
-    pub badges: Vec<char>,
-    pub bio: Option<String>,
-    pub count: i64,
-    pub avatar_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct TierRow {
-    pub name: String,
-    pub cells: Vec<CellSpec>,
-}
 
 #[derive(Debug)]
 pub struct Rendered {
@@ -130,69 +94,9 @@ impl BannerSpec {
 
 pub type Images = HashMap<String, Arc<RgbaImage>>;
 
-/// Colour/frame theme chosen with `/profile` -> template.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
-pub struct Theme(u8);
-
-pub const THEMES: [&str; 5] = ["classic", "midnight", "sakura", "ocean", "mono"];
-
-impl Theme {
-    pub fn by_name(name: &str) -> Self {
-        Self(THEMES.iter().position(|t| *t == name).unwrap_or(0) as u8)
-    }
-
-    /// Accent used when the profile has no colour of its own.
-    pub fn default_accent(self) -> Option<u32> {
-        match self.0 {
-            1 => Some(0x5865F2),
-            2 => Some(0xF78FB3),
-            3 => Some(0x1ABC9C),
-            4 => Some(0x9AA0A6),
-            _ => None,
-        }
-    }
-
-    /// Outline drawn around every cell.
-    pub fn frame(self) -> Option<[u8; 3]> {
-        match self.0 {
-            1 => Some([0x8C, 0x96, 0xFF]),
-            2 => Some([0xFF, 0xC2, 0xD6]),
-            3 => Some([0x7F, 0xF0, 0xD8]),
-            4 => Some([0xDD, 0xDD, 0xDD]),
-            _ => None,
-        }
-    }
-
-    /// Background brightness factors (top, bottom).
-    pub fn darkness(self) -> (f32, f32) {
-        match self.0 {
-            1 => (0.30, 0.06),
-            2 => (0.55, 0.20),
-            4 => (0.35, 0.10),
-            _ => (0.45, 0.12),
-        }
-    }
-}
-
-pub fn is_theme(name: &str) -> bool {
-    THEMES.contains(&name)
-}
-
-/// First frame of a stored custom image (PNG/JPEG/WebP/GIF), shrunk for grids.
-pub fn first_frame(bytes: &[u8]) -> Option<RgbaImage> {
-    fetch::decode(bytes)
-}
-
 pub struct Renderer {
     http: reqwest::Client,
     images: Cache<String, Arc<RgbaImage>>,
-    outputs: Cache<u64, Arc<Rendered>>,
-}
-
-fn key_of(parts: &impl Hash) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    parts.hash(&mut h);
-    h.finish()
 }
 
 impl Renderer {
@@ -205,13 +109,6 @@ impl Renderer {
                 })
                 .max_capacity(CACHE_BYTES)
                 .time_to_live(Duration::from_secs(30 * 60))
-                .build(),
-            outputs: Cache::builder()
-                .weigher(|_: &u64, v: &Arc<Rendered>| {
-                    u32::try_from(v.bytes.len()).unwrap_or(u32::MAX)
-                })
-                .max_capacity(CACHE_BYTES)
-                .time_to_live(Duration::from_secs(60 * 60))
                 .build(),
         }
     }
@@ -235,101 +132,11 @@ impl Renderer {
             .await
     }
 
-    async fn cached_or_render<F>(
-        &self,
-        key: u64,
-        urls: Vec<String>,
-        extra: Images,
-        draw: F,
-    ) -> Option<Arc<Rendered>>
-    where
-        F: FnOnce(&Images) -> Option<Rendered> + Send + 'static,
-    {
-        if let Some(hit) = self.outputs.get(&key).await {
-            return Some(hit);
-        }
-        let mut images = self.fetch_all(urls).await;
-        images.extend(extra);
-        let rendered = tokio::task::spawn_blocking(move || draw(&images))
-            .await
-            .ok()??;
-        let rendered = Arc::new(rendered);
-        self.outputs.insert(key, rendered.clone()).await;
-        Some(rendered)
-    }
-
-    pub async fn collage(
-        &self,
-        cells: Vec<CellSpec>,
-        header: Option<HeaderSpec>,
-        accent: Option<u32>,
-        theme: Theme,
-        scale: f32,
-        extra: Images,
-    ) -> Option<Arc<Rendered>> {
-        if cells.is_empty() {
-            return None;
-        }
-        let key = key_of(&("collage", &cells, &header, accent, theme, scale.to_bits()));
-        let urls = urls_of(cells.iter(), header.as_ref());
-        self.cached_or_render(key, urls, extra, move |imgs| {
-            draw::collage(&cells, header.as_ref(), accent, theme, scale, imgs)
-        })
-        .await
-    }
-
-    pub async fn podium(
-        &self,
-        top: Vec<CellSpec>,
-        header: Option<HeaderSpec>,
-        accent: Option<u32>,
-        theme: Theme,
-        extra: Images,
-    ) -> Option<Arc<Rendered>> {
-        if top.is_empty() {
-            return None;
-        }
-        let key = key_of(&("podium", &top, &header, accent, theme));
-        let urls = urls_of(top.iter(), header.as_ref());
-        self.cached_or_render(key, urls, extra, move |imgs| {
-            draw::podium(&top, header.as_ref(), accent, theme, imgs)
-        })
-        .await
-    }
-
-    pub async fn share(
-        &self,
-        cells: Vec<CellSpec>,
-        header: Option<HeaderSpec>,
-        accent: Option<u32>,
-        theme: Theme,
-        extra: Images,
-    ) -> Option<Arc<Rendered>> {
-        if cells.is_empty() {
-            return None;
-        }
-        let key = key_of(&("share", &cells, &header, accent, theme));
-        let urls = urls_of(cells.iter(), header.as_ref());
-        self.cached_or_render(key, urls, extra, move |imgs| {
-            draw::share_image(&cells, header.as_ref(), accent, theme, imgs)
-        })
-        .await
-    }
-
-    /// The 1200x300 strip above the profile card. `uploaded` is the stored picture for `BannerSpec::Image`.
-    pub async fn banner(
-        &self,
-        spec: BannerSpec,
-        uploaded: Option<Vec<u8>>,
-        title: String,
-    ) -> Option<Rendered> {
-        let base = match (&spec, uploaded) {
-            (BannerSpec::Image(_), Some(bytes)) => {
-                tokio::task::spawn_blocking(move || first_frame(&bytes))
-                    .await
-                    .ok()?
-            }
-            (BannerSpec::Url(u), _) => {
+    /// The 1200x300 strip above the profile card: a ready-made banner, a colour, or (legacy) an allow-listed https
+    /// picture. Uploaded pictures are attached as stored and never go through here.
+    pub async fn banner(&self, spec: BannerSpec, title: String) -> Option<Rendered> {
+        let base = match &spec {
+            BannerSpec::Url(u) => {
                 let images = self.fetch_all(vec![u.clone()]).await;
                 images.get(u).map(|i| (**i).clone())
             }
@@ -349,36 +156,6 @@ impl Renderer {
             .await
             .ok()?
     }
-
-    pub async fn tier_list(
-        &self,
-        rows: Vec<TierRow>,
-        header: Option<HeaderSpec>,
-        accent: Option<u32>,
-        theme: Theme,
-        extra: Images,
-    ) -> Option<Arc<Rendered>> {
-        if rows.iter().all(|r| r.cells.is_empty()) {
-            return None;
-        }
-        let key = key_of(&("tier", &rows, &header, accent, theme));
-        let urls = urls_of(rows.iter().flat_map(|r| r.cells.iter()), header.as_ref());
-        self.cached_or_render(key, urls, extra, move |imgs| {
-            draw::tier_list(&rows, header.as_ref(), accent, theme, imgs)
-        })
-        .await
-    }
-}
-
-fn urls_of<'a>(
-    cells: impl Iterator<Item = &'a CellSpec>,
-    header: Option<&HeaderSpec>,
-) -> Vec<String> {
-    cells
-        .filter_map(|c| c.image_url.clone())
-        .filter(|u| !u.starts_with("custom:"))
-        .chain(header.and_then(|h| h.avatar_url.clone()))
-        .collect()
 }
 
 #[cfg(test)]
