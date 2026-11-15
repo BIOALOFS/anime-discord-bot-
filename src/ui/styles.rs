@@ -2,7 +2,8 @@
 
 use super::{embeds::Emb, format::thousands};
 use crate::{
-    db::profile::{Entry, Profile},
+    commands::profile::items::{Item, Section},
+    db::profile::Profile,
     i18n,
 };
 
@@ -82,16 +83,52 @@ pub fn style_strs() -> Vec<&'static str> {
     Style::ALL.iter().map(|s| s.as_str()).collect()
 }
 
-fn work_link(e: &Entry) -> Option<String> {
-    let w = e.main_work.as_deref()?;
-    Some(match &e.main_work_url {
-        Some(u) => format!("[{w}]({u})"),
-        None => w.to_string(),
+/// Profile badges, computed from activity (nothing is stored).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Badge {
+    pub letter: char,
+    pub label: &'static str,
+}
+
+pub fn badges(characters: i64, works: i64, watched: i64, guess_correct: i64) -> Vec<Badge> {
+    let mut out = Vec::new();
+    if characters + works >= 50 {
+        out.push(Badge {
+            letter: 'C',
+            label: i18n::BADGE_COLLECTOR,
+        });
+    }
+    if guess_correct >= 20 {
+        out.push(Badge {
+            letter: 'G',
+            label: i18n::BADGE_GAMER,
+        });
+    }
+    if watched >= 10 {
+        out.push(Badge {
+            letter: 'W',
+            label: i18n::BADGE_WATCHER,
+        });
+    }
+    out
+}
+
+fn subtitle_link(i: &Item) -> Option<String> {
+    let s = i.subtitle.as_deref()?;
+    Some(match &i.subtitle_url {
+        Some(u) => format!("[{s}]({u})"),
+        None => s.to_string(),
     })
 }
 
 /// Profile header shared by the list styles.
-pub fn header(p: &Profile, owner_name: &str, avatar: Option<&str>, total: i64) -> Emb {
+pub fn header(
+    p: &Profile,
+    owner_name: &str,
+    avatar: Option<&str>,
+    counts: (i64, i64),
+    badges: &[Badge],
+) -> Emb {
     let mut desc = Vec::new();
     if let Some(b) = &p.bio {
         desc.push(b.clone());
@@ -99,7 +136,20 @@ pub fn header(p: &Profile, owner_name: &str, avatar: Option<&str>, total: i64) -
     if let Some(q) = &p.quote {
         desc.push(format!("*« {q} »*"));
     }
-    desc.push(i18n::profile_stats(total, i18n::privacy_ar(&p.privacy)));
+    desc.push(i18n::profile_stats(
+        counts.0,
+        counts.1,
+        i18n::privacy_ar(&p.privacy),
+    ));
+    if !badges.is_empty() {
+        desc.push(
+            badges
+                .iter()
+                .map(|b| b.label)
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
+    }
     Emb::new()
         .title(format!("{} {owner_name}", i18n::PROFILE_TITLE))
         .author(owner_name)
@@ -108,23 +158,29 @@ pub fn header(p: &Profile, owner_name: &str, avatar: Option<&str>, total: i64) -
         .description(desc.join("\n"))
 }
 
-pub fn names_embed(base: Emb, entries: &[&Entry], page: usize, pages: usize) -> Emb {
-    let lines: Vec<String> = entries
+pub fn names_embed(base: Emb, items: &[&Item], page: usize, pages: usize) -> Emb {
+    let lines: Vec<String> = items
         .iter()
-        .map(|e| {
-            let tier = e
+        .map(|i| {
+            let tier = i
                 .tier
                 .as_deref()
                 .map(|t| format!("`{t}` "))
                 .unwrap_or_default();
-            let native = e
-                .name_native
+            let native = i
+                .native
                 .as_deref()
                 .filter(|n| !n.is_empty())
                 .map(|n| format!(" ({n})"))
                 .unwrap_or_default();
-            let work = work_link(e).map(|w| format!(" — {w}")).unwrap_or_default();
-            format!("**{}.** {tier}{}{native}{work}", e.position, e.name())
+            let title = i
+                .display_title()
+                .map(|t| format!(" ✨ *{t}*"))
+                .unwrap_or_default();
+            let sub = subtitle_link(i)
+                .map(|w| format!(" — {w}"))
+                .unwrap_or_default();
+            format!("**{}.** {tier}{}{native}{title}{sub}", i.position, i.name)
         })
         .collect();
     let mut emb = base;
@@ -138,10 +194,10 @@ pub fn names_embed(base: Emb, entries: &[&Entry], page: usize, pages: usize) -> 
     emb.footer(format!("{} · {}/{}", i18n::POWERED_BY, page + 1, pages))
 }
 
-pub fn compact_embed(base: Emb, entries: &[&Entry], total: i64) -> Emb {
-    let lines: Vec<String> = entries
+pub fn compact_embed(base: Emb, items: &[&Item], total: i64) -> Emb {
+    let lines: Vec<String> = items
         .iter()
-        .map(|e| format!("**{}.** {}", e.position, e.name()))
+        .map(|i| format!("**{}.** {}", i.position, i.name))
         .collect();
     let mut emb = base;
     let head = emb.description.take().unwrap_or_default();
@@ -150,7 +206,7 @@ pub fn compact_embed(base: Emb, entries: &[&Entry], total: i64) -> Emb {
     } else {
         lines.join("\n")
     };
-    let more = total - entries.len() as i64;
+    let more = total - items.len() as i64;
     if more > 0 {
         body.push_str(&format!("\n{}", i18n::more_n(more)));
     }
@@ -158,35 +214,46 @@ pub fn compact_embed(base: Emb, entries: &[&Entry], total: i64) -> Emb {
     emb
 }
 
-/// Fallback card built only from cached metadata (AniList unreachable): same simplified layout.
-pub fn cached_card(e: &Entry, total: i64, note: Option<&str>) -> Emb {
-    let name = match e.name_native.as_deref().filter(|n| !n.is_empty()) {
-        Some(n) => format!("{} ({n})", e.name()),
-        None => e.name().to_string(),
+/// One item as a simple card, built from cached data only (no AniList call at render time).
+pub fn item_card(i: &Item, total: i64, own: bool) -> Emb {
+    let name = match i.native.as_deref().filter(|n| !n.is_empty()) {
+        Some(n) => format!("{} ({n})", i.name),
+        None => i.name.clone(),
     };
     let mut desc = Vec::new();
-    if let Some(w) = work_link(e) {
-        desc.push(format!("📺 {w}"));
+    if let Some(t) = i.display_title() {
+        desc.push(format!("✨ **{t}**"));
     }
-    if let Some(n) = note {
-        desc.push(format!("📝 **{}:** {n}", i18n::NOTE_LABEL));
+    if let Some(w) = subtitle_link(i) {
+        desc.push(if i.section == Section::Characters {
+            format!("📺 {w}")
+        } else {
+            w
+        });
+    }
+    if own {
+        if let Some(n) = i.note.as_deref() {
+            desc.push(format!("📝 **{}:** {n}", i18n::NOTE_LABEL));
+        }
     }
     let mut emb = Emb::new()
         .title(name)
-        .author(i18n::position_of(e.position, total))
-        .image(e.image_url.clone());
+        .author(i18n::position_of(i.position, total))
+        .image(i.image_url.clone());
     if !desc.is_empty() {
         emb = emb.description(desc.join("\n"));
     }
-    if let Some(f) = e.favourites {
+    if let Some(f) = i.favourites {
         emb = emb.field("❤", thousands(f), true);
     }
     emb
 }
 
-/// A bare thumbnail embed, used for the "next characters" strip of the gallery style.
-pub fn thumb_embed(e: &Entry) -> Emb {
-    let mut emb = Emb::new().title(e.name()).thumbnail(e.image_url.clone());
+/// A bare thumbnail embed, used for the "next items" strip of the gallery style.
+pub fn thumb_embed(i: &Item) -> Emb {
+    let mut emb = Emb::new()
+        .title(i.name.clone())
+        .thumbnail(i.image_url.clone());
     emb.footer = None;
     emb
 }
@@ -195,21 +262,23 @@ pub fn thumb_embed(e: &Entry) -> Emb {
 mod tests {
     use super::*;
 
-    fn entry(pos: i64, name: &str) -> Entry {
-        Entry {
-            character_id: pos,
+    fn item(pos: i64, name: &str) -> Item {
+        Item {
+            section: Section::Characters,
+            key: pos.to_string(),
             position: pos,
-            group_id: None,
-            tier: None,
-            note: None,
-            name_romaji: Some(name.into()),
-            name_native: Some("名".into()),
+            name: name.into(),
+            native: Some("名".into()),
+            subtitle: Some("Work".into()),
+            subtitle_url: Some("https://anilist.co/anime/1".into()),
             image_url: Some("https://img".into()),
-            is_safe: Some(true),
-            main_work: Some("Work".into()),
-            main_work_url: Some("https://anilist.co/anime/1".into()),
+            tier: None,
+            note: Some("my note".into()),
+            custom_title: None,
+            custom_description: None,
+            custom_image_id: None,
             favourites: Some(1500),
-            fetched_at: Some(1),
+            visible: true,
         }
     }
 
@@ -222,6 +291,7 @@ mod tests {
             banner: None,
             default_style: "names".into(),
             privacy: "public".into(),
+            template: "classic".into(),
         }
     }
 
@@ -237,23 +307,29 @@ mod tests {
     }
 
     #[test]
-    fn names_list_is_numbered_and_linked() {
-        let e1 = entry(1, "Alpha");
-        let mut e2 = entry(2, "Beta");
+    fn names_list_is_numbered_linked_and_shows_personal_titles() {
+        let e1 = item(1, "Alpha");
+        let mut e2 = item(2, "Beta");
         e2.tier = Some("S".into());
-        let emb = names_embed(header(&profile(), "User", None, 2), &[&e1, &e2], 0, 1);
+        e2.custom_title = Some("Best girl".into());
+        let emb = names_embed(
+            header(&profile(), "User", None, (2, 0), &[]),
+            &[&e1, &e2],
+            0,
+            1,
+        );
         let d = emb.description.as_deref().expect("desc");
         assert!(d.contains("**1.** Alpha (名) — [Work](https://anilist.co/anime/1)"));
-        assert!(d.contains("**2.** `S` Beta"));
+        assert!(d.contains("**2.** `S` Beta (名) ✨ *Best girl*"));
         assert!(d.contains("bio") && d.contains("« quote »"));
         assert_eq!(emb.colour, Some(0xff0000));
     }
 
     #[test]
     fn compact_shows_more_counter() {
-        let es: Vec<Entry> = (1..=5).map(|i| entry(i, "X")).collect();
-        let refs: Vec<&Entry> = es.iter().collect();
-        let emb = compact_embed(header(&profile(), "U", None, 143), &refs, 143);
+        let es: Vec<Item> = (1..=5).map(|i| item(i, "X")).collect();
+        let refs: Vec<&Item> = es.iter().collect();
+        let emb = compact_embed(header(&profile(), "U", None, (143, 0), &[]), &refs, 143);
         assert!(emb
             .description
             .as_deref()
@@ -261,12 +337,32 @@ mod tests {
     }
 
     #[test]
-    fn cached_card_is_simple() {
-        let e = entry(12, "Alpha");
-        let emb = cached_card(&e, 143, Some("my note"));
-        assert_eq!(emb.author.as_deref(), Some("12 / 143"));
-        assert!(emb.image.is_some());
-        let d = emb.description.as_deref().expect("d");
-        assert!(d.contains("📺 [Work]") && d.contains("my note"));
+    fn item_card_is_simple_and_notes_are_private() {
+        let mut i = item(12, "Alpha");
+        i.custom_title = Some("Mine".into());
+        let own = item_card(&i, 143, true);
+        assert_eq!(own.author.as_deref(), Some("12 / 143"));
+        let d = own.description.as_deref().expect("d");
+        assert!(d.contains("✨ **Mine**") && d.contains("📺 [Work]") && d.contains("my note"));
+        let other = item_card(&i, 143, false);
+        assert!(
+            !other
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .contains("my note"),
+            "notes are only for the owner"
+        );
+    }
+
+    #[test]
+    fn badges_follow_activity() {
+        assert!(badges(0, 0, 0, 0).is_empty());
+        let b = badges(40, 15, 10, 20);
+        assert_eq!(
+            b.iter().map(|b| b.letter).collect::<Vec<_>>(),
+            vec!['C', 'G', 'W']
+        );
+        assert_eq!(badges(10, 0, 9, 19).len(), 0);
     }
 }

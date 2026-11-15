@@ -2,7 +2,9 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use super::{CellSpec, HeaderSpec, Images, Rendered, TierRow, CELL_H, CELL_W, MAX_OUTPUT_BYTES};
+use super::{
+    CellSpec, HeaderSpec, Images, Rendered, Theme, TierRow, CELL_H, CELL_W, MAX_OUTPUT_BYTES,
+};
 use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
 use image::{imageops, imageops::FilterType, Rgba, RgbaImage};
 use std::sync::OnceLock;
@@ -297,6 +299,7 @@ const BADGE_COLOURS: [[u8; 3]; 3] = [[0xFF, 0xD5, 0x4A], [0xC9, 0xD1, 0xD9], [0x
 fn draw_cell(
     canvas: &mut RgbaImage,
     font: Option<&FontArc>,
+    theme: Theme,
     x: i64,
     y: i64,
     w: u32,
@@ -363,6 +366,35 @@ fn draw_cell(
     }
     round_corners(&mut tile, radius as u32);
     imageops::overlay(canvas, &tile, x, y);
+    if let Some(frame) = theme.frame() {
+        for i in 0..3i64 {
+            for py in (y - i)..(y + i64::from(h) + i) {
+                for px in (x - i)..(x + i64::from(w) + i) {
+                    let inside = in_rounded_rect(
+                        px,
+                        py,
+                        x - i,
+                        y - i,
+                        i64::from(w) + 2 * i,
+                        i64::from(h) + 2 * i,
+                        radius + i,
+                    );
+                    let core = in_rounded_rect(
+                        px,
+                        py,
+                        x - i + 1,
+                        y - i + 1,
+                        i64::from(w) + 2 * i - 2,
+                        i64::from(h) + 2 * i - 2,
+                        radius + i - 1,
+                    );
+                    if inside && !core {
+                        blend_px(canvas, px, py, frame, 0.9);
+                    }
+                }
+            }
+        }
+    }
 
     if let Some(rank @ 1..=3) = cell.rank {
         let r = i64::from((w / 11).max(12));
@@ -384,12 +416,20 @@ fn draw_cell(
     }
 }
 
-fn background(accent: Option<u32>, first: Option<&RgbaImage>, w: u32, h: u32) -> RgbaImage {
+fn background(
+    accent: Option<u32>,
+    first: Option<&RgbaImage>,
+    theme: Theme,
+    w: u32,
+    h: u32,
+) -> RgbaImage {
+    let accent = accent.or(theme.default_accent());
     let base = match (accent, first) {
         (Some(_), _) | (None, None) => rgb_of(accent),
         (None, Some(img)) => average_colour(img),
     };
-    gradient(w, h, shade(base, 0.45), shade(base, 0.12))
+    let (top, bottom) = theme.darkness();
+    gradient(w, h, shade(base, top), shade(base, bottom))
 }
 
 fn draw_header(
@@ -442,6 +482,19 @@ fn draw_header(
             [200, 205, 215],
             0.9,
             &t,
+        );
+    }
+    for (i, badge) in header.badges.iter().take(3).enumerate() {
+        let bx = text_x as i64 + 14 + i as i64 * 34;
+        fill_circle(canvas, bx, i64::from(HEADER_H) - 18, 13, accent, 1.0);
+        draw_centered(
+            canvas,
+            f,
+            16.0,
+            bx as f32,
+            f32::from(HEADER_H as u16) - 28.0,
+            [20, 20, 25],
+            &badge.to_string(),
         );
     }
     // Count pill on the right.
@@ -525,6 +578,7 @@ pub fn collage(
     cells: &[CellSpec],
     header: Option<&HeaderSpec>,
     accent: Option<u32>,
+    theme: Theme,
     scale: f32,
     images: &Images,
 ) -> Option<Rendered> {
@@ -533,7 +587,13 @@ pub fn collage(
     }
     let g = grid_layout(cells.len(), scale, header.is_some());
     let font = font();
-    let mut canvas = background(accent, first_image(cells.iter(), images), g.width, g.height);
+    let mut canvas = background(
+        accent,
+        first_image(cells.iter(), images),
+        theme,
+        g.width,
+        g.height,
+    );
     if let Some(h) = header {
         draw_header(&mut canvas, font, h, images, shade(rgb_of(accent), 1.2));
     }
@@ -548,7 +608,17 @@ pub fn collage(
             .as_ref()
             .and_then(|u| images.get(u))
             .map(|a| a.as_ref());
-        draw_cell(&mut canvas, font, x, y, g.cell_w, g.cell_h, cell, img);
+        draw_cell(
+            &mut canvas,
+            font,
+            theme,
+            x,
+            y,
+            g.cell_w,
+            g.cell_h,
+            cell,
+            img,
+        );
     }
     encode(canvas)
 }
@@ -558,6 +628,7 @@ pub fn podium(
     top: &[CellSpec],
     header: Option<&HeaderSpec>,
     accent: Option<u32>,
+    theme: Theme,
     images: &Images,
 ) -> Option<Rendered> {
     if top.is_empty() {
@@ -587,7 +658,7 @@ pub fn podium(
         .unwrap_or(CELL_H);
     let head = if header.is_some() { HEADER_H } else { 0 };
     let (w, h) = (inner_w + PAD * 2, PAD * 2 + head + tallest + 16);
-    let mut canvas = background(accent, first_image(top.iter(), images), w, h);
+    let mut canvas = background(accent, first_image(top.iter(), images), theme, w, h);
     let accent_rgb = shade(rgb_of(accent), 1.2);
     if let Some(hd) = header {
         draw_header(&mut canvas, font, hd, images, accent_rgb);
@@ -605,7 +676,7 @@ pub fn podium(
         let y = base_y - i64::from(block) - i64::from(ch);
         let mut c = cell.clone();
         c.rank = Some(idx as u8 + 1);
-        draw_cell(&mut canvas, font, x, y, cw, ch, &c, img);
+        draw_cell(&mut canvas, font, theme, x, y, cw, ch, &c, img);
         let by = base_y - i64::from(block) + 6;
         fill_rrect(
             &mut canvas,
@@ -634,6 +705,83 @@ pub fn podium(
     encode(canvas)
 }
 
+/// Social-friendly 1200x630 card: header plus the top five items.
+pub fn share_image(
+    cells: &[CellSpec],
+    header: Option<&HeaderSpec>,
+    accent: Option<u32>,
+    theme: Theme,
+    images: &Images,
+) -> Option<Rendered> {
+    if cells.is_empty() {
+        return None;
+    }
+    let (w, h) = (1200u32, 630u32);
+    let font = font();
+    let mut canvas = background(accent, first_image(cells.iter(), images), theme, w, h);
+    if let Some(hd) = header {
+        draw_header(
+            &mut canvas,
+            font,
+            hd,
+            images,
+            shade(rgb_of(accent.or(theme.default_accent())), 1.2),
+        );
+    }
+    let shown = &cells[..cells.len().min(5)];
+    let (cw, ch, gap) = (210u32, 315u32, 16u32);
+    let row_w = shown.len() as u32 * cw + (shown.len() as u32 - 1) * gap;
+    let x0 = (w - row_w) / 2;
+    let y0 = PAD + HEADER_H + (h - PAD * 2 - HEADER_H - ch) / 2;
+    for (i, cell) in shown.iter().enumerate() {
+        let x = i64::from(x0 + i as u32 * (cw + gap));
+        let img = cell
+            .image_url
+            .as_ref()
+            .and_then(|u| images.get(u))
+            .map(|a| a.as_ref());
+        draw_cell(
+            &mut canvas,
+            font,
+            theme,
+            x,
+            i64::from(y0),
+            cw,
+            ch,
+            cell,
+            img,
+        );
+    }
+    encode(canvas)
+}
+
+/// Crop + blur for the guessing game: `level` 0 (easy) to 2 (hard); `seed` picks where the crop lands.
+pub fn guess_crop(img: &RgbaImage, level: u8, seed: u64) -> RgbaImage {
+    let level = usize::from(level.min(2));
+    let frac = [0.6f32, 0.42, 0.3][level];
+    let sigma = [2.0f32, 4.0, 6.0][level];
+    let (iw, ih) = img.dimensions();
+    let (cw, ch) = (
+        ((iw as f32 * frac) as u32).clamp(1, iw),
+        ((ih as f32 * frac) as u32).clamp(1, ih),
+    );
+    let fx = (seed & 0xff) as f32 / 255.0;
+    let fy = ((seed >> 8) & 0xff) as f32 / 255.0;
+    let (x0, y0) = (
+        ((iw - cw) as f32 * fx) as u32,
+        ((ih - ch) as f32 * fy) as u32,
+    );
+    let view = imageops::crop_imm(img, x0, y0, cw, ch).to_image();
+    let width = 360u32;
+    let height = ((ch as f32 / cw as f32) * width as f32).round().max(1.0) as u32;
+    let scaled = imageops::resize(&view, width, height, FilterType::Triangle);
+    imageops::blur(&scaled, sigma)
+}
+
+pub fn guess_image(img: &RgbaImage, level: u8, seed: u64) -> Option<Rendered> {
+    encode(guess_crop(img, level, seed))
+}
+
 const TIER_COLOURS: [[u8; 3]; 8] = [
     [0xFF, 0x7F, 0x7F],
     [0xFF, 0xBF, 0x7F],
@@ -659,6 +807,7 @@ pub fn tier_list(
     rows: &[TierRow],
     header: Option<&HeaderSpec>,
     accent: Option<u32>,
+    theme: Theme,
     images: &Images,
 ) -> Option<Rendered> {
     let rows: Vec<&TierRow> = rows.iter().filter(|r| !r.cells.is_empty()).collect();
@@ -673,7 +822,7 @@ pub fn tier_list(
     let row_h = |n: usize| (n as u32).div_ceil(per_line).max(1) * (th + tgap) + tgap;
     let height = PAD * 2 + head + rows.iter().map(|r| row_h(r.cells.len()) + 10).sum::<u32>();
     let all = rows.iter().flat_map(|r| r.cells.iter());
-    let mut canvas = background(accent, first_image(all, images), width, height);
+    let mut canvas = background(accent, first_image(all, images), theme, width, height);
     if let Some(hd) = header {
         draw_header(&mut canvas, font, hd, images, shade(rgb_of(accent), 1.2));
     }
@@ -726,7 +875,7 @@ pub fn tier_list(
             let mut small = cell.clone();
             small.label = String::new();
             small.rank = None;
-            draw_cell(&mut canvas, font, x, cy, tw, th, &small, img);
+            draw_cell(&mut canvas, font, theme, x, cy, tw, th, &small, img);
         }
         y += rh + 10;
     }

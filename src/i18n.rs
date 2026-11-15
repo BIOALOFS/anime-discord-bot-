@@ -1,6 +1,5 @@
 //! Every user-facing string lives here so another language can be added later.
 
-pub const PING_REPLY: &str = "🏓 بونغ!";
 pub const ERR_GENERIC: &str = "حدث خطأ غير متوقع، حاول مرة أخرى لاحقًا.";
 pub const ERR_COOLDOWN: &str = "تمهّل قليلًا، حاول بعد لحظات.";
 pub const ERR_MISSING_PERMS: &str = "ليست لديك الصلاحية لاستخدام هذا الأمر.";
@@ -20,11 +19,8 @@ pub const NONE: &str = "—";
 
 // ---- buttons ----
 pub const BTN_CHARACTERS: &str = "الشخصيات";
-pub const BTN_SIMILAR: &str = "المشابه";
-pub const BTN_RELATED: &str = "الأعمال المرتبطة";
 pub const BTN_FAVOURITE: &str = "إضافة للمفضلة";
 pub const BTN_ANILIST: &str = "AniList";
-pub const BTN_TRAILER: &str = "العرض الترويجي";
 pub const BTN_CLOSE: &str = "إغلاق";
 pub const BTN_BACK: &str = "رجوع";
 pub const BTN_WORKS: &str = "الأعمال";
@@ -34,24 +30,12 @@ pub const BTN_REROLL: &str = "مرة أخرى";
 
 // ---- media card ----
 pub const F_SCORE: &str = "التقييم";
-pub const F_POPULARITY: &str = "الشعبية";
 pub const F_EPISODES: &str = "الحلقات";
 pub const F_CHAPTERS: &str = "الفصول";
 pub const F_STATUS: &str = "الحالة";
-pub const F_SEASON: &str = "الموسم";
-pub const F_STUDIO: &str = "الاستوديو";
-pub const F_AUTHOR: &str = "المؤلف";
-pub const F_DURATION: &str = "المدة";
-pub const F_SOURCE: &str = "المصدر";
-pub const F_GENRES: &str = "التصنيفات";
-pub fn minutes(n: i32) -> String {
-    format!("{n} دقيقة")
-}
 
 // ---- lists ----
 pub const TITLE_CHARACTERS: &str = "شخصيات";
-pub const TITLE_SIMILAR: &str = "أعمال مشابهة لـ";
-pub const TITLE_RELATED: &str = "أعمال مرتبطة بـ";
 pub const EMPTY_LIST: &str = "لا توجد عناصر لعرضها.";
 pub const ROLE_MAIN: &str = "رئيسية";
 pub const ROLE_SUPPORTING: &str = "داعمة";
@@ -78,21 +62,15 @@ pub fn episode_n(n: i32) -> String {
 }
 
 // ---- seasonal ----
-pub const SEASONAL_PLACEHOLDER: &str = "افتح بطاقة عمل…";
 
 // ---- random ----
 pub const RANDOM_FAILED: &str = "لم أجد نتيجة مناسبة بعد عدة محاولات، جرّب مرة أخرى.";
-pub fn seasonal_title(season_ar: &str, year: i32) -> String {
-    format!("أنمي {season_ar} {year}")
-}
 
 // ---- profiles ----
 pub const PROFILE_TITLE: &str = "بروفايل";
 pub const PROFILE_NONE_SELF: &str = "ليس لديك بروفايل بعد، أنشئه بالأمر `/profile create`.";
 pub const PROFILE_NONE_OTHER: &str = "هذا المستخدم ليس لديه بروفايل.";
 pub const PROFILE_PRIVATE: &str = "هذا البروفايل غير متاح لك.";
-pub const PROFILE_CREATED: &str = "تم إنشاء بروفايلك 🎉 أضف شخصياتك بالأمر `/profile add`.";
-pub const PROFILE_EXISTS: &str = "لديك بروفايل بالفعل.";
 pub const PROFILE_EMPTY: &str = "لا توجد شخصيات في هذا البروفايل بعد.";
 pub const PROFILE_NOT_IN_LIST: &str = "هذه الشخصية ليست في بروفايلك. اختر من القائمة المقترحة.";
 pub const PROFILE_AMBIGUOUS: &str = "وجدت أكثر من شخصية بهذا الاسم، اختر واحدة من القائمة المقترحة.";
@@ -197,11 +175,10 @@ pub fn compat(pct: u32) -> String {
     format!("نسبة التوافق: **{pct}%**")
 }
 pub const COMPARE_NONE_SHARED: &str = "لا توجد شخصيات مشتركة.";
-pub const TOP_TITLE: &str = "أكثر الشخصيات تفضيلًا";
 pub const SCOPE_SERVER: &str = "السيرفر";
 pub const SCOPE_GLOBAL: &str = "عالميًا";
-pub fn profile_stats(count: i64, privacy: &str) -> String {
-    format!("{count} شخصية · الخصوصية: {privacy}")
+pub fn profile_stats(characters: i64, works: i64, privacy: &str) -> String {
+    format!("{characters} شخصية · {works} عمل · الخصوصية: {privacy}")
 }
 pub fn privacy_ar(p: &str) -> &'static str {
     match p {
@@ -286,3 +263,194 @@ pub const SETUP_OFF: &str = "معطّل";
 pub const SETUP_DELETED_WARNING: &str =
     "⚠️ القناة المحددة محذوفة، لذلك القيد معطّل حاليًا. اختر قناة جديدة بالأمر `/setup channel`.";
 pub const GUILD_ONLY: &str = "هذا الأمر يعمل داخل السيرفرات فقط.";
+
+// ---- work card / kinds ----
+pub const KIND_ANIME: &str = "أنمي";
+pub const KIND_MANGA: &str = "مانجا";
+pub const KIND_MANHWA: &str = "مانهوا";
+pub const KIND_MANHUA: &str = "مانهوا صينية";
+pub const KIND_NOVEL: &str = "رواية";
+pub const UNKNOWN: &str = "غير معروف";
+pub fn chapters_n(n: i32) -> String {
+    format!("{n} فصل")
+}
+pub fn volumes_n(n: i32) -> String {
+    format!("{n} مجلد")
+}
+pub const BTN_UNDO: &str = "تراجع";
+pub const WORK_ADDED: &str = "✅ تمت الإضافة إلى بروفايلك";
+pub const WORK_REMOVED: &str = "تمت الإزالة من بروفايلك";
+pub const UNDONE: &str = "تم التراجع.";
+pub const BTN_ADDED: &str = "مضاف";
+pub const BTN_ALERTS: &str = "تنبيهات";
+pub const ALERT_ADDED: &str = "🔔 أُضيف إلى قائمة التنبيهات في السيرفر.";
+pub const ALERT_REQUESTED: &str = "🔔 أُرسل طلبك إلى المشرفين.";
+pub const ALERT_ALREADY_REQUESTED: &str = "طلبك مسجّل بالفعل وينتظر موافقة المشرفين.";
+pub const BADGE_COLLECTOR: &str = "🏅 جامع";
+pub const BADGE_GAMER: &str = "🎮 لاعب";
+pub const BADGE_WATCHER: &str = "📺 متابع وفيّ";
+pub const SELECT_ITEM_PLACEHOLDER: &str = "افتح عنصرًا…";
+pub const BTN_SECTION_WORKS: &str = "🎬 الأعمال";
+pub const BTN_SECTION_CHARACTERS: &str = "👤 الشخصيات";
+pub const BTN_REPORT: &str = "إبلاغ";
+pub const REPORT_SENT: &str = "🚩 تم إرسال البلاغ للمشرفين.";
+pub const REPORT_ALREADY: &str = "أبلغتَ عن هذه الصورة من قبل.";
+pub const COMPARE_CHARACTERS: &str = "شخصيات مشتركة";
+pub const COMPARE_WORKS: &str = "أعمال مشتركة";
+
+// ---- works / customization / lists ----
+pub const WORK_AMBIGUOUS: &str = "وجدت عدة أعمال، اختر واحدًا من الاقتراحات المنسدلة:";
+pub const WORK_ALREADY: &str = "هذا العمل موجود بالفعل في بروفايلك.";
+pub const WORK_NOT_IN_LIST: &str = "هذا العمل ليس في بروفايلك. اختر من القائمة المقترحة.";
+pub const LIST_WATCHED: &str = "شاهدتها";
+pub const LIST_PLANNING: &str = "أخطط لمشاهدتها";
+pub fn list_updated(title: &str, list: Option<&str>) -> String {
+    match list {
+        Some("watched") => format!("تمت إضافة **{title}** إلى قائمة «{LIST_WATCHED}»."),
+        Some(_) => format!("تمت إضافة **{title}** إلى قائمة «{LIST_PLANNING}»."),
+        None => format!("تمت إزالة **{title}** من القوائم."),
+    }
+}
+pub const QUOTE_SET: &str = "تم تحديث الاقتباس.";
+pub const TEXT_REJECTED: &str = "النص غير مقبول: لا روابط ولا إشارات ولا دعوات ولا كلمات غير لائقة.";
+pub const TEMPLATE_SET: &str = "تم تغيير قالب البروفايل.";
+pub const TEMPLATE_UNKNOWN: &str =
+    "قالب غير معروف. القوالب: classic, midnight, sakura, ocean, mono.";
+pub fn custom_saved(name: &str) -> String {
+    format!("تم حفظ التخصيص لـ **{name}** (يظهر في بروفايلك فقط).")
+}
+pub fn custom_reset(name: &str) -> String {
+    format!("تمت إعادة **{name}** إلى الوضع الافتراضي.")
+}
+pub fn custom_image_saved(name: &str, animated: bool) -> String {
+    if animated {
+        format!("تم حفظ الصورة المتحركة لـ **{name}**. تظهر متحركة في بطاقة الشخصية وكإطار أول في الشبكة.")
+    } else {
+        format!("تم حفظ الصورة المخصصة لـ **{name}** (تظهر في بروفايلك فقط).")
+    }
+}
+pub const CUSTOM_IMAGES_OFF: &str =
+    "الصور المخصصة غير مفعّلة في هذا السيرفر. يمكن للمشرف تفعيلها من `/settings`.";
+pub const UPLOAD_BANNED: &str = "تم منعك من رفع الصور في هذا السيرفر.";
+pub const IMAGE_REQUIRED: &str = "أرفق صورة في خيار `image`.";
+pub const IMAGE_TOO_LARGE: &str = "الصورة كبيرة جدًا (الحد 3 ميغابايت).";
+pub const IMAGE_INVALID: &str = "ملف الصورة غير صالح. المسموح: PNG وJPG وWebP وGIF.";
+pub const IMAGE_LIMIT: &str = "وصلت إلى الحد الأقصى للصور المخصصة (30). احذف بعضها أولًا.";
+pub const IMAGE_DOWNLOAD_FAILED: &str = "تعذّر تحميل الصورة، حاول مرة أخرى.";
+pub const UPLOAD_SLOW_DOWN: &str = "تمهّل قليلًا قبل رفع صورة جديدة.";
+pub const BTN_DELETE_ALL: &str = "احذف كل بياناتي";
+pub const DELETE_CONFIRM: &str = "⚠️ سيتم حذف **كل** بياناتك نهائيًا: البروفايل والأعمال والصور المخصصة ونتائج الألعاب. هل أنت متأكد؟";
+pub const DATA_DELETED: &str = "تم حذف كل بياناتك.";
+pub const PROFILE_PICK_ACTION: &str = "اختر الفئة ثم الإجراء من الاقتراحات المنسدلة.";
+pub const PROFILE_NEEDS_VALUE: &str =
+    "اختر القيمة من الاقتراحات في خيار `value` (شخصية أو عمل أو غيرها).";
+pub const PROFILE_NEEDS_TEXT: &str = "اكتب النص في خيار `text`.";
+pub const PROFILE_NEEDS_POSITION: &str = "اكتب رقم المركز في خيار `text` (مثل 1).";
+pub const PROFILE_NEEDS_USER: &str = "اختر العضو في خيار `user`.";
+pub const STYLE_UNKNOWN: &str = "نمط غير معروف. اختر من الاقتراحات.";
+pub const PRIVACY_UNKNOWN: &str = "قيمة غير معروفة. اختر من الاقتراحات.";
+pub const CLEAR_WORKS_CONFIRM: &str =
+    "⚠️ سيتم حذف **كل** الأعمال المفضلة من بروفايلك. هل أنت متأكد؟";
+pub const NO_BIRTHDAYS: &str = "لا توجد شخصيات مشهورة لها عيد ميلاد اليوم.";
+pub const TOP_CHARACTERS: &str = "أكثر الشخصيات تفضيلًا";
+pub const TOP_WORKS: &str = "أكثر الأعمال تفضيلًا";
+
+// ---- /settings ----
+pub const SETTINGS_PICK: &str = "اختر القسم ثم الخيار من الاقتراحات المنسدلة.";
+pub const SETTINGS_NEEDS_VALUE: &str = "هذا الخيار يحتاج قيمة: اختر من الاقتراحات في خيار `value`.";
+pub const SETTINGS_SAVED: &str = "تم الحفظ ✅";
+pub const SETTINGS_BAD_CHANNEL: &str = "قناة غير صالحة: اختر من الاقتراحات أو اكتب منشن القناة.";
+pub const SETTINGS_BAD_TOGGLE: &str = "اختر تشغيل أو إيقاف.";
+pub const SETTINGS_BAD_NUMBER: &str = "اكتب رقمًا صحيحًا.";
+pub const SETTINGS_BAD_FORMATS: &str =
+    "صيغ غير صالحة. المسموح: TV, TV_SHORT, ONA, MOVIE (مفصولة بفواصل).";
+pub const SETTINGS_BAD_ROLE: &str = "رتبة غير صالحة: اختر من الاقتراحات أو `-` للحذف.";
+pub const SETTINGS_BAD_MODE: &str = "الوضع: all أو listed.";
+pub const SETTINGS_BAD_USER: &str = "عضو غير صالح: اكتب منشن العضو أو رقمه.";
+pub const SETTINGS_PICK_ANIME: &str = "اختر الأنمي من الاقتراحات في خيار `value`.";
+pub fn feed_channel_set(channel: i64) -> String {
+    format!("قناة التغذية: <#{channel}>. فعّلها بـ `/settings section:feed option:toggle value:on`.")
+}
+pub const FEED_NEEDS_CHANNEL: &str = "حدّد قناة التغذية أولًا (`option:channel`).";
+pub const FEED_ON: &str = "تم تشغيل تغذية الحلقات 📺";
+pub const FEED_OFF: &str = "تم إيقاف تغذية الحلقات.";
+pub const FEED_TITLE: &str = "إعدادات تغذية الحلقات";
+pub const FEED_STATE: &str = "الحالة";
+pub const FEED_MIN_POP: &str = "أدنى شعبية";
+pub const FEED_FORMATS: &str = "الصيغ";
+pub const FEED_EXCLUDED: &str = "تصنيفات مستبعدة";
+pub const FEED_DIGEST: &str = "الملخص الدوري";
+pub const FEED_CAP: &str = "الحد اليومي";
+pub const FEED_ROLE: &str = "رتبة الإشارة";
+pub const FEED_MODE: &str = "الوضع";
+pub const FEED_MODE_LISTED: &str = "المدرج في القائمة فقط";
+pub const FEED_MODE_ALL: &str = "كل الأنمي مع المثبّت";
+pub fn alert_list_updated(title: &str, mode: crate::db::feed::ListMode) -> String {
+    format!("**{title}**: {}", list_mode_label(mode))
+}
+pub fn list_mode_label(mode: crate::db::feed::ListMode) -> &'static str {
+    match mode {
+        crate::db::feed::ListMode::Listed => "مُدرج",
+        crate::db::feed::ListMode::Pinned => "مثبّت (ينشر دائمًا)",
+        crate::db::feed::ListMode::Muted => "مكتوم",
+    }
+}
+pub const ALERT_LIST_EMPTY: &str = "قائمة الإشعارات فارغة.";
+pub const NO_REQUESTS: &str = "لا توجد طلبات معلّقة.";
+pub const NO_REPORTS: &str = "لا توجد بلاغات مفتوحة.";
+pub const CUSTOM_IMAGES_ENABLED: &str = "تم تفعيل الصور المخصصة في هذا السيرفر.";
+pub const CUSTOM_IMAGES_DISABLED: &str = "تم تعطيل الصور المخصصة في هذا السيرفر.";
+pub const IMAGE_REMOVED: &str = "تم حذف الصورة وإغلاق بلاغاتها.";
+pub const UPLOAD_BAN_SET: &str = "تم منع العضو من رفع الصور.";
+pub const UPLOAD_BAN_LIFTED: &str = "تم رفع المنع عن العضو.";
+pub const GAMES_ON: &str = "تم تشغيل الألعاب 🎮";
+pub const GAMES_OFF: &str = "تم إيقاف الألعاب.";
+pub const NSFW_NOTE: &str = "تم الحفظ. ملاحظة: المحتوى يبقى آمنًا؛ هذا الخيار لا يعرض محتوى للبالغين إلا في قنوات NSFW عند دعمه لاحقًا.";
+pub fn safety_status(nsfw: bool) -> String {
+    format!(
+        "الوضع الآمن: مفعّل دائمًا · وضع NSFW: {}",
+        if nsfw {
+            "مفعّل (غير فعّال حاليًا)"
+        } else {
+            "معطّل"
+        }
+    )
+}
+
+// ---- recommend ----
+pub const REC_TITLE: &str = "توصيات لك";
+pub const REC_TITLE_TOGETHER: &str = "توصيات مشتركة لكما";
+pub const REC_PICK: &str = "اختر عملًا…";
+pub const REC_NO_SEEDS: &str = "أضف بعض الأعمال أو الشخصيات المفضلة إلى بروفايلك أولًا لأقترح عليك.";
+pub const REC_NONE: &str = "لا توجد توصيات جديدة الآن.";
+pub const REC_HIDDEN: &str = "🔕 لن يظهر هذا العمل في توصياتك مرة أخرى.";
+pub const BTN_NOT_FOR_ME: &str = "ليس لي";
+pub fn rec_why(seed: &str) -> String {
+    format!("لأنك تحب {seed}")
+}
+pub fn rec_why_together(seed: &str) -> String {
+    format!("لأنكما تحبان {seed}")
+}
+
+// ---- games ----
+pub const GUESS_CHARACTER_TITLE: &str = "من هذه الشخصية؟";
+pub const GUESS_ANIME_TITLE: &str = "ما هذا الأنمي؟";
+pub fn guess_hint(seconds: u64, level: u8, streak: i64) -> String {
+    format!(
+        "لديك {seconds} ثانية · المستوى {} · سلسلتك: {streak}",
+        level + 1
+    )
+}
+pub fn game_correct(streak: i64) -> String {
+    format!("✅ إجابة صحيحة! السلسلة: {streak}")
+}
+pub const GAME_WRONG: &str = "❌ إجابة خاطئة (أو انتهى الوقت). هذه هي الإجابة:";
+pub const GAME_ALREADY_ACTIVE: &str = "لديك لعبة نشطة في هذه القناة. أنهِها أولًا.";
+pub const GAMES_DISABLED: &str = "الألعاب معطّلة في هذا السيرفر.";
+pub const GAME_PICK_MODE: &str = "اختر نوع اللعبة من الاقتراحات.";
+pub const VERSUS_PROMPT: &str = "أيهما تفضّل؟";
+pub const VERSUS_RESULTS: &str = "نتائج التصويت حتى الآن:";
+pub const LEADERBOARD_TITLE: &str = "ترتيب الألعاب";
+pub const FEED_DIGEST_TITLE: &str = "ملخص الحلقات الجديدة 📺";
+pub const BIRTHDAYS_TITLE: &str = "🎂 أعياد ميلاد اليوم";
+pub const BTN_WATCH: &str = "مشاهدة";

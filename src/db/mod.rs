@@ -1,4 +1,8 @@
+pub mod custom;
+pub mod feed;
+pub mod game;
 pub mod profile;
+pub mod works;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;

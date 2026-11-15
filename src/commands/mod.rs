@@ -1,11 +1,15 @@
 pub mod airing;
 pub mod character;
+pub mod game;
+pub mod help;
 pub mod media;
 pub mod profile;
 pub mod random;
+pub mod recommend;
 pub mod roster;
-pub mod seasonal;
-pub mod setup;
+pub mod search;
+pub mod settings;
+pub mod top;
 
 use crate::{
     anilist::{AniError, ContentPolicy},
@@ -13,17 +17,6 @@ use crate::{
     i18n,
 };
 use poise::serenity_prelude as serenity;
-
-/// Health check.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "بينغ"),
-    description_localized("ar", "فحص سرعة استجابة البوت")
-)]
-pub async fn ping(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say(i18n::PING_REPLY).await?;
-    Ok(())
-}
 
 /// Content policy for the current guild. Always safe until `/settings` exists (milestone 8).
 pub fn policy(_ctx: Context<'_>) -> ContentPolicy {

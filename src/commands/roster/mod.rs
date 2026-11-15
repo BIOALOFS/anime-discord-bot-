@@ -179,6 +179,29 @@ impl Roster {
         Ok(Some(r))
     }
 
+    /// The cast of one work, opened directly on the list.
+    pub async fn for_work(
+        api: Arc<SafeAniList>,
+        policy: ContentPolicy,
+        id: i64,
+        title: &str,
+    ) -> Result<Self, AniError> {
+        let mut r = Self {
+            api,
+            policy,
+            work: Some((id, title.to_string())),
+            works: vec![(id, title.to_string())],
+            origin: 0,
+            total: 0,
+            page: 0,
+            entries: Vec::new(),
+            mode: Mode::List,
+            notice: None,
+        };
+        r.load().await?;
+        Ok(r)
+    }
+
     async fn load(&mut self) -> Result<(), AniError> {
         let Some((id, _)) = self.work.clone() else {
             return Ok(());

@@ -61,6 +61,7 @@ pub struct Profile {
     pub banner: Option<String>,
     pub default_style: String,
     pub privacy: String,
+    pub template: String,
 }
 
 impl Profile {
@@ -78,6 +79,9 @@ pub struct Entry {
     pub group_id: Option<i64>,
     pub tier: Option<String>,
     pub note: Option<String>,
+    pub custom_title: Option<String>,
+    pub custom_description: Option<String>,
+    pub custom_image_id: Option<i64>,
     pub name_romaji: Option<String>,
     pub name_native: Option<String>,
     pub image_url: Option<String>,
@@ -127,11 +131,12 @@ pub enum AddOutcome {
 }
 
 const ENTRY_SELECT: &str = "SELECT pc.character_id, pc.position, pc.group_id, pc.tier, pc.note, \
+    pc.custom_title, pc.custom_description, pc.custom_image_id, \
     cc.name_romaji, cc.name_native, cc.image_url, cc.is_safe, cc.main_work, cc.main_work_url, \
     cc.favourites, cc.fetched_at \
     FROM profile_characters pc LEFT JOIN character_cache cc ON cc.character_id = pc.character_id";
 
-fn cap(s: &str, max: usize) -> String {
+pub(crate) fn cap(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
@@ -152,7 +157,7 @@ pub async fn create_profile(pool: &SqlitePool, user: i64) -> Result<bool> {
 
 pub async fn get_profile(pool: &SqlitePool, user: i64) -> Result<Option<Profile>> {
     Ok(sqlx::query_as::<_, Profile>(
-        "SELECT user_id, bio, accent_color, quote, banner, default_style, privacy \
+        "SELECT user_id, bio, accent_color, quote, banner, default_style, privacy, template \
          FROM profiles WHERE user_id = ?1",
     )
     .bind(user)
@@ -221,6 +226,10 @@ pub async fn set_privacy(pool: &SqlitePool, user: i64, privacy: Privacy) -> Resu
     set_field(pool, user, "privacy", Some(privacy.as_str().to_string())).await
 }
 
+pub async fn set_template(pool: &SqlitePool, user: i64, template: &str) -> Result<()> {
+    set_field(pool, user, "template", Some(template.to_string())).await
+}
+
 /// `colour` is 0xRRGGBB or None to reset.
 pub async fn set_color(pool: &SqlitePool, user: i64, colour: Option<u32>) -> Result<()> {
     let r = sqlx::query(
@@ -236,7 +245,7 @@ pub async fn set_color(pool: &SqlitePool, user: i64, colour: Option<u32>) -> Res
     Ok(())
 }
 
-async fn touch(pool: &SqlitePool, user: i64) -> Result<()> {
+pub(crate) async fn touch(pool: &SqlitePool, user: i64) -> Result<()> {
     sqlx::query("UPDATE profiles SET updated_at = unixepoch() WHERE user_id = ?1")
         .bind(user)
         .execute(pool)
@@ -787,6 +796,30 @@ pub fn compatibility(shared: usize, a_total: usize, b_total: usize) -> u32 {
         .min(100.0) as u32
 }
 
+/// Everything stored about a user: profile (characters, works, groups), custom images, scores,
+/// hidden recommendations, report/ban records and guild links. Irreversible.
+pub async fn delete_user_data(pool: &SqlitePool, user: i64) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    for sql in [
+        "DELETE FROM profile_characters WHERE user_id = ?1",
+        "DELETE FROM profile_works WHERE user_id = ?1",
+        "DELETE FROM profile_groups WHERE user_id = ?1",
+        "DELETE FROM profiles WHERE user_id = ?1",
+        "DELETE FROM custom_images WHERE user_id = ?1",
+        "DELETE FROM image_reports WHERE reporter_id = ?1 OR owner_id = ?1",
+        "DELETE FROM upload_bans WHERE user_id = ?1",
+        "DELETE FROM game_scores WHERE user_id = ?1",
+        "DELETE FROM hidden_recommendations WHERE user_id = ?1",
+        "DELETE FROM alert_requests WHERE user_id = ?1",
+        "DELETE FROM user_guilds WHERE user_id = ?1",
+        "DELETE FROM users WHERE discord_id = ?1",
+    ] {
+        sqlx::query(sql).bind(user).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 // ---- export / import --------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -808,6 +841,9 @@ pub struct ExportDoc {
     pub privacy: String,
     pub groups: Vec<String>,
     pub characters: Vec<ExportChar>,
+    /// Added in version 2; version 1 files simply have none.
+    #[serde(default)]
+    pub works: Vec<super::works::ExportWork>,
 }
 
 pub async fn export(pool: &SqlitePool, user: i64) -> Result<ExportDoc> {
@@ -823,8 +859,9 @@ pub async fn export(pool: &SqlitePool, user: i64) -> Result<ExportDoc> {
         id.and_then(|i| groups.iter().find(|g| g.id == i))
             .map(|g| g.name.clone())
     };
+    let works = super::works::export_works(pool, user, &groups).await?;
     Ok(ExportDoc {
-        version: 1,
+        version: 2,
         bio: p.bio,
         accent_color: p.accent_color.map(|c| c as u32),
         quote: p.quote,
@@ -841,6 +878,7 @@ pub async fn export(pool: &SqlitePool, user: i64) -> Result<ExportDoc> {
                 note: r.get("note"),
             })
             .collect(),
+        works,
     })
 }
 
@@ -859,10 +897,10 @@ pub async fn import(
     doc: &ExportDoc,
     allowed_styles: &[&str],
 ) -> Result<ImportReport> {
-    if doc.version != 1 {
+    if !(1..=2).contains(&doc.version) {
         return Err(ProfileError::Invalid("unsupported version"));
     }
-    if doc.characters.len() > MAX_IMPORT {
+    if doc.characters.len() + doc.works.len() > MAX_IMPORT {
         return Err(ProfileError::Invalid("too many characters"));
     }
     require_profile(pool, user).await?;
@@ -909,7 +947,30 @@ pub async fn import(
             }
         }
     }
+    let (added, duplicates, invalid) = super::works::import_works(pool, user, &doc.works).await?;
+    report.added += added;
+    report.duplicates += duplicates;
+    report.invalid += invalid;
     Ok(report)
+}
+
+/// Overlap of characters and works as one percentage (characters weigh 60%, works 40%; an empty side
+/// does not count).
+pub fn combined_compatibility(
+    shared_c: usize,
+    a_c: usize,
+    b_c: usize,
+    shared_w: usize,
+    a_w: usize,
+    b_w: usize,
+) -> u32 {
+    let c = (a_c.min(b_c) > 0).then(|| compatibility(shared_c, a_c, b_c));
+    let w = (a_w.min(b_w) > 0).then(|| compatibility(shared_w, a_w, b_w));
+    match (c, w) {
+        (Some(c), Some(w)) => ((f64::from(c) * 0.6) + (f64::from(w) * 0.4)).round() as u32,
+        (Some(x), None) | (None, Some(x)) => x,
+        (None, None) => 0,
+    }
 }
 
 #[cfg(test)]

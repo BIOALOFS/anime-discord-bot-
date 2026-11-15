@@ -85,7 +85,29 @@ pub struct ModalSpec {
     pub label: String,
 }
 
+pub type UndoFuture = futures::future::BoxFuture<'static, String>;
+
+/// An ephemeral follow-up to the presser, optionally with an "undo" button (valid for a minute).
+pub struct Whisper {
+    pub text: String,
+    pub undo: Option<Box<dyn FnOnce() -> UndoFuture + Send + Sync>>,
+}
+
+impl Whisper {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            undo: None,
+        }
+    }
+}
+
 pub trait View: Send {
+    /// Taken by the engine after every interaction.
+    fn take_whisper(&mut self) -> Option<Whisper> {
+        None
+    }
+
     fn render(&self, enabled: bool) -> Page;
 
     /// Buttons that open a modal instead of a normal update. The modal must be the interaction's first
@@ -130,6 +152,53 @@ async fn next_owner_interaction(
         if let Err(e) = i.create_response(ctx, refusal).await {
             tracing::debug!("could not answer non-owner interaction: {e}");
         }
+    }
+}
+
+async fn send_whisper(
+    sctx: &serenity::Context,
+    i: &serenity::ComponentInteraction,
+    whisper: Whisper,
+    owner: serenity::UserId,
+) {
+    let mut followup = CreateInteractionResponseFollowup::new()
+        .content(&whisper.text)
+        .ephemeral(true);
+    if whisper.undo.is_some() {
+        followup = followup.components(vec![CreateActionRow::Buttons(vec![
+            serenity::CreateButton::new("undo")
+                .label(i18n::BTN_UNDO)
+                .emoji('↩')
+                .style(serenity::ButtonStyle::Secondary),
+        ])]);
+    }
+    let msg = match i.create_followup(sctx, followup).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::debug!("could not send ephemeral follow-up: {e}");
+            return;
+        }
+    };
+    if let Some(undo) = whisper.undo {
+        let sctx = sctx.clone();
+        tokio::spawn(async move {
+            let press = ComponentInteractionCollector::new(&sctx)
+                .message_id(msg.id)
+                .author_id(owner)
+                .timeout(Duration::from_secs(60))
+                .await;
+            if let Some(press) = press {
+                let text = undo().await;
+                let update = CreateInteractionResponse::UpdateMessage(
+                    CreateInteractionResponseMessage::new()
+                        .content(text)
+                        .components(vec![]),
+                );
+                if let Err(e) = press.create_response(&sctx, update).await {
+                    tracing::debug!("could not confirm undo: {e}");
+                }
+            }
+        });
     }
 }
 
@@ -205,12 +274,7 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
         };
         let outcome = view.on_interaction(&i.data.custom_id, &values).await;
         if let Outcome::Whisper(text) = &outcome {
-            let followup = CreateInteractionResponseFollowup::new()
-                .content(text)
-                .ephemeral(true);
-            if let Err(e) = i.create_followup(sctx, followup).await {
-                tracing::debug!("could not send ephemeral follow-up: {e}");
-            }
+            send_whisper(sctx, &i, Whisper::text(text.clone()), owner).await;
             continue;
         }
         if outcome != Outcome::Keep {
@@ -220,6 +284,9 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
                 tracing::debug!("could not edit message: {e}");
                 return Ok(());
             }
+        }
+        if let Some(w) = view.take_whisper() {
+            send_whisper(sctx, &i, w, owner).await;
         }
         if outcome == Outcome::Close {
             return Ok(());

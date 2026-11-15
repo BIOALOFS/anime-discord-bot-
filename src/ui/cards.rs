@@ -3,22 +3,18 @@
 use super::{
     embeds::{parse_hex_colour, Emb},
     format::*,
-    text::clean_description,
 };
 use crate::{
     anilist::{
+        kind_of,
         models::{Character, Media, MediaRef},
-        AiringEntry, AiringInfo,
+        AiringEntry, AiringInfo, MediaKind,
     },
     i18n,
 };
 
 fn year_of(m: &Media) -> Option<i32> {
-    m.season_year
-}
-
-fn is_manga(m: &Media) -> bool {
-    matches!(m.format.as_deref(), Some("MANGA" | "NOVEL" | "ONE_SHOT"))
+    m.year()
 }
 
 fn subtitle(m: &Media) -> Option<String> {
@@ -32,112 +28,108 @@ fn subtitle(m: &Media) -> Option<String> {
     (!parts.is_empty()).then(|| format!("*{}*", parts.join(" / ")))
 }
 
-fn author_or_studio(m: &Media) -> Option<(&'static str, String)> {
-    if is_manga(m) {
-        let edges = &m.staff.as_ref()?.edges;
-        let story = edges
-            .iter()
-            .filter(|e| e.role.as_deref().is_some_and(|r| r.contains("Story")))
-            .chain(edges.iter())
-            .filter_map(|e| e.node.name.full.clone())
-            .take(2)
-            .collect::<Vec<_>>();
-        let mut story = story;
-        story.dedup();
-        (!story.is_empty()).then(|| (i18n::F_AUTHOR, story.join("، ")))
-    } else {
-        let names: Vec<_> = m
-            .studios
-            .as_ref()?
-            .nodes
-            .iter()
-            .take(2)
-            .map(|s| s.name.clone())
-            .collect();
-        (!names.is_empty()).then(|| (i18n::F_STUDIO, names.join("، ")))
+/// Arabic type tag: أنمي، مانجا، مانهوا، مانهوا صينية، رواية.
+pub fn kind_label(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Anime => i18n::KIND_ANIME,
+        MediaKind::Manga => i18n::KIND_MANGA,
+        MediaKind::Manhwa => i18n::KIND_MANHWA,
+        MediaKind::Manhua => i18n::KIND_MANHUA,
+        MediaKind::Novel => i18n::KIND_NOVEL,
     }
 }
 
-pub fn media_embed(m: &Media) -> Emb {
+pub fn flag(country: Option<&str>) -> &'static str {
+    match country {
+        Some("JP") => "🇯🇵",
+        Some("KR") => "🇰🇷",
+        Some("CN") => "🇨🇳",
+        Some("TW") => "🇹🇼",
+        _ => "",
+    }
+}
+
+/// "🇰🇷 مانهوا · 2020"
+pub fn type_line(m: &Media) -> String {
+    let mut parts = vec![format!(
+        "{} {}",
+        flag(m.country_of_origin.as_deref()),
+        kind_label(kind_of(m))
+    )
+    .trim()
+    .to_string()];
+    if let Some(y) = m.year() {
+        parts.push(y.to_string());
+    }
+    parts.join(" · ")
+}
+
+fn count_text(m: &Media) -> (&'static str, String) {
+    if kind_of(m).is_written() {
+        let mut v = Vec::new();
+        if let Some(c) = m.chapters {
+            v.push(i18n::chapters_n(c));
+        }
+        if let Some(n) = m.volumes {
+            v.push(i18n::volumes_n(n));
+        }
+        (
+            i18n::F_CHAPTERS,
+            if v.is_empty() {
+                i18n::UNKNOWN.to_string()
+            } else {
+                v.join(" · ")
+            },
+        )
+    } else {
+        (
+            i18n::F_EPISODES,
+            m.episodes
+                .map_or(i18n::UNKNOWN.to_string(), i18n::episodes_n),
+        )
+    }
+}
+
+/// The work card: title (link), vertical cover as the image, Arabic status, count, score.
+/// Everything else is deliberately subtle; there is no long description.
+pub fn work_card(m: &Media) -> Emb {
     let mut e = Emb::new()
         .title(m.title.main())
         .url(m.site_url.clone())
+        .author(type_line(m))
         .colour(
             m.cover_image
                 .as_ref()
                 .and_then(|c| c.color.as_deref())
                 .and_then(parse_hex_colour),
+        )
+        .image(
+            m.cover_image
+                .as_ref()
+                .and_then(|c| c.extra_large.clone().or(c.large.clone())),
         );
-
-    let mut author = Vec::new();
-    if let Some(f) = &m.format {
-        author.push(format_ar(f).to_string());
+    if let Some(sub) = subtitle(m).filter(|s| s.chars().count() <= 60) {
+        e = e.description(sub);
     }
-    if let Some(y) = year_of(m) {
-        author.push(y.to_string());
-    }
-    if !author.is_empty() {
-        e = e.author(author.join(" · "));
-    }
-
-    let mut desc = subtitle(m).unwrap_or_default();
-    if let Some(d) = m
-        .description
-        .as_deref()
-        .and_then(|d| clean_description(d, m.site_url.as_deref()))
-    {
-        if !desc.is_empty() {
-            desc.push_str("\n\n");
-        }
-        desc.push_str(&d);
-    }
-    if !desc.is_empty() {
-        e = e.description(desc);
-    }
-
-    // Banner as the large image when there is one, otherwise the cover as a thumbnail.
-    e = match &m.banner_image {
-        Some(b) => e.image(Some(b.clone())),
-        None => e.thumbnail(m.cover().map(str::to_string)),
-    };
-
+    let (count_label, count) = count_text(m);
     e = e
-        .field(i18n::F_SCORE, score_text(m.average_score), true)
         .field(
-            i18n::F_POPULARITY,
-            m.popularity.map_or(i18n::NONE.to_string(), thousands),
+            i18n::F_STATUS,
+            m.status.as_deref().map_or(i18n::UNKNOWN, status_ar),
             true,
+        )
+        .field(count_label, count, true)
+        .field(i18n::F_SCORE, score_text(m.average_score), true);
+    if let Some(n) = &m.next_airing_episode {
+        e = e.field(
+            i18n::F_NEXT_EPISODE,
+            format!(
+                "{} · {}",
+                i18n::episode_n(n.episode),
+                ts_relative(n.airing_at)
+            ),
+            false,
         );
-    let (count_label, count) = if is_manga(m) {
-        (i18n::F_CHAPTERS, m.chapters)
-    } else {
-        (i18n::F_EPISODES, m.episodes)
-    };
-    if let Some(n) = count {
-        e = e.field(count_label, thousands(i64::from(n)), true);
-    }
-    if let Some(s) = &m.status {
-        e = e.field(i18n::F_STATUS, status_ar(s), true);
-    }
-    if let Some(s) = &m.season {
-        let v = match year_of(m) {
-            Some(y) => format!("{} {y}", season_ar(s)),
-            None => season_ar(s).to_string(),
-        };
-        e = e.field(i18n::F_SEASON, v, true);
-    }
-    if let Some((label, v)) = author_or_studio(m) {
-        e = e.field(label, v, true);
-    }
-    if let Some(d) = m.duration {
-        e = e.field(i18n::F_DURATION, i18n::minutes(d), true);
-    }
-    if let Some(s) = &m.source {
-        e = e.field(i18n::F_SOURCE, source_ar(s), true);
-    }
-    if !m.genres.is_empty() {
-        let tags: Vec<_> = m.genres.iter().take(6).cloned().collect();
-        e = e.field(i18n::F_GENRES, tags.join(" • "), false);
     }
     e
 }
@@ -212,56 +204,6 @@ fn media_line(m: &Media) -> String {
     }
 }
 
-pub fn similar_embed(m: &Media, items: &[Media], page: usize, pages: usize) -> Emb {
-    let body = if items.is_empty() {
-        i18n::EMPTY_LIST.to_string()
-    } else {
-        items
-            .iter()
-            .map(media_line)
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    };
-    Emb::new()
-        .title(format!("{} {}", i18n::TITLE_SIMILAR, m.title.main()))
-        .thumbnail(m.cover().map(str::to_string))
-        .description(body)
-        .footer(format!("{} · {}/{}", i18n::POWERED_BY, page + 1, pages))
-}
-
-pub fn related_embed(m: &Media, items: &[(String, Media)]) -> Emb {
-    let body = if items.is_empty() {
-        i18n::EMPTY_LIST.to_string()
-    } else {
-        items
-            .iter()
-            .map(|(rel, media)| format!("**{}**\n{}", relation_ar(rel), media_line(media)))
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    };
-    Emb::new()
-        .title(format!("{} {}", i18n::TITLE_RELATED, m.title.main()))
-        .thumbnail(m.cover().map(str::to_string))
-        .description(body)
-}
-
-/// Relation types shown first, in this order.
-pub fn relation_rank(rel: &str) -> usize {
-    [
-        "PREQUEL",
-        "SEQUEL",
-        "PARENT",
-        "SIDE_STORY",
-        "SPIN_OFF",
-        "ALTERNATIVE",
-        "ADAPTATION",
-        "SOURCE",
-    ]
-    .iter()
-    .position(|r| *r == rel)
-    .unwrap_or(usize::MAX)
-}
-
 pub fn picker_embed(list: &[Media]) -> Emb {
     let body = list
         .iter()
@@ -283,43 +225,6 @@ pub fn picker_character_embed(list: &[Character]) -> Emb {
         .collect::<Vec<_>>()
         .join("\n");
     Emb::new().title(i18n::PICK_PROMPT).description(body)
-}
-
-pub fn seasonal_embed(title: &str, items: &[Media], page: usize, pages: usize) -> Emb {
-    let body = if items.is_empty() {
-        i18n::EMPTY_LIST.to_string()
-    } else {
-        items
-            .iter()
-            .enumerate()
-            .map(|(i, m)| {
-                let mut bits = Vec::new();
-                bits.push(format!(
-                    "⭐ {}",
-                    m.average_score
-                        .map_or("—".into(), |s| format!("{:.1}", s as f32 / 10.0))
-                ));
-                if let Some(n) = m.episodes {
-                    bits.push(i18n::episodes_n(n));
-                }
-                if let Some(g) = m.genres.first() {
-                    bits.push(g.clone());
-                }
-                let title = match &m.site_url {
-                    Some(u) => format!("[{}]({u})", m.title.main()),
-                    None => m.title.main().to_string(),
-                };
-                format!("**{}.** {title}\n{}", page * 10 + i + 1, bits.join(" · "))
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    };
-    Emb::new().title(title).description(body).footer(format!(
-        "{} · {}/{}",
-        i18n::POWERED_BY,
-        page + 1,
-        pages
-    ))
 }
 
 fn work_line(r: &MediaRef) -> Option<String> {
@@ -484,78 +389,6 @@ mod tests {
     }
 
     #[test]
-    fn anime_card_layout() {
-        let m = media(json!({
-            "id": 1, "title": {"romaji": "Shingeki", "english": "Attack", "native": "進撃"},
-            "description": "Hello<br>world", "bannerImage": "https://b", "coverImage": {"large": "https://c", "color": "#e4a15d"},
-            "averageScore": 85, "popularity": 1234567, "episodes": 25, "status": "FINISHED", "season": "SPRING",
-            "seasonYear": 2013, "format": "TV", "duration": 24, "source": "MANGA", "siteUrl": "https://anilist.co/anime/1",
-            "genres": ["Action", "Drama", "Fantasy", "Mystery", "A", "B", "C", "D"],
-            "studios": {"nodes": [{"name": "Wit"}]}
-        }));
-        let e = media_embed(&m);
-        assert_eq!(e.author.as_deref(), Some("مسلسل · 2013"));
-        assert_eq!(e.colour, Some(0xe4a15d));
-        assert!(
-            e.image.is_some() && e.thumbnail.is_none(),
-            "banner wins over cover"
-        );
-        assert!(e
-            .description
-            .as_deref()
-            .is_some_and(|d| d.starts_with("*Attack / 進撃*")));
-        let names: Vec<&str> = e.fields.iter().map(|f| f.0.as_str()).collect();
-        for want in [
-            "التقييم",
-            "الشعبية",
-            "الحلقات",
-            "الحالة",
-            "الموسم",
-            "الاستوديو",
-            "المدة",
-            "المصدر",
-            "التصنيفات",
-        ] {
-            assert!(names.contains(&want), "missing field {want}");
-        }
-        let genres = e
-            .fields
-            .iter()
-            .find(|f| f.0 == "التصنيفات")
-            .expect("genres");
-        assert_eq!(genres.1.matches('•').count(), 5, "at most 6 tags");
-        assert_eq!(e.footer.as_deref(), Some("Powered by AniList"));
-    }
-
-    #[test]
-    fn cover_is_thumbnail_without_banner_and_manga_uses_author() {
-        let m = media(json!({
-            "id": 2, "title": {"romaji": "Manga"}, "coverImage": {"large": "https://c"}, "format": "MANGA", "chapters": 100,
-            "staff": {"edges": [{"role": "Art", "node": {"name": {"full": "Artist"}}}, {"role": "Story", "node": {"name": {"full": "Writer"}}}]}
-        }));
-        let e = media_embed(&m);
-        assert!(e.image.is_none() && e.thumbnail.as_deref() == Some("https://c"));
-        let author = e
-            .fields
-            .iter()
-            .find(|f| f.0 == "المؤلف")
-            .expect("author field");
-        assert!(author.1.starts_with("Writer"));
-        assert!(e.fields.iter().any(|f| f.0 == "الفصول"));
-        assert!(!e.fields.iter().any(|f| f.0 == "الاستوديو"));
-    }
-
-    #[test]
-    fn card_survives_enforcement() {
-        let m = media(
-            json!({"id": 3, "title": {"romaji": "x".repeat(400)}, "genres": ["g".repeat(2000)]}),
-        );
-        let mut e = media_embed(&m);
-        e.enforce();
-        assert!(e.total_len() <= super::super::embeds::MAX_TOTAL);
-    }
-
-    #[test]
     fn simple_card_has_only_the_essentials() {
         let c: Character = serde_json::from_value(json!({
             "id": 5, "name": {"full": "Hero", "native": "勇者", "alternative": ["A", "B", "C", "D"], "alternativeSpoiler": ["S1", "S2"]},
@@ -579,9 +412,63 @@ mod tests {
     }
 
     #[test]
-    fn relation_ordering() {
-        assert!(relation_rank("PREQUEL") < relation_rank("SEQUEL"));
-        assert!(relation_rank("SEQUEL") < relation_rank("SIDE_STORY"));
-        assert_eq!(relation_rank("OTHER"), usize::MAX);
+    fn work_card_layout() {
+        let m = media(json!({
+            "id": 1, "title": {"romaji": "Solo Leveling", "english": "Solo Leveling", "native": "나 혼자만 레벨업"},
+            "description": "A very long description that must never appear on the card",
+            "coverImage": {"large": "https://c/l.png", "extraLarge": "https://c/xl.png", "color": "#e4a15d"},
+            "bannerImage": "https://banner", "averageScore": 85, "chapters": 179, "volumes": 14, "status": "FINISHED",
+            "format": "MANGA", "countryOfOrigin": "KR", "startDate": {"year": 2018}, "siteUrl": "https://anilist.co/manga/1"
+        }));
+        let e = work_card(&m);
+        assert_eq!(e.author.as_deref(), Some("🇰🇷 مانهوا · 2018"));
+        assert_eq!(
+            e.image.as_deref(),
+            Some("https://c/xl.png"),
+            "the vertical cover is the embed image, not the banner"
+        );
+        assert!(e.thumbnail.is_none());
+        assert_eq!(e.colour, Some(0xe4a15d));
+        let get = |n: &str| e.fields.iter().find(|f| f.0 == n).map(|f| f.1.clone());
+        assert_eq!(get("الحالة").as_deref(), Some("مكتمل"));
+        assert_eq!(get("الفصول").as_deref(), Some("179 فصل · 14 مجلد"));
+        assert_eq!(get("التقييم").as_deref(), Some("8.5/10 ▰▰▰▰▰▰▰▰▰▱"));
+        assert!(!e
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .contains("long description"));
+        assert!(e.fields.iter().all(|f| f.0 != "الحلقات"));
+    }
+
+    #[test]
+    fn anime_card_counts_episodes_and_shows_the_countdown() {
+        let m = media(json!({
+            "id": 2, "title": {"romaji": "Show"}, "episodes": 12, "status": "RELEASING", "format": "TV", "countryOfOrigin": "JP",
+            "seasonYear": 2026, "nextAiringEpisode": {"airingAt": 1_800_000_000, "episode": 5}
+        }));
+        let e = work_card(&m);
+        assert_eq!(e.author.as_deref(), Some("🇯🇵 أنمي · 2026"));
+        let get = |n: &str| e.fields.iter().find(|f| f.0 == n).map(|f| f.1.clone());
+        assert_eq!(get("الحلقات").as_deref(), Some("12 حلقة"));
+        assert_eq!(get("الحالة").as_deref(), Some("مستمر"));
+        assert!(get("الحلقة القادمة").is_some_and(|v| v.contains("<t:1800000000:R>")));
+    }
+
+    #[test]
+    fn unknown_values_never_break_the_card() {
+        let m = media(json!({"id": 3, "title": {"romaji": "x".repeat(400)}}));
+        let mut e = work_card(&m);
+        e.enforce();
+        assert!(e.total_len() <= super::super::embeds::MAX_TOTAL);
+        assert!(e.fields.iter().any(|f| f.1 == "غير معروف"));
+    }
+
+    #[test]
+    fn kind_labels_and_flags() {
+        assert_eq!(kind_label(MediaKind::Manhua), "مانهوا صينية");
+        assert_eq!(kind_label(MediaKind::Novel), "رواية");
+        assert_eq!(flag(Some("KR")), "🇰🇷");
+        assert_eq!(flag(None), "");
     }
 }

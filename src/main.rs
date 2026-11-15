@@ -7,6 +7,7 @@ mod commands;
 mod config;
 mod db;
 mod error;
+mod feed;
 mod guild;
 mod i18n;
 mod render;
@@ -39,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
     let anilist = std::sync::Arc::new(anilist::SafeAniList::new(&config)?);
     let token = config.discord_token.expose().to_string();
     let dev_guild = config.dev_guild_id;
+    let (feed_pool, feed_api) = (pool.clone(), anilist.clone());
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -50,10 +52,12 @@ async fn main() -> anyhow::Result<()> {
         .setup(move |ctx, ready, framework| {
             Box::pin(async move {
                 let cmds = &framework.options().commands;
+                // Registration overwrites the whole list in its scope, so removed commands disappear.
                 match dev_guild {
                     Some(g) => {
-                        poise::builtins::register_in_guild(ctx, cmds, serenity::GuildId::new(g))
-                            .await?
+                        poise::builtins::register_in_guild(ctx, cmds, serenity::GuildId::new(g)).await?;
+                        // Old global commands would show up next to the guild ones: clear them.
+                        serenity::Command::set_global_commands(&ctx.http, vec![]).await?;
                     }
                     None => poise::builtins::register_globally(ctx, cmds).await?,
                 }
@@ -87,14 +91,28 @@ async fn main() -> anyhow::Result<()> {
             .framework(framework)
             .await?;
 
+    // Background airing feed: stops with the process and never takes it down.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let feed_task = tokio::spawn(feed::run(
+        feed::Feed {
+            pool: feed_pool,
+            api: feed_api,
+            http: client.http.clone(),
+        },
+        stop_rx,
+    ));
+
     let shards = client.shard_manager.clone();
     tokio::spawn(async move {
         shutdown_signal().await;
         tracing::info!("shutting down");
+        let _ = stop_tx.send(true);
         shards.shutdown_all().await;
     });
 
-    client.start().await?;
+    let result = client.start().await;
+    feed_task.abort();
+    result?;
     Ok(())
 }
 
@@ -120,17 +138,17 @@ fn qualified_names(cmds: &[Command], prefix: &str, out: &mut Vec<String>) {
 
 /// Every command gets the configured per-user cooldown.
 fn commands_with_cooldown(secs: u64) -> Vec<Command> {
+    // Exactly the nine public commands; nothing else is ever registered.
     let mut cmds = vec![
-        commands::ping(),
-        commands::media::anime(),
-        commands::media::manga(),
-        commands::character::character(),
-        commands::airing::airing(),
-        commands::seasonal::seasonal(),
-        commands::random::random(),
         commands::profile::profile(),
-        commands::profile::top(),
-        commands::setup::setup(),
+        commands::search::search(),
+        commands::airing::airing(),
+        commands::random::random(),
+        commands::top::top(),
+        commands::recommend::recommend(),
+        commands::game::game(),
+        commands::settings::settings(),
+        commands::help::help(),
     ];
     for c in &mut cmds {
         apply_cooldown(c, secs);
@@ -212,58 +230,21 @@ mod tests {
         let cmds = commands_with_cooldown(3);
         let mut names = Vec::new();
         walk(&cmds, "", &mut names);
-        for want in [
-            "ping",
-            "anime",
-            "manga",
-            "character",
-            "character search",
-            "airing",
-            "seasonal",
-            "random",
-            "random anime",
-            "random manga",
-            "random character",
+        let want = [
             "profile",
-            "profile create",
-            "profile add",
-            "profile bulk-add",
-            "profile remove",
-            "profile clear",
-            "profile reorder",
-            "profile move",
-            "profile rank",
-            "profile group",
-            "profile group create",
-            "profile group rename",
-            "profile group delete",
-            "profile group assign",
-            "profile note",
-            "profile set-bio",
-            "profile set-color",
-            "profile set-banner",
-            "profile view",
-            "profile share",
-            "profile style",
-            "profile privacy",
-            "profile export",
-            "profile import",
-            "profile compare",
+            "search",
+            "airing",
+            "random",
             "top",
-            "top characters",
-            "setup",
-            "setup channel",
-            "setup add-channel",
-            "setup remove-channel",
-            "setup show",
-            "setup reset",
-            "setup admin-bypass",
-        ] {
-            assert!(
-                names.iter().any(|n| n == want),
-                "{want} is not registered: {names:?}"
-            );
-        }
+            "recommend",
+            "game",
+            "settings",
+            "help",
+        ];
+        assert_eq!(
+            names, want,
+            "exactly the nine public commands, in this order, no aliases or leftovers"
+        );
         // Must serialise for Discord without panicking.
         assert!(!poise::builtins::create_application_commands(&cmds).is_empty());
     }

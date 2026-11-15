@@ -8,7 +8,7 @@ macro_rules! with_media_fragment {
             $body,
             " fragment M on Media { id title { romaji english native } description(asHtml: false) \
              coverImage { large extraLarge color } bannerImage averageScore popularity episodes chapters \
-             duration source status season seasonYear format genres isAdult siteUrl \
+             duration source status season seasonYear format genres isAdult siteUrl countryOfOrigin volumes startDate { year } externalLinks { url site type } \
              studios(isMain: true) { nodes { name } } nextAiringEpisode { airingAt episode } \
              trailer { id site } staff(perPage: 3, sort: [RELEVANCE]) { edges { role node { name { full } } } } }"
         )
@@ -26,19 +26,11 @@ macro_rules! character_fields {
 }
 
 pub const SEARCH_MEDIA: &str = with_media_fragment!(
-    "query($search: String, $type: MediaType, $perPage: Int, $isAdult: Boolean, $genreNotIn: [String]) { \
-     Page(perPage: $perPage) { media(search: $search, type: $type, isAdult: $isAdult, genre_not_in: $genreNotIn, sort: [SEARCH_MATCH]) { ...M } } }"
+    "query($search: String, $type: MediaType, $country: CountryCode, $formatIn: [MediaFormat], $perPage: Int, $isAdult: Boolean, $genreNotIn: [String]) { \
+     Page(perPage: $perPage) { media(search: $search, type: $type, countryOfOrigin: $country, format_in: $formatIn, isAdult: $isAdult, genre_not_in: $genreNotIn, sort: [SEARCH_MATCH]) { ...M } } }"
 );
 
 pub const MEDIA_BY_ID: &str = with_media_fragment!("query($id: Int) { Media(id: $id) { ...M } }");
-
-pub const SEASONAL: &str = with_media_fragment!(
-    "query($season: MediaSeason, $year: Int, $page: Int, $perPage: Int, $sort: [MediaSort], $formatIn: [MediaFormat], \
-     $isAdult: Boolean, $genreNotIn: [String]) { \
-     Page(page: $page, perPage: $perPage) { pageInfo { hasNextPage lastPage } \
-     media(season: $season, seasonYear: $year, type: ANIME, format_in: $formatIn, isAdult: $isAdult, \
-     genre_not_in: $genreNotIn, sort: $sort) { ...M } } }"
-);
 
 pub const AIRING_SCHEDULE: &str = with_media_fragment!(
     "query($from: Int, $to: Int, $page: Int, $perPage: Int) { Page(page: $page, perPage: $perPage) { \
@@ -73,9 +65,9 @@ pub const RELATIONS: &str = with_media_fragment!(
 );
 
 pub const RANDOM_MEDIA: &str = with_media_fragment!(
-    "query($page: Int, $type: MediaType, $genre: String, $minScore: Int, $isAdult: Boolean, $genreNotIn: [String]) { \
+    "query($page: Int, $type: MediaType, $country: CountryCode, $formatIn: [MediaFormat], $genre: String, $minScore: Int, $isAdult: Boolean, $genreNotIn: [String]) { \
      Page(page: $page, perPage: 20) { pageInfo { lastPage hasNextPage } \
-     media(type: $type, genre: $genre, averageScore_greater: $minScore, isAdult: $isAdult, genre_not_in: $genreNotIn, \
+     media(type: $type, countryOfOrigin: $country, format_in: $formatIn, genre: $genre, averageScore_greater: $minScore, isAdult: $isAdult, genre_not_in: $genreNotIn, \
      sort: [POPULARITY_DESC]) { ...M } } }"
 );
 
@@ -95,6 +87,13 @@ pub const CHARACTER_BY_ID: &str = concat!(
 pub const RANDOM_CHARACTER: &str = concat!(
     "query($page: Int) { Page(page: $page, perPage: 10) { pageInfo { lastPage } \
      characters(sort: [FAVOURITES_DESC]) { ",
+    character_fields!(),
+    " } } }"
+);
+
+pub const BIRTHDAYS: &str = concat!(
+    "query($page: Int) { Page(page: $page, perPage: 10) { pageInfo { hasNextPage } \
+     characters(isBirthday: true, sort: [FAVOURITES_DESC]) { ",
     character_fields!(),
     " } } }"
 );

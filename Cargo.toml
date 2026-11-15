@@ -18,10 +18,11 @@ futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 governor = "0.8"
 mimalloc = { version = "0.1", optional = true }
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
 poise = "0.6"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }

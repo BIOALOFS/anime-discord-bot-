@@ -345,31 +345,8 @@ pub(crate) async fn ac_character(
     to_choices(items)
 }
 
-/// Character commands.
-#[poise::command(
-    slash_command,
-    subcommands("search"),
-    name_localized("ar", "شخصية"),
-    description_localized("ar", "أوامر الشخصيات")
-)]
-pub async fn character(_ctx: Context<'_>) -> Result<(), Error> {
-    Ok(())
-}
-
 /// Search for a character.
-#[poise::command(
-    slash_command,
-    name_localized("ar", "بحث"),
-    description_localized("ar", "ابحث عن شخصية")
-)]
-pub async fn search(
-    ctx: Context<'_>,
-    #[description = "Character name"]
-    #[description_localized("ar", "اسم الشخصية")]
-    #[name_localized("ar", "الاسم")]
-    #[autocomplete = "ac_character"]
-    name: String,
-) -> Result<(), Error> {
+pub async fn search_character(ctx: Context<'_>, name: String) -> Result<(), Error> {
     ctx.defer().await?;
     let api = ctx.data().anilist.clone();
     let policy = policy(ctx);

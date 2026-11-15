@@ -14,6 +14,7 @@ use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const STALE_SECS: i64 = 6 * 3600;
+const WORK_KINDS: [crate::anilist::MediaKind; 5] = crate::anilist::MediaKind::ALL;
 const REFRESH_CONCURRENCY: usize = 4;
 
 pub fn uid(ctx: Context<'_>) -> i64 {
@@ -51,15 +52,11 @@ pub async fn private_reply(ctx: Context<'_>, text: impl Into<String>) -> Result<
     Ok(())
 }
 
-/// The caller's profile, or a polite "create one first" reply and `None`.
+/// The caller's profile; created on first use so no separate "create" step is needed.
 pub async fn require_own(ctx: Context<'_>) -> Result<Option<Profile>, Error> {
-    match db::get_profile(&ctx.data().db, uid(ctx)).await? {
-        Some(p) => Ok(Some(p)),
-        None => {
-            private_reply(ctx, i18n::PROFILE_NONE_SELF).await?;
-            Ok(None)
-        }
-    }
+    let pool = &ctx.data().db;
+    db::create_profile(pool, uid(ctx)).await?;
+    Ok(db::get_profile(pool, uid(ctx)).await?)
 }
 
 pub fn cache_row(c: &Character, now: i64) -> CacheRow {
@@ -137,6 +134,128 @@ pub async fn refresh_entries(
         .is_err()
     {
         tracing::debug!("character refresh timed out");
+    }
+}
+
+/// Verify and cache favourite works whose metadata is missing or stale (same rules as characters).
+pub async fn refresh_works(
+    api: &SafeAniList,
+    pool: &SqlitePool,
+    policy: ContentPolicy,
+    entries: &[crate::db::works::WorkEntry],
+) {
+    let t = now();
+    let ids: Vec<(String, i64)> = entries
+        .iter()
+        .filter(|e| e.fetched_at.is_none_or(|f| t - f > STALE_SECS))
+        .filter_map(|e| Some((e.work_id.clone(), e.anilist_id()?)))
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let failed = AtomicBool::new(false);
+    let work = futures::stream::iter(ids).for_each_concurrent(REFRESH_CONCURRENCY, |(key, id)| {
+        let failed = &failed;
+        async move {
+            if failed.load(Ordering::Relaxed) {
+                return;
+            }
+            let row = match api.media_by_id(id, policy).await {
+                Ok(Some(m)) => crate::commands::media::media_cache_row(&m, t),
+                // Missing or hidden by the safety filter: keep it out of sight.
+                Ok(None) => crate::db::works::MediaCacheRow {
+                    work_id: key.clone(),
+                    title_romaji: "?".into(),
+                    title_english: None,
+                    cover_url: None,
+                    kind: "anime".into(),
+                    format: None,
+                    country: None,
+                    year: None,
+                    score: None,
+                    status: None,
+                    is_safe: false,
+                    source: "anilist".into(),
+                    fetched_at: t,
+                },
+                Err(e) => {
+                    tracing::debug!("work refresh failed, using cached data: {e}");
+                    failed.store(true, Ordering::Relaxed);
+                    return;
+                }
+            };
+            if let Err(e) = crate::db::works::upsert_media_cache(pool, &row).await {
+                tracing::warn!("could not cache work {key}: {e}");
+            }
+        }
+    });
+    if tokio::time::timeout(std::time::Duration::from_secs(10), work)
+        .await
+        .is_err()
+    {
+        tracing::debug!("work refresh timed out");
+    }
+}
+
+pub enum ResolvedWork {
+    One(Box<crate::anilist::models::Media>),
+    Many(Vec<crate::anilist::models::Media>),
+    NotFound,
+}
+
+/// Autocomplete id (`id:123`) or free text across anime, manga, manhwa, manhua and novels.
+pub async fn resolve_work(
+    api: &SafeAniList,
+    policy: ContentPolicy,
+    input: &str,
+) -> Result<ResolvedWork, crate::anilist::AniError> {
+    if let Some(id) = parse_id(input) {
+        return Ok(match api.media_by_id(id, policy).await? {
+            Some(m) => ResolvedWork::One(Box::new(m)),
+            None => ResolvedWork::NotFound,
+        });
+    }
+    let mut list = api.search_any(input.trim(), 10, policy).await?;
+    let _ = WORK_KINDS;
+    Ok(match list.len() {
+        0 => ResolvedWork::NotFound,
+        1 => ResolvedWork::One(Box::new(list.remove(0))),
+        _ => ResolvedWork::Many(list),
+    })
+}
+
+/// A work from the caller's own list: `id:anilist:123` or a unique title match.
+pub async fn resolve_own_work(
+    pool: &SqlitePool,
+    user: i64,
+    input: &str,
+) -> Result<Option<(String, String)>, Error> {
+    let trimmed = input.trim();
+    if let Some(id) = trimmed.strip_prefix("wid:") {
+        return Ok(crate::db::works::get_entry(pool, user, id)
+            .await?
+            .map(|e| (e.work_id.clone(), e.title().to_string())));
+    }
+    let mut hits = crate::db::works::search_own(pool, user, trimmed, 2).await?;
+    Ok(if hits.len() == 1 {
+        Some(hits.remove(0))
+    } else {
+        None
+    })
+}
+
+/// Autocomplete over the caller's own favourite works (values are `wid:<work id>`).
+pub async fn ac_own_work(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
+    match crate::db::works::search_own(&ctx.data().db, uid(ctx), partial, 25).await {
+        Ok(hits) => to_choices(
+            hits.into_iter()
+                .map(|(id, title)| (fit(&title, 100), format!("wid:{id}")))
+                .collect(),
+        ),
+        Err(_) => Vec::new(),
     }
 }
 
