@@ -6,6 +6,7 @@ use crate::{
     db::profile::{self as db, ExportDoc},
     error::{Context, Error},
     i18n,
+    render::CellSpec,
     ui::{
         embeds::Emb,
         pagination::{apply_nav, close_button, nav_row, page_count, parse_nav, CLOSE},
@@ -125,9 +126,17 @@ pub async fn compare(
         db::count(&pool, other).await? as usize,
     );
     let mut names = Vec::new();
+    let mut cells = Vec::new();
     for id in shared.iter().take(30) {
         if let Some(e) = db::get_entry(&pool, me, *id).await?.filter(|e| e.visible()) {
             names.push(format!("• {}", e.name()));
+            if cells.len() < 10 {
+                cells.push(CellSpec {
+                    label: e.name().to_string(),
+                    rank: None,
+                    image_url: e.image_url.clone(),
+                });
+            }
         }
     }
     let body = if names.is_empty() {
@@ -135,7 +144,13 @@ pub async fn compare(
     } else {
         names.join("\n")
     };
-    let embed = Emb::new()
+    // Mini collage of the shared characters (text list stays as the fallback).
+    let image = ctx
+        .data()
+        .renderer
+        .collage(cells, None, mine.accent_color.map(|c| c as u32), 0.5)
+        .await;
+    let mut embed = Emb::new()
         .title(i18n::COMPARE_TITLE)
         .colour(mine.accent_color.map(|c| c as u32))
         .description(format!(
@@ -143,9 +158,14 @@ pub async fn compare(
             ctx.author().display_name(),
             user.display_name(),
             i18n::compat(pct)
-        ))
-        .build();
-    ctx.send(poise::CreateReply::default().embed(embed)).await?;
+        ));
+    let mut reply = poise::CreateReply::default();
+    if let Some(img) = &image {
+        let name = format!("compare.{}", img.ext);
+        embed.image = Some(format!("attachment://{name}"));
+        reply = reply.attachment(serenity::CreateAttachment::bytes(img.bytes.clone(), name));
+    }
+    ctx.send(reply.embed(embed.build())).await?;
     Ok(())
 }
 

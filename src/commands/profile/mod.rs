@@ -21,7 +21,7 @@ use manage::{
 use reorder::reorder;
 pub use social::top;
 use social::{compare, export, import};
-use view::view;
+use view::{share, view};
 
 #[derive(Debug, Clone, Copy, poise::ChoiceParameter)]
 pub enum StyleChoice {
@@ -107,6 +107,7 @@ impl PrivacyChoice {
         "set_color",
         "set_banner",
         "view",
+        "share",
         "style",
         "privacy",
         "export",

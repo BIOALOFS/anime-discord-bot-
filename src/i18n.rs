@@ -236,3 +236,5 @@ pub const STYLE_RANDOM: &str = "عشوائي";
 pub fn more_n(n: i64) -> String {
     format!("+{n} أخرى")
 }
+pub const TIER_NONE: &str = "لم تضع أي شخصية في فئة بعد، استخدم `/profile rank` أولًا.";
+pub const SHARE_TITLE: &str = "صورة بروفايلك جاهزة للمشاركة 📸";

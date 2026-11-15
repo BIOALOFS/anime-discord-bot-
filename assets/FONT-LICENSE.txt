@@ -1,0 +1,3 @@
+Inter-SemiBold.otf is Inter by Rasmus Andersson (https://rsms.me/inter/),
+licensed under the SIL Open Font License, Version 1.1 (https://openfontlicense.org).
+The font is bundled unmodified and embedded in the bot binary for image rendering.

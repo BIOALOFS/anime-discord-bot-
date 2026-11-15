@@ -9,11 +9,13 @@ default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
+ab_glyph = "0.2"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dotenvy = "0.15"
 envy = "0.4"
 futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 governor = "0.8"
 mimalloc = { version = "0.1", optional = true }
 moka = { version = "0.12", features = ["future"] }

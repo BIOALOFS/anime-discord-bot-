@@ -42,7 +42,7 @@ impl Page {
         self
     }
 
-    fn into_reply(self) -> poise::CreateReply {
+    pub fn into_reply(self) -> poise::CreateReply {
         let mut r = poise::CreateReply::default().content(self.content.unwrap_or_default());
         for e in self.embeds {
             r = r.embed(e);

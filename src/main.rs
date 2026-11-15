@@ -8,6 +8,7 @@ mod config;
 mod db;
 mod error;
 mod i18n;
+mod render;
 mod ui;
 
 use poise::serenity_prelude as serenity;
@@ -21,6 +22,7 @@ pub struct Data {
     pub anilist: std::sync::Arc<anilist::SafeAniList>,
     pub auto: ui::autocomplete::AutoState,
     pub http: reqwest::Client,
+    pub renderer: std::sync::Arc<render::Renderer>,
 }
 
 #[tokio::main]
@@ -59,15 +61,17 @@ async fn main() -> anyhow::Result<()> {
                     None => "global (can take up to an hour to appear)".to_string(),
                 };
                 tracing::info!(bot = %ready.user.name, %scope, count = names.len(), commands = %names.join(", "), "commands registered");
+                let http = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
+                    .user_agent(concat!("anpot-discord-bot/", env!("CARGO_PKG_VERSION")))
+                    .build()?;
                 Ok(Data {
+                    renderer: std::sync::Arc::new(render::Renderer::new(http.clone())),
+                    http,
                     db: pool,
                     config,
                     anilist,
                     auto: Default::default(),
-                    http: reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(15))
-                        .user_agent(concat!("anpot-discord-bot/", env!("CARGO_PKG_VERSION")))
-                        .build()?,
                 })
             })
         })
@@ -234,6 +238,7 @@ mod tests {
             "profile set-color",
             "profile set-banner",
             "profile view",
+            "profile share",
             "profile style",
             "profile privacy",
             "profile export",
