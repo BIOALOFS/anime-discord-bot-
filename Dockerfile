@@ -15,6 +15,16 @@ RUN cargo build --release --bin anpot
 
 # We do not need the Rust toolchain to run the binary!
 FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --home-dir /app anpot \
+    && mkdir -p /data \
+    && chown anpot:anpot /data
 WORKDIR /app
-COPY --from=builder /app/target/release/anpot /usr/local/bin
-ENTRYPOINT ["/usr/local/bin/anpot"]
+COPY --from=builder /app/target/release/anpot /usr/local/bin/anpot
+COPY assets /app/assets
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+ENV DATABASE_URL=sqlite:///data/bot.db?mode=rwc
+VOLUME /data
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

@@ -1,8 +1,25 @@
 use serde::Deserialize;
 
+/// A secret that never shows up in logs or `Debug` output.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    pub discord_token: String,
+    pub discord_token: Secret,
     #[serde(default = "d_db")]
     pub database_url: String,
     #[serde(default = "d_log")]
@@ -26,7 +43,7 @@ pub struct Config {
 }
 
 fn d_db() -> String {
-    "sqlite://data/anpot.db".into()
+    "sqlite://data/bot.db?mode=rwc".into()
 }
 fn d_log() -> String {
     "info".into()
@@ -73,7 +90,7 @@ impl Config {
 impl Config {
     pub fn for_tests() -> Self {
         Self {
-            discord_token: "test".into(),
+            discord_token: Secret("test".into()),
             database_url: "sqlite::memory:".into(),
             log_level: "info".into(),
             anilist_rate_limit_per_min: 6000,
@@ -85,5 +102,18 @@ impl Config {
             command_cooldown_secs: 0,
             dev_guild_id: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_is_never_printed() {
+        let cfg = Config::for_tests();
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains("test\"") && shown.contains("<redacted>"));
+        assert_eq!(cfg.discord_token.expose(), "test");
     }
 }

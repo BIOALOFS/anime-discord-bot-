@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::connect(&config.database_url).await?;
     let anilist = std::sync::Arc::new(anilist::SafeAniList::new(&config)?);
-    let token = config.discord_token.clone();
+    let token = config.discord_token.expose().to_string();
     let dev_guild = config.dev_guild_id;
 
     let framework = poise::Framework::builder()
