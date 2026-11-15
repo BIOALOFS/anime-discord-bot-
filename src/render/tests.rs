@@ -1,4 +1,6 @@
-use super::{draw, fetch, CellSpec, HeaderSpec, Images, Theme, TierRow};
+use super::{
+    draw, fetch, BannerSpec, CellSpec, HeaderSpec, Images, Theme, TierRow, DEFAULT_BANNER_PRESET,
+};
 use image::{Rgba, RgbaImage};
 use std::{collections::HashMap, sync::Arc};
 
@@ -339,5 +341,64 @@ fn guess_crops_are_smaller_blurrier_and_harder_with_level() {
     assert_ne!(
         draw::guess_crop(&img, 1, 0).into_raw(),
         draw::guess_crop(&img, 1, 0xffff).into_raw()
+    );
+}
+
+// ---- profile banner ----------------------------------------------------------------------
+
+#[test]
+fn banner_specs_parse_and_round_trip() {
+    for stored in [
+        "preset:sunset",
+        "color:#ff8800",
+        "image:42",
+        "https://s4.anilist.co/b.png",
+    ] {
+        assert_eq!(BannerSpec::parse(Some(stored)).encode(), stored);
+    }
+    let default = BannerSpec::Preset(DEFAULT_BANNER_PRESET.to_string());
+    for junk in [
+        None,
+        Some(""),
+        Some("preset:nope"),
+        Some("color:zzz"),
+        Some("image:x"),
+        Some("http://insecure"),
+        Some("javascript:1"),
+    ] {
+        assert_eq!(BannerSpec::parse(junk), default, "{junk:?}");
+    }
+}
+
+#[test]
+fn banner_is_a_1200_by_300_strip_for_every_source() {
+    for spec in [
+        BannerSpec::Preset("ocean".into()),
+        BannerSpec::Preset("unknown-preset".into()),
+        BannerSpec::Color(0x336699),
+        BannerSpec::Image(1),
+    ] {
+        let out = draw::banner(None, &spec, "Alice").expect("banner");
+        assert_eq!((out.width, out.height), (1200, 300), "{spec:?}");
+        assert_eq!(out.ext, "png");
+        assert!(out.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+}
+
+#[test]
+fn an_uploaded_picture_is_cropped_to_the_strip_and_names_survive_odd_text() {
+    let mut photo = image::RgbaImage::new(400, 900);
+    for p in photo.pixels_mut() {
+        *p = image::Rgba([200, 20, 20, 255]);
+    }
+    let out = draw::banner(Some(&photo), &BannerSpec::Image(7), "مستخدم 🎌").expect("banner");
+    assert_eq!((out.width, out.height), (1200, 300));
+    // The picture, not the default gradient, fills the strip: the top-left pixel is red.
+    let decoded = image::load_from_memory(&out.bytes).expect("png").to_rgba8();
+    let px = decoded.get_pixel(600, 20);
+    assert!(px[0] > 150 && px[1] < 80, "{px:?}");
+    assert!(
+        draw::banner(None, &BannerSpec::Color(0), &"x".repeat(500)).is_some(),
+        "very long names are fitted"
     );
 }

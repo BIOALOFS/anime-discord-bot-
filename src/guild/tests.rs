@@ -156,3 +156,40 @@ fn admin_detection() {
     assert!(!is_admin(Some(Permissions::SEND_MESSAGES)));
     assert!(!is_admin(None));
 }
+
+#[tokio::test]
+async fn server_cooldown_blocks_a_second_command_per_user_only() {
+    let store = GuildStore::new(connect_memory().await);
+    assert_eq!(store.cooldown_left(1, 7, 0), None, "0 means no cooldown");
+    assert_eq!(
+        store.cooldown_left(1, 7, 30),
+        None,
+        "the first command is free"
+    );
+    let wait = store.cooldown_left(1, 7, 30).expect("second command waits");
+    assert!(wait.as_secs() <= 30 && wait.as_secs() >= 28);
+    assert_eq!(
+        store.cooldown_left(1, 8, 30),
+        None,
+        "another user is unaffected"
+    );
+    assert_eq!(
+        store.cooldown_left(2, 7, 30),
+        None,
+        "another server is unaffected"
+    );
+}
+
+#[test]
+fn admin_commands_work_in_every_channel() {
+    for name in [
+        "admin",
+        "set-bot-channel",
+        "set-notifications-channel",
+        "settings",
+        "help",
+    ] {
+        assert!(is_exempt(name), "{name}");
+    }
+    assert!(!is_exempt("edit") && !is_exempt("profile"));
+}

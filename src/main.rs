@@ -149,9 +149,10 @@ fn qualified_names(cmds: &[Command], prefix: &str, out: &mut Vec<String>) {
 
 /// Every command gets the configured per-user cooldown.
 fn commands_with_cooldown(secs: u64) -> Vec<Command> {
-    // Exactly the ten public commands; nothing else is ever registered.
+    // The eleven user commands plus the three admin commands; nothing else is ever registered.
     let mut cmds = vec![
         commands::profile::profile(),
+        commands::profile::edit(),
         commands::search::search(),
         commands::character::character(),
         commands::airing::airing(),
@@ -161,6 +162,9 @@ fn commands_with_cooldown(secs: u64) -> Vec<Command> {
         commands::game::game(),
         commands::settings::settings(),
         commands::help::help(),
+        commands::admin::admin(),
+        commands::channels::set_notifications_channel(),
+        commands::channels::set_bot_channel(),
     ];
     for c in &mut cmds {
         apply_cooldown(c, secs);
@@ -252,6 +256,7 @@ mod tests {
         walk(&cmds, "", &mut names);
         let want = [
             "profile",
+            "edit",
             "search",
             "character",
             "airing",
@@ -261,10 +266,13 @@ mod tests {
             "game",
             "settings",
             "help",
+            "admin",
+            "set-notifications-channel",
+            "set-bot-channel",
         ];
         assert_eq!(
             names, want,
-            "exactly the ten public commands, in this order, no aliases or leftovers"
+            "the eleven user commands plus /admin and the two channel commands, no aliases or leftovers"
         );
         // Must serialise for Discord without panicking.
         assert!(!poise::builtins::create_application_commands(&cmds).is_empty());

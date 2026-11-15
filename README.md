@@ -5,20 +5,35 @@ code, logs and docs are English. Adult media and characters are filtered out eve
 
 ## Commands
 
-Nine commands, with chained options (category → action → value) instead of dozens of subcommands:
+Eleven user commands and three admin commands, with chained options instead of dozens of subcommands:
 
 | Command | What it does |
 | --- | --- |
-| `/profile` | Show a profile (yours or `user`'s). Options `category` → `action` → `value` (+ `image`, `text`): add characters/works, customize (colour, bio, template, custom image/title/description per character), organize (reorder, groups, tiers, notes), share (1200×630 card), privacy (visibility, JSON export/import, delete all my data), compare, lists (watched/planning) |
+| `/profile` | Show a profile (yours or `user`'s): a banner strip on top, then **one card per item** (large image, name, custom title/description, counter `3/12`), ⏮ ◀ ▶ ⏭ buttons and a dropdown to jump to any item (25 per window). `action:add-character` / `add-work` + `value` adds favourites. There is no other display style. |
+| `/edit` | Every modification. `target` = `profile` (banner, description ≤300, title ≤40, colour, privacy, reset, export/import/delete data), `character` (image incl. GIF for characters in your profile, title ≤40, description ≤300, reset, remove, move) or `work` (remove, move). Confirmations are ephemeral with an undo button. |
 | `/search` | Works only: `type` (anime, manga, manhwa, manhua, novel, plus game / visual novel when those providers are enabled) → `name` with type-aware autocomplete |
 | `/character` | `name` (autocomplete ranked by popularity, main work in the label) + optional `work` filter + optional `source` (all, anime/manga, games). Several matches → a select menu |
 | `/airing` | Next episode of an anime or this week's schedule |
 | `/random` | Random work/character, today's spotlight, today's character birthdays |
-| `/top` | Most favourited characters or works (server or global) |
+| `/top` | Most favourited characters or works (server or global); characters come with a dropdown that opens their card |
 | `/recommend` | Suggestions from your favourites (with `user`: for both of you) |
 | `/game` | Guess the character, guess the anime, versus, leaderboard |
-| `/settings` | (Manage Guild) command channel lock, airing feed + filters, notification list, custom images + moderation, games, birthdays |
+| `/settings` | Personal preferences only: language and privacy |
 | `/help` | Commands by category with examples |
+| `/admin` | Admin panel (Manage Guild, hidden from others): ephemeral buttons for Safety (NSFW, mature games, games), Notifications (on/off, filter mode), Custom images (on/off, who may upload), Roles, Channels (read-only summary, unset), Limits (cooldown) and Reset |
+| `/set-bot-channel` | Admin-only, one `channel` option: the single channel where commands work (admins may bypass) |
+| `/set-notifications-channel` | Admin-only, one `channel` option: where new episode notifications are posted |
+
+Both channel commands check that the bot can view, send, embed links and attach files there. Unsetting a channel is done
+in `/admin` → Channels. Wherever a message lists character names it carries a dropdown (max 25 options, provider-prefixed
+values) that opens the character in the same message with a Back button: `/character` results, work rosters, the cast on a
+work card, `/top`, `/random` birthdays and profile cards.
+
+### Notifications
+
+Once `/set-notifications-channel` is set, every newly aired anime episode is announced (default filter **all**). The admin
+panel offers: all, only popular (threshold), only works that members have in their profiles, or only selected formats/kinds.
+Many releases in one tick are grouped into a few compact messages. Per-work lists, pins and mutes no longer exist.
 
 Notes: AniList has airing data for **anime only** (not manga/manhwa chapters). "All works" is approximate: rare titles
 may be missing. Webtoon-origin series come through AniList as manhwa; Webtoon/Naver are never scraped.
@@ -77,8 +92,8 @@ their works and characters can be added to profiles like any other. Pictures are
 * **VNDB** (visual novels and characters) uses the public HTTP API v2 ("Kana", `https://api.vndb.org/kana`), no key.
   The bot paces requests below ~200 per 5 minutes and caches results; footer: "Data from VNDB". The data is under the
   VNDB data license (<https://vndb.org/d17>).
-* Missing credentials disable the provider automatically. Per server: `/settings section:games option:toggle`
-  switches game sources on/off (default on) and `option:mature-games` (default on) hides M / PEGI 18 / CERO Z games when off.
+* Missing credentials disable the provider automatically. Per server: `/admin` → Safety
+  switches game sources on/off (default on) and the mature-games toggle (default on) hides M / PEGI 18 / CERO Z games when off.
 * **Safety:** only sexual content is blocked. IGDB: theme "Erotic" and ESRB AO are hidden. VNDB: any sexual-content ("ero")
   tag or a suggestive/explicit image flag is hidden. Violent or horror games (for example Silent Hill, M / PEGI 18) stay
   visible unless `mature-games` is off. An item without a reliable verdict (no age rating on IGDB, no tags on VNDB) is hidden.
@@ -120,7 +135,8 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 2. أنشئ ملف `.env` (انسخ `.env.example`) وضع `DISCORD_TOKEN`، وللتجربة السريعة ضع `DEV_GUILD_ID` ليظهر الأمر فورًا في سيرفرك.
 3. شغّل: `cargo run` ثم جرّب `/search` و`/profile`.
 
-الأوامر العشرة: `/profile` `/search` `/character` `/airing` `/random` `/top` `/recommend` `/game` `/settings` `/help`.
+أوامر المستخدمين: `/profile` (عرض بطاقات مع غلاف وإضافة) `/edit` (كل التعديلات) `/search` `/character` `/airing` `/random` `/top` `/recommend` `/game` `/settings` (اللغة والخصوصية) `/help`.
+أوامر الإدارة (للمشرفين): `/admin` لوحة أزرار، `/set-bot-channel` قناة الأوامر، `/set-notifications-channel` قناة إشعارات الحلقات. إشعارات الحلقات تغطي كل الأنمي تلقائيًا، والتصفية من لوحة الإدارة.
 `/search` للأعمال فقط و`/character` للشخصيات (أنمي/مانجا وألعاب). الألعاب اختيارية: ضع `IGDB_CLIENT_ID` و`IGDB_CLIENT_SECRET` من <https://dev.twitch.tv/console> (تطبيق من نوع Confidential، رابط OAuth: `http://localhost`، وحساب Twitch بتحقق ثنائي) ويعمل VNDB بدون مفتاح. اكتب `/help` لرؤية الأمثلة. أوامر الإدارة تحتاج صلاحية إدارة السيرفر.
 
 > **تنبيه أمني:** نُشر توكن حقيقي سابقًا داخل `.env` في تاريخ المستودع. أعد ضبط التوكن من لوحة المطورين ولا ترفع `.env` أبدًا.

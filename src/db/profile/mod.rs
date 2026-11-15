@@ -1,10 +1,14 @@
 //! Profile storage: profiles, favourite characters, groups, tiers, notes, social queries.
 //! Only AniList ids plus lightweight cached metadata are stored.
+//! (Data-layer functions for groups, tiers, notes, lists and compatibility stay with the schema, even though
+//! no command uses them any more.)
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-pub const MAX_BIO: usize = 500;
+pub const MAX_BIO: usize = 300;
+pub const MAX_TITLE: usize = 40;
 pub const MAX_QUOTE: usize = 200;
 pub const MAX_NOTE: usize = 300;
 pub const MAX_TIER: usize = 30;
@@ -62,6 +66,9 @@ pub struct Profile {
     pub default_style: String,
     pub privacy: String,
     pub template: String,
+    /// The name shown on the card instead of the Discord name (max `MAX_TITLE`).
+    pub display_title: Option<String>,
+    pub language: String,
 }
 
 impl Profile {
@@ -157,7 +164,7 @@ pub async fn create_profile(pool: &SqlitePool, user: i64) -> Result<bool> {
 
 pub async fn get_profile(pool: &SqlitePool, user: i64) -> Result<Option<Profile>> {
     Ok(sqlx::query_as::<_, Profile>(
-        "SELECT user_id, bio, accent_color, quote, banner, default_style, privacy, template \
+        "SELECT user_id, bio, accent_color, quote, banner, default_style, privacy, template, display_title, language \
          FROM profiles WHERE user_id = ?1",
     )
     .bind(user)
@@ -216,6 +223,41 @@ pub async fn set_quote(pool: &SqlitePool, user: i64, quote: Option<&str>) -> Res
 
 pub async fn set_banner(pool: &SqlitePool, user: i64, banner: Option<&str>) -> Result<()> {
     set_field(pool, user, "banner", banner.map(str::to_string)).await
+}
+
+pub async fn set_display_title(pool: &SqlitePool, user: i64, title: Option<&str>) -> Result<()> {
+    set_field(
+        pool,
+        user,
+        "display_title",
+        title
+            .map(|t| cap(t.trim(), MAX_TITLE))
+            .filter(|t| !t.is_empty()),
+    )
+    .await
+}
+
+/// `ar` or `en`; anything else is ignored.
+pub async fn set_language(pool: &SqlitePool, user: i64, lang: &str) -> Result<()> {
+    if !["ar", "en"].contains(&lang) {
+        return Err(ProfileError::NotFound);
+    }
+    set_field(pool, user, "language", Some(lang.to_string())).await
+}
+
+/// Back to the defaults: no bio, quote, banner, colour or title (favourites are kept).
+pub async fn reset_profile(pool: &SqlitePool, user: i64) -> Result<()> {
+    let r = sqlx::query(
+        "UPDATE profiles SET bio = NULL, quote = NULL, banner = NULL, accent_color = NULL, display_title = NULL, \
+         updated_at = unixepoch() WHERE user_id = ?1",
+    )
+    .bind(user)
+    .execute(pool)
+    .await?;
+    if r.rows_affected() == 0 {
+        return Err(ProfileError::NoProfile);
+    }
+    Ok(())
 }
 
 pub async fn set_style(pool: &SqlitePool, user: i64, style: &str) -> Result<()> {

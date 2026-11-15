@@ -351,26 +351,6 @@ pub fn parse_color(s: &str) -> Option<u32> {
         .flatten()
 }
 
-const BANNER_HOSTS: &[&str] = &[
-    "s4.anilist.co",
-    "cdn.discordapp.com",
-    "media.discordapp.net",
-    "i.imgur.com",
-];
-const BANNER_EXTS: &[&str] = &[".png", ".jpg", ".jpeg", ".webp", ".gif"];
-
-/// Only https images from a small allow-list of hosts.
-pub fn banner_url_ok(url: &str) -> bool {
-    let Some(rest) = url.trim().strip_prefix("https://") else {
-        return false;
-    };
-    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let path = path.split(['?', '#']).next().unwrap_or("").to_lowercase();
-    BANNER_HOSTS.contains(&host.to_lowercase().as_str())
-        && !host.contains('@')
-        && BANNER_EXTS.iter().any(|e| path.ends_with(e))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,22 +362,6 @@ mod tests {
         assert_eq!(parse_color("#fff"), None);
         assert_eq!(parse_color("#GGGGGG"), None);
         assert_eq!(parse_color(""), None);
-    }
-
-    #[test]
-    fn banner_urls_are_allow_listed() {
-        assert!(banner_url_ok(
-            "https://s4.anilist.co/file/anilistcdn/character/large/b1.png"
-        ));
-        assert!(banner_url_ok(
-            "https://cdn.discordapp.com/attachments/1/2/a.JPG?ex=1"
-        ));
-        assert!(!banner_url_ok("http://s4.anilist.co/a.png"), "https only");
-        assert!(!banner_url_ok("https://evil.example/a.png"));
-        assert!(!banner_url_ok("https://s4.anilist.co.evil.example/a.png"));
-        assert!(!banner_url_ok("https://s4.anilist.co/a.exe"));
-        assert!(!banner_url_ok("https://user@s4.anilist.co/a.png"));
-        assert!(!banner_url_ok("javascript:alert(1)"));
     }
 
     use crate::db::connect_memory;

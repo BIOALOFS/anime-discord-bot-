@@ -1,7 +1,11 @@
 //! The interactive work card (anime, manga, manhwa, manhua, novel) and its cast list.
 //! Entry points live in `/search`, `/random` and `/profile`.
 
-use super::{buttons, fail, parse_id, policy, say_ephemeral};
+use super::{
+    buttons,
+    character::{CharacterView, Mode as CharMode},
+    fail, parse_id, policy, say_ephemeral,
+};
 use crate::{
     anilist::{
         kind_of,
@@ -9,7 +13,6 @@ use crate::{
         AniError, ContentPolicy, MediaKind, SafeAniList,
     },
     db::{
-        feed::{self, ListMode},
         profile as pdb,
         works::{self, MediaCacheRow},
     },
@@ -20,7 +23,7 @@ use crate::{
         cards,
         format::format_ar,
         pagination::{apply_nav, back_button, close_button, nav_row, parse_nav, BACK, CLOSE},
-        select::{media_choices, pick_row, PICK_ID},
+        select::{cast_choices, media_choices, pick_row, select_row, PICK_ID},
         session::{self, Outcome, Page, UndoFuture, View, Whisper},
     },
 };
@@ -30,8 +33,8 @@ use std::sync::Arc;
 
 const BTN_CHARACTERS: &str = "characters";
 const BTN_STAR: &str = "star";
-const BTN_BELL: &str = "bell";
 const BTN_REROLL: &str = "reroll";
+const CAST_PICK: &str = "cast_pick";
 const MAX_HISTORY: usize = 8;
 
 /// Where a card came from; decides which extra buttons it gets.
@@ -61,8 +64,6 @@ pub struct MediaView {
     api: Arc<SafeAniList>,
     pool: SqlitePool,
     user: i64,
-    guild: Option<i64>,
-    is_admin: bool,
     policy: ContentPolicy,
     source: Source,
     mode: Mode,
@@ -71,6 +72,11 @@ pub struct MediaView {
     /// Is the shown card in the viewer's favourites (drives the ⭐ / ✅ toggle)?
     added: bool,
     whisper: Option<Whisper>,
+    /// Main characters of the shown card (first page of the cast), for the dropdown.
+    cast: Vec<(Character, String)>,
+    cast_for: Option<i64>,
+    /// A character card opened from the dropdown; Back returns here.
+    sub: Option<CharacterView>,
 }
 
 pub fn pages_of(last_page: Option<usize>, has_next: bool, page: usize) -> usize {
@@ -105,13 +111,10 @@ pub fn media_cache_row(m: &Media, now: i64) -> MediaCacheRow {
 
 impl MediaView {
     pub async fn new(ctx: Context<'_>, source: Source, mode: Mode) -> Self {
-        let admin = crate::guild::is_admin(ctx.author_member().await.and_then(|m| m.permissions));
         let mut v = Self {
             api: ctx.data().anilist.clone(),
             pool: ctx.data().db.clone(),
             user: ctx.author().id.get() as i64,
-            guild: ctx.guild_id().map(|g| g.get() as i64),
-            is_admin: admin,
             policy: policy(ctx),
             source,
             mode,
@@ -119,9 +122,66 @@ impl MediaView {
             notice: None,
             added: false,
             whisper: None,
+            cast: Vec::new(),
+            cast_for: None,
+            sub: None,
         };
         v.refresh_added().await;
+        v.ensure_cast().await;
         v
+    }
+
+    /// Load the first page of the cast of the shown card (cached by the API layer); failures leave it empty.
+    async fn ensure_cast(&mut self) {
+        let id = match &self.mode {
+            Mode::Card(m) => m.id,
+            _ => return,
+        };
+        if self.cast_for == Some(id) {
+            return;
+        }
+        self.cast = match self.api.media_characters(id, 1, self.policy).await {
+            Ok(p) => p.items,
+            Err(e) => {
+                tracing::debug!("cast dropdown unavailable: {e}");
+                Vec::new()
+            }
+        };
+        self.cast_for = Some(id);
+    }
+
+    /// The characters a dropdown on the current screen offers.
+    fn shown_cast(&self) -> &[(Character, String)] {
+        match &self.mode {
+            Mode::Characters { items, .. } => items,
+            Mode::Card(_) => &self.cast,
+            Mode::Pick(_) => &[],
+        }
+    }
+
+    fn open_cast_member(&mut self, values: &[String]) -> Outcome {
+        let Some(id) = values.first().and_then(|v| v.parse::<i64>().ok()) else {
+            return Outcome::Keep;
+        };
+        let Some(c) = self
+            .shown_cast()
+            .iter()
+            .find(|(c, _)| c.id == id)
+            .map(|(c, _)| c.clone())
+        else {
+            return Outcome::Keep;
+        };
+        self.sub = Some(
+            CharacterView::new(
+                self.api.clone(),
+                self.policy,
+                CharMode::Card(c),
+                self.pool.clone(),
+                self.user,
+            )
+            .with_back(),
+        );
+        Outcome::Update
     }
 
     async fn refresh_added(&mut self) {
@@ -297,35 +357,6 @@ impl MediaView {
         Outcome::Update
     }
 
-    /// 🔔: admins add the anime to the notification list; members send a request for approval.
-    async fn bell(&mut self) -> Outcome {
-        let (Some(m), Some(guild)) = (self.current_card(), self.guild) else {
-            self.whisper = Some(Whisper::text(i18n::GUILD_ONLY));
-            return Outcome::Keep;
-        };
-        let title = m.title.main().to_string();
-        let text = if self.is_admin {
-            match feed::set_list_entry(&self.pool, guild, m.id, &title, ListMode::Listed).await {
-                Ok(()) => i18n::ALERT_ADDED.to_string(),
-                Err(e) => {
-                    tracing::warn!("alert list update failed: {e}");
-                    i18n::ERR_GENERIC.to_string()
-                }
-            }
-        } else {
-            match feed::add_request(&self.pool, guild, m.id, &title, self.user).await {
-                Ok(true) => i18n::ALERT_REQUESTED.to_string(),
-                Ok(false) => i18n::ALERT_ALREADY_REQUESTED.to_string(),
-                Err(e) => {
-                    tracing::warn!("alert request failed: {e}");
-                    i18n::ERR_GENERIC.to_string()
-                }
-            }
-        };
-        self.whisper = Some(Whisper::text(text));
-        Outcome::Keep
-    }
-
     fn card_rows(&self, m: &Media, enabled: bool) -> Vec<serenity::CreateActionRow> {
         let secondary = serenity::ButtonStyle::Secondary;
         let (star_label, star_style) = if self.added {
@@ -345,15 +376,6 @@ impl MediaView {
                 .style(secondary)
                 .disabled(!enabled),
         ];
-        if kind_of(m) == MediaKind::Anime && self.guild.is_some() {
-            main.push(
-                serenity::CreateButton::new(BTN_BELL)
-                    .label(i18n::BTN_ALERTS)
-                    .emoji('🔔')
-                    .style(secondary)
-                    .disabled(!enabled),
-            );
-        }
         if let Some(url) = &m.site_url {
             main.push(
                 serenity::CreateButton::new_link(url).label(format!("🔗 {}", i18n::BTN_ANILIST)),
@@ -373,16 +395,32 @@ impl MediaView {
             extra.push(back_button(enabled));
         }
         extra.push(close_button(enabled));
-        vec![buttons(main), buttons(extra)]
+        let mut rows: Vec<_> = select_row(
+            CAST_PICK,
+            i18n::CAST_PLACEHOLDER,
+            cast_choices(&self.cast),
+            enabled,
+        )
+        .into_iter()
+        .collect();
+        rows.push(buttons(main));
+        rows.push(buttons(extra));
+        rows
     }
 }
 
 impl View for MediaView {
     fn take_whisper(&mut self) -> Option<Whisper> {
-        self.whisper.take()
+        match self.sub.as_mut() {
+            Some(sub) => sub.take_whisper(),
+            None => self.whisper.take(),
+        }
     }
 
     fn render(&self, enabled: bool) -> Page {
+        if let Some(sub) = &self.sub {
+            return sub.render(enabled);
+        }
         let (embed, mut rows) = match &self.mode {
             Mode::Pick(list) => (
                 cards::picker_embed(list),
@@ -398,7 +436,15 @@ impl View for MediaView {
                 items,
             } => (
                 cards::characters_embed(media, items, *page, *pages),
-                vec![nav_row(*page, *pages, enabled)],
+                select_row(
+                    CAST_PICK,
+                    i18n::CAST_PLACEHOLDER,
+                    cast_choices(items),
+                    enabled,
+                )
+                .into_iter()
+                .chain([nav_row(*page, *pages, enabled)])
+                .collect(),
             ),
         };
         if !matches!(self.mode, Mode::Card(_)) {
@@ -414,8 +460,24 @@ impl View for MediaView {
 
     async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
         self.notice = None;
+        if let Some(sub) = self.sub.as_mut() {
+            if sub.wants_to_leave(id) {
+                self.sub = None;
+                return Outcome::Update;
+            }
+            return sub.on_interaction(id, values).await;
+        }
+        let outcome = self.handle(id, values).await;
+        self.ensure_cast().await;
+        outcome
+    }
+}
+
+impl MediaView {
+    async fn handle(&mut self, id: &str, values: &[String]) -> Outcome {
         match id {
             CLOSE => Outcome::Close,
+            CAST_PICK => self.open_cast_member(values),
             BACK => match self.history.pop() {
                 Some(previous) => {
                     self.mode = previous;
@@ -425,7 +487,6 @@ impl View for MediaView {
                 None => Outcome::Keep,
             },
             BTN_STAR => self.toggle_favourite().await,
-            BTN_BELL => self.bell().await,
             BTN_CHARACTERS => self.open_characters().await,
             BTN_REROLL => self.reroll().await,
             PICK_ID => self.open_picked(values).await,

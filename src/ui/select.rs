@@ -57,6 +57,19 @@ pub fn character_choices(list: &[Character]) -> Vec<Choice> {
         .collect()
 }
 
+/// Cast of a work: name, role as the description, character id as the value.
+pub fn cast_choices(cast: &[(Character, String)]) -> Vec<Choice> {
+    normalize_choices(
+        cast.iter()
+            .map(|(c, role)| Choice {
+                label: fit(c.display_name(), 100),
+                description: Some(fit(role, 100)).filter(|r| !r.is_empty()),
+                value: c.id.to_string(),
+            })
+            .collect(),
+    )
+}
+
 /// Make choices fit Discord's select menu: at most 25 options, labels and descriptions at most 100 characters,
 /// unique non-empty values, no empty labels.
 pub fn normalize_choices(choices: Vec<Choice>) -> Vec<Choice> {
@@ -116,6 +129,31 @@ pub fn pick_row(choices: Vec<Choice>, enabled: bool) -> Option<serenity::CreateA
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cast_choices_are_capped_unique_and_carry_the_role() {
+        let cast: Vec<(Character, String)> = (0..40)
+            .map(|i| {
+                (
+                    serde_json::from_value(
+                        json!({"id": i % 30, "name": {"full": "N".repeat(300)}}),
+                    )
+                    .expect("character"),
+                    "MAIN".to_string(),
+                )
+            })
+            .collect();
+        let c = cast_choices(&cast);
+        assert_eq!(c.len(), MAX_SELECT_OPTIONS, "25 options at most");
+        let mut seen = std::collections::HashSet::new();
+        assert!(
+            c.iter().all(|c| seen.insert(c.value.clone())),
+            "unique values"
+        );
+        assert!(c.iter().all(|c| c.label.chars().count() <= 100));
+        assert_eq!(c[0].description.as_deref(), Some("MAIN"));
+        assert!(cast_choices(&[]).is_empty());
+    }
 
     #[test]
     fn media_choices_are_capped_and_labelled() {
