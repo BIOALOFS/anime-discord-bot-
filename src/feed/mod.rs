@@ -3,7 +3,7 @@
 
 use crate::{
     anilist::{models::Media, AiringEntry, ContentPolicy, SafeAniList},
-    db::feed::{self, FeedConfig, ListMode},
+    db::feed::{self, FeedConfig, FilterMode},
     i18n,
     ui::{
         embeds::Emb,
@@ -12,7 +12,7 @@ use crate::{
 };
 use poise::serenity_prelude as serenity;
 use sqlx::SqlitePool;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 
 const TICK: Duration = Duration::from_secs(300);
@@ -26,8 +26,8 @@ pub enum Skip {
     NotDue,
     TooOld,
     AlreadyPosted,
-    Muted,
-    NotListed,
+    NotInProfiles,
+    WrongKind,
     WrongFormat,
     ExcludedGenre,
     BelowPopularity,
@@ -42,12 +42,13 @@ pub enum Decision {
     Skip(Skip),
 }
 
-/// Should this airing be announced in this server right now?
+/// Should this airing be announced in this server right now? `in_profiles` says whether a member of the
+/// server has the work in their profile (only used by the `profiles` filter).
 pub fn decide(
     entry: &AiringEntry,
     cfg: &FeedConfig,
     now: i64,
-    list_mode: Option<ListMode>,
+    in_profiles: bool,
     already_posted: bool,
     posted_today: i64,
 ) -> Decision {
@@ -61,36 +62,36 @@ pub fn decide(
     if already_posted {
         return Decision::Skip(Skip::AlreadyPosted);
     }
-    if list_mode == Some(ListMode::Muted) {
-        return Decision::Skip(Skip::Muted);
-    }
-    let listed = matches!(list_mode, Some(ListMode::Listed | ListMode::Pinned));
-    if cfg.only_listed && !listed {
-        return Decision::Skip(Skip::NotListed);
-    }
-    let pinned = list_mode == Some(ListMode::Pinned);
     let m = &entry.media;
-    if !pinned {
-        let format_ok = m
-            .format
-            .as_deref()
-            .is_some_and(|f| cfg.formats.iter().any(|x| x == f));
-        if !format_ok {
-            return Decision::Skip(Skip::WrongFormat);
-        }
-        if m.genres.iter().any(|g| {
-            cfg.excluded_genres
-                .iter()
-                .any(|x| x.eq_ignore_ascii_case(g))
-        }) {
-            return Decision::Skip(Skip::ExcludedGenre);
-        }
-        if !listed && m.popularity.unwrap_or(0) < cfg.min_popularity {
+    // Airing schedules exist for anime only, so this is the one kind the feed can announce.
+    if !cfg.kinds.iter().any(|k| k == "anime") {
+        return Decision::Skip(Skip::WrongKind);
+    }
+    match cfg.filter {
+        FilterMode::All => {}
+        FilterMode::Popular if m.popularity.unwrap_or(0) < cfg.min_popularity => {
             return Decision::Skip(Skip::BelowPopularity);
         }
-        if cfg.daily_cap > 0 && posted_today >= cfg.daily_cap {
-            return Decision::Skip(Skip::DailyCap);
+        FilterMode::Profiles if !in_profiles => return Decision::Skip(Skip::NotInProfiles),
+        FilterMode::Formats
+            if !m
+                .format
+                .as_deref()
+                .is_some_and(|f| cfg.formats.iter().any(|x| x == f)) =>
+        {
+            return Decision::Skip(Skip::WrongFormat);
         }
+        _ => {}
+    }
+    if m.genres.iter().any(|g| {
+        cfg.excluded_genres
+            .iter()
+            .any(|x| x.eq_ignore_ascii_case(g))
+    }) {
+        return Decision::Skip(Skip::ExcludedGenre);
+    }
+    if cfg.daily_cap > 0 && posted_today >= cfg.daily_cap {
+        return Decision::Skip(Skip::DailyCap);
     }
     if cfg.digest_hours > 0 {
         Decision::Digest
@@ -236,11 +237,12 @@ async fn serve_guild(
         return Ok(());
     };
     let channel = serenity::ChannelId::new(channel as u64);
-    let modes: HashMap<i64, ListMode> = feed::list_entries(&f.pool, cfg.guild_id)
-        .await?
-        .into_iter()
-        .map(|(id, _, m)| (id, m))
-        .collect();
+    let wanted = if cfg.filter == FilterMode::Profiles {
+        feed::profile_work_ids(&f.pool, cfg.guild_id).await?
+    } else {
+        Default::default()
+    };
+    let mut batch: Vec<&AiringEntry> = Vec::new();
     let mut posted_today = feed::posted_since(&f.pool, cfg.guild_id, day_start(now)).await?;
     for e in entries {
         let already =
@@ -249,7 +251,7 @@ async fn serve_guild(
             e,
             cfg,
             now,
-            modes.get(&e.media.id).copied(),
+            wanted.contains(&e.media.id),
             already,
             posted_today,
         ) {
@@ -268,13 +270,14 @@ async fn serve_guild(
                     .await?;
             }
             Decision::Post => {
-                if send_episode(f, channel, cfg, e).await {
-                    feed::mark_posted(&f.pool, cfg.guild_id, e.media.id, i64::from(e.episode), now)
-                        .await?;
-                    posted_today += 1;
-                }
+                // Counted now so the daily cap also holds while the batch is being collected.
+                posted_today += 1;
+                batch.push(e);
             }
         }
+    }
+    for e in send_batch(f, channel, cfg, &batch).await {
+        feed::mark_posted(&f.pool, cfg.guild_id, e.media.id, i64::from(e.episode), now).await?;
     }
     if cfg.digest_hours > 0 {
         let queued = feed::drain_digest(&f.pool, cfg.guild_id).await?;
@@ -295,6 +298,63 @@ async fn serve_guild(
         }
     }
     Ok(())
+}
+
+/// Up to this many releases get their own card; more are grouped so a busy night is a few messages, not a flood.
+pub const MAX_INDIVIDUAL: usize = 3;
+/// Lines per grouped message.
+pub const LINES_PER_MESSAGE: usize = 15;
+
+/// One compact line per release for the grouped messages (no character art).
+pub fn compact_line(m: &Media, episode: i32, airing_at: i64) -> String {
+    format!(
+        "• **{}** — {} {episode} · {}",
+        m.title.main(),
+        i18n::F_EPISODES,
+        ts_relative(airing_at)
+    )
+}
+
+/// Post the releases; returns those that were delivered (so only they are marked as posted).
+async fn send_batch<'a>(
+    f: &Feed,
+    channel: serenity::ChannelId,
+    cfg: &FeedConfig,
+    batch: &[&'a AiringEntry],
+) -> Vec<&'a AiringEntry> {
+    let mut done = Vec::new();
+    if batch.len() <= MAX_INDIVIDUAL {
+        for e in batch {
+            if send_episode(f, channel, cfg, e).await {
+                done.push(*e);
+            }
+        }
+        return done;
+    }
+    for chunk in batch.chunks(LINES_PER_MESSAGE) {
+        let body = chunk
+            .iter()
+            .map(|e| compact_line(&e.media, e.episode, e.airing_at))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut msg = serenity::CreateMessage::new().embed(
+            Emb::new()
+                .title(i18n::FEED_BATCH_TITLE)
+                .description(body)
+                .build(),
+        );
+        if let Some(role) = cfg.role_id {
+            msg = msg.content(format!("<@&{role}>")).allowed_mentions(
+                serenity::CreateAllowedMentions::new()
+                    .roles(vec![serenity::RoleId::new(role as u64)]),
+            );
+        }
+        match channel.send_message(&f.http, msg).await {
+            Ok(_) => done.extend(chunk.iter().copied()),
+            Err(e) => tracing::debug!("could not post a grouped release message: {e}"),
+        }
+    }
+    done
 }
 
 async fn send_episode(

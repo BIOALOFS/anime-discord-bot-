@@ -1,4 +1,7 @@
 //! Favourite works: anime, manga, manhwa, manhua and novels in a profile (provider-prefixed text ids).
+//! (Data-layer functions for groups, tiers, notes, lists and compatibility stay with the schema, even though
+//! no command uses them any more.)
+#![allow(dead_code)]
 
 use super::profile::{
     cap, require_profile, touch, AddOutcome, ProfileError, Result, MAX_NOTE, MAX_TIER,

@@ -13,7 +13,11 @@ async fn config_defaults_and_setters() {
         (1500, 0, 0)
     );
     assert_eq!(c.formats, vec!["TV", "TV_SHORT", "ONA", "MOVIE"]);
-    assert!(!c.only_listed);
+    assert_eq!(
+        (c.filter, c.kinds.len()),
+        (FilterMode::All, 5),
+        "every release of every work by default"
+    );
     assert!(
         active_guilds(&pool).await.expect("a").is_empty(),
         "off by default"
@@ -31,7 +35,12 @@ async fn config_defaults_and_setters() {
     set_digest_hours(&pool, G, 500).await.expect("digest");
     set_daily_cap(&pool, G, 10).await.expect("cap");
     set_role(&pool, G, Some(77)).await.expect("role");
-    set_only_listed(&pool, G, true).await.expect("mode");
+    set_filter_mode(&pool, G, FilterMode::Profiles)
+        .await
+        .expect("mode");
+    set_kinds(&pool, G, &["anime".into(), "bogus".into(), "novel".into()])
+        .await
+        .expect("kinds");
     let c = get_config(&pool, G).await.expect("config");
     assert_eq!(c.channel_id, Some(55));
     assert_eq!(c.min_popularity, 0, "never negative");
@@ -41,61 +50,15 @@ async fn config_defaults_and_setters() {
         "unknown formats are dropped"
     );
     assert_eq!(c.excluded_genres, vec!["Ecchi", "Horror"]);
+    assert_eq!(c.kinds, vec!["anime", "novel"], "unknown kinds are dropped");
     assert_eq!(c.digest_hours, 72, "clamped");
     assert_eq!(
-        (c.daily_cap, c.role_id, c.only_listed),
-        (10, Some(77), true)
+        (c.daily_cap, c.role_id, c.filter),
+        (10, Some(77), FilterMode::Profiles)
     );
     assert_eq!(active_guilds(&pool).await.expect("a").len(), 1);
     set_role(&pool, G, None).await.expect("role");
     assert_eq!(get_config(&pool, G).await.expect("c").role_id, None);
-}
-
-#[tokio::test]
-async fn notification_list_modes() {
-    let pool = connect_memory().await;
-    set_list_entry(&pool, G, 100, "Show A", ListMode::Listed)
-        .await
-        .expect("add");
-    set_list_entry(&pool, G, 200, "Show B", ListMode::Muted)
-        .await
-        .expect("add");
-    set_list_entry(&pool, G, 100, "Show A", ListMode::Pinned)
-        .await
-        .expect("update");
-    let pinned = list_entries(&pool, G)
-        .await
-        .expect("list")
-        .into_iter()
-        .find(|e| e.0 == 100)
-        .map(|e| e.2);
-    assert_eq!(pinned, Some(ListMode::Pinned));
-    let all = list_entries(&pool, G).await.expect("list");
-    assert_eq!(all.len(), 2);
-    assert!(remove_list_entry(&pool, G, 200).await.expect("rm"));
-    assert!(!remove_list_entry(&pool, G, 200).await.expect("again"));
-    assert_eq!(ListMode::parse("pinned"), Some(ListMode::Pinned));
-    assert_eq!(ListMode::parse("x"), None);
-}
-
-#[tokio::test]
-async fn requests_are_deduplicated_and_cleared_on_approval() {
-    let pool = connect_memory().await;
-    assert!(add_request(&pool, G, 100, "Show", 1).await.expect("r"));
-    assert!(!add_request(&pool, G, 100, "Show", 1).await.expect("dup"));
-    assert!(add_request(&pool, G, 100, "Show", 2)
-        .await
-        .expect("other user"));
-    assert_eq!(
-        pending_requests(&pool, G).await.expect("p"),
-        vec![(100, "Show".to_string(), 2)]
-    );
-    set_list_entry(&pool, G, 100, "Show", ListMode::Listed)
-        .await
-        .expect("approve");
-    assert!(pending_requests(&pool, G).await.expect("p").is_empty());
-    assert!(add_request(&pool, G, 200, "Other", 1).await.expect("r"));
-    assert!(deny_request(&pool, G, 200).await.expect("deny"));
 }
 
 #[tokio::test]

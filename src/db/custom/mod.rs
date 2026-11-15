@@ -1,5 +1,8 @@
 //! Personal customization (title, description, image) for characters in a user's own profile,
 //! plus custom-image storage, reports, upload bans and the audit log.
+//! (Data-layer functions for groups, tiers, notes, lists and compatibility stay with the schema, even though
+//! no command uses them any more.)
+#![allow(dead_code)]
 
 use super::profile::{ProfileError, Result};
 use crate::anilist::safety::contains_explicit_term;
@@ -94,6 +97,22 @@ pub async fn set_description(
         None => None,
     };
     update_char(pool, "custom_description", user, character, clean).await
+}
+
+/// The personal title and description of a character (for undo).
+pub async fn character_texts(
+    pool: &SqlitePool,
+    user: i64,
+    character: i64,
+) -> Result<(Option<String>, Option<String>)> {
+    let r = sqlx::query("SELECT custom_title, custom_description FROM profile_characters WHERE user_id = ?1 AND character_id = ?2")
+        .bind(user)
+        .bind(character)
+        .fetch_optional(pool)
+        .await?;
+    Ok(r.map_or((None, None), |r| {
+        (r.get("custom_title"), r.get("custom_description"))
+    }))
 }
 
 /// Clears title, description and image of one character.

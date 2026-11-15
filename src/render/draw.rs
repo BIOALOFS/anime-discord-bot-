@@ -523,6 +523,61 @@ fn draw_header(
     );
 }
 
+// ---- banner -----------------------------------------------------------------------------
+
+pub const BANNER_W: u32 = 1200;
+pub const BANNER_H: u32 = 300;
+
+/// The profile banner strip: an uploaded picture, a solid colour or a preset gradient, with the name drawn on it.
+pub fn banner(base: Option<&RgbaImage>, spec: &super::BannerSpec, title: &str) -> Option<Rendered> {
+    use super::BannerSpec as B;
+    let mut img = match (base, spec) {
+        (Some(b), _) => cover(b, BANNER_W, BANNER_H),
+        (None, B::Color(c)) => gradient(
+            BANNER_W,
+            BANNER_H,
+            rgb_of(Some(*c)),
+            shade(rgb_of(Some(*c)), 0.85),
+        ),
+        (None, B::Preset(k)) => {
+            let (top, bottom) = super::BANNER_PRESETS
+                .iter()
+                .find(|p| p.0 == k)
+                .map_or(([52, 58, 76], [24, 27, 38]), |p| (p.2, p.3));
+            gradient(BANNER_W, BANNER_H, top, bottom)
+        }
+        (None, _) => gradient(BANNER_W, BANNER_H, [52, 58, 76], [24, 27, 38]),
+    };
+    if let Some(f) = font() {
+        let clean = sanitize(f, title);
+        if !clean.trim().is_empty() {
+            let (text, px) = fit_text(f, &clean, BANNER_W as f32 - 100.0, 64.0, 28.0);
+            // A soft band keeps the name readable on any picture.
+            fill_rrect(
+                &mut img,
+                24,
+                i64::from(BANNER_H) - 110,
+                text_width(f, px, &text) as i64 + 48,
+                84,
+                16,
+                [0, 0, 0],
+                0.45,
+            );
+            draw_text(
+                &mut img,
+                f,
+                px,
+                48.0,
+                BANNER_H as f32 - 100.0,
+                [255, 255, 255],
+                1.0,
+                &text,
+            );
+        }
+    }
+    encode_png(&img)
+}
+
 // ---- encoding ---------------------------------------------------------------------------
 
 fn encode_png(img: &RgbaImage) -> Option<Rendered> {

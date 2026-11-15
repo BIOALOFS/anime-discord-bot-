@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod custom;
 pub mod feed;
 pub mod game;

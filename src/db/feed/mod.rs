@@ -1,4 +1,7 @@
 //! Airing feed configuration, notification list, member requests, dedupe and digest queue.
+//! (Data-layer functions for groups, tiers, notes, lists and compatibility stay with the schema, even though
+//! no command uses them any more.)
+#![allow(dead_code)]
 
 use sqlx::{Row, SqlitePool};
 
@@ -17,10 +20,46 @@ pub struct FeedConfig {
     pub digest_hours: i64,
     pub daily_cap: i64,
     pub role_id: Option<i64>,
-    /// `true`: only the notification list; `false`: every anime plus pins.
-    pub only_listed: bool,
+    pub filter: FilterMode,
+    /// Work kinds that may be announced (anime, manga, manhwa, manhua, novel).
+    pub kinds: Vec<String>,
     pub last_digest_at: i64,
 }
+
+/// What the notification feed announces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterMode {
+    /// Every release of every work (default).
+    All,
+    /// Only works at or above the popularity threshold.
+    Popular,
+    /// Only works that members of the server have in their profiles.
+    Profiles,
+    /// Only the selected formats / kinds.
+    Formats,
+}
+
+impl FilterMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Popular => "popular",
+            Self::Profiles => "profiles",
+            Self::Formats => "formats",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim() {
+            "all" => Self::All,
+            "popular" => Self::Popular,
+            "profiles" => Self::Profiles,
+            "formats" => Self::Formats,
+            _ => return None,
+        })
+    }
+}
+
+pub const ALL_KINDS: [&str; 5] = ["anime", "manga", "manhwa", "manhua", "novel"];
 
 fn split_csv(s: &str) -> Vec<String> {
     s.split(',')
@@ -41,7 +80,8 @@ fn from_row(r: &sqlx::sqlite::SqliteRow) -> FeedConfig {
         digest_hours: r.get("digest_hours"),
         daily_cap: r.get("daily_cap"),
         role_id: r.get("role_id"),
-        only_listed: r.get::<String, _>("mode") == "listed",
+        filter: FilterMode::parse(&r.get::<String, _>("filter_mode")).unwrap_or(FilterMode::All),
+        kinds: split_csv(&r.get::<String, _>("kinds")),
         last_digest_at: r.get("last_digest_at"),
     }
 }
@@ -86,8 +126,47 @@ async fn set(
     Ok(())
 }
 
+/// Setting the notifications channel switches notifications on the first time (default on once a channel is set).
 pub async fn set_channel(pool: &SqlitePool, guild: i64, channel: i64) -> Result<()> {
-    set(pool, guild, "channel_id", channel).await
+    get_config(pool, guild).await?;
+    sqlx::query("UPDATE guild_feed SET enabled = CASE WHEN channel_id IS NULL THEN 1 ELSE enabled END, channel_id = ?2 WHERE guild_id = ?1")
+        .bind(guild)
+        .bind(channel)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+pub async fn clear_channel(pool: &SqlitePool, guild: i64) -> Result<()> {
+    set(pool, guild, "channel_id", Option::<i64>::None).await
+}
+pub async fn set_filter_mode(pool: &SqlitePool, guild: i64, mode: FilterMode) -> Result<()> {
+    set(pool, guild, "filter_mode", mode.as_str().to_string()).await
+}
+pub async fn set_kinds(pool: &SqlitePool, guild: i64, kinds: &[String]) -> Result<()> {
+    let clean: Vec<&str> = kinds
+        .iter()
+        .map(String::as_str)
+        .filter(|k| ALL_KINDS.contains(k))
+        .collect();
+    set(pool, guild, "kinds", clean.join(",")).await
+}
+
+/// AniList ids of the works that members of this server have in their profiles.
+pub async fn profile_work_ids(
+    pool: &SqlitePool,
+    guild: i64,
+) -> Result<std::collections::HashSet<i64>> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT pw.work_id FROM profile_works pw JOIN user_guilds ug ON ug.user_id = pw.user_id \
+         WHERE ug.guild_id = ?1 AND pw.work_id LIKE 'anilist:%'",
+    )
+    .bind(guild)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|w| w.strip_prefix("anilist:")?.parse().ok())
+        .collect())
 }
 pub async fn set_enabled(pool: &SqlitePool, guild: i64, on: bool) -> Result<()> {
     set(pool, guild, "enabled", on).await
@@ -114,15 +193,6 @@ pub async fn set_daily_cap(pool: &SqlitePool, guild: i64, cap: i64) -> Result<()
 }
 pub async fn set_role(pool: &SqlitePool, guild: i64, role: Option<i64>) -> Result<()> {
     set(pool, guild, "role_id", role).await
-}
-pub async fn set_only_listed(pool: &SqlitePool, guild: i64, only_listed: bool) -> Result<()> {
-    set(
-        pool,
-        guild,
-        "mode",
-        (if only_listed { "listed" } else { "all" }).to_string(),
-    )
-    .await
 }
 pub async fn set_last_digest(pool: &SqlitePool, guild: i64, at: i64) -> Result<()> {
     set(pool, guild, "last_digest_at", at).await
@@ -163,127 +233,6 @@ pub async fn birthday_targets(pool: &SqlitePool) -> Result<Vec<(i64, i64)>> {
         .iter()
         .map(|r| (r.get("guild_id"), r.get("birthday_channel")))
         .collect())
-}
-
-// ---- notification list --------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListMode {
-    Listed,
-    Pinned,
-    Muted,
-}
-
-impl ListMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Listed => "listed",
-            Self::Pinned => "pinned",
-            Self::Muted => "muted",
-        }
-    }
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "listed" => Some(Self::Listed),
-            "pinned" => Some(Self::Pinned),
-            "muted" => Some(Self::Muted),
-            _ => None,
-        }
-    }
-}
-
-pub async fn set_list_entry(
-    pool: &SqlitePool,
-    guild: i64,
-    work: i64,
-    title: &str,
-    mode: ListMode,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO alert_list (guild_id, work_id, title, mode) VALUES (?1, ?2, ?3, ?4) \
-         ON CONFLICT(guild_id, work_id) DO UPDATE SET mode = excluded.mode, title = excluded.title",
-    )
-    .bind(guild)
-    .bind(work)
-    .bind(title)
-    .bind(mode.as_str())
-    .execute(pool)
-    .await?;
-    sqlx::query("DELETE FROM alert_requests WHERE guild_id = ?1 AND work_id = ?2")
-        .bind(guild)
-        .bind(work)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-pub async fn remove_list_entry(pool: &SqlitePool, guild: i64, work: i64) -> Result<bool> {
-    let r = sqlx::query("DELETE FROM alert_list WHERE guild_id = ?1 AND work_id = ?2")
-        .bind(guild)
-        .bind(work)
-        .execute(pool)
-        .await?;
-    Ok(r.rows_affected() > 0)
-}
-
-pub async fn list_entries(pool: &SqlitePool, guild: i64) -> Result<Vec<(i64, String, ListMode)>> {
-    let rows = sqlx::query(
-        "SELECT work_id, title, mode FROM alert_list WHERE guild_id = ?1 ORDER BY title",
-    )
-    .bind(guild)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| {
-            Some((
-                r.get("work_id"),
-                r.get("title"),
-                ListMode::parse(&r.get::<String, _>("mode"))?,
-            ))
-        })
-        .collect())
-}
-
-// ---- member requests ----------------------------------------------------------------------
-
-/// `false` when this member already asked for it.
-pub async fn add_request(
-    pool: &SqlitePool,
-    guild: i64,
-    work: i64,
-    title: &str,
-    user: i64,
-) -> Result<bool> {
-    let r = sqlx::query("INSERT OR IGNORE INTO alert_requests (guild_id, work_id, title, user_id) VALUES (?1, ?2, ?3, ?4)")
-        .bind(guild)
-        .bind(work)
-        .bind(title)
-        .bind(user)
-        .execute(pool)
-        .await?;
-    Ok(r.rows_affected() > 0)
-}
-
-/// Pending requests grouped by work: `(work_id, title, requesters)`.
-pub async fn pending_requests(pool: &SqlitePool, guild: i64) -> Result<Vec<(i64, String, i64)>> {
-    let rows = sqlx::query("SELECT work_id, title, count(*) AS n FROM alert_requests WHERE guild_id = ?1 GROUP BY work_id ORDER BY n DESC, title LIMIT 25")
-        .bind(guild)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows
-        .iter()
-        .map(|r| (r.get("work_id"), r.get("title"), r.get("n")))
-        .collect())
-}
-
-pub async fn deny_request(pool: &SqlitePool, guild: i64, work: i64) -> Result<bool> {
-    let r = sqlx::query("DELETE FROM alert_requests WHERE guild_id = ?1 AND work_id = ?2")
-        .bind(guild)
-        .bind(work)
-        .execute(pool)
-        .await?;
-    Ok(r.rows_affected() > 0)
 }
 
 // ---- dedupe, cap and digest ---------------------------------------------------------------

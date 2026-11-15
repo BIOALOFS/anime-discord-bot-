@@ -1,0 +1,771 @@
+//! `/admin`: the one admin command. It opens an ephemeral panel; every button opens its own menu with a Back
+//! button. Hidden from non-admins through `default_member_permissions`, and checked again at run time.
+
+use super::buttons;
+use crate::{
+    db::{
+        admin as adb, custom,
+        feed::{self, FeedConfig, FilterMode, ALL_FORMATS, ALL_KINDS},
+    },
+    error::{Context, Error},
+    guild::{self, GuildStore},
+    i18n,
+    ui::{
+        embeds::Emb,
+        pagination::{back_button, close_button, BACK, CLOSE},
+        session::{self, Outcome, Page, View},
+    },
+};
+use poise::serenity_prelude as serenity;
+use sqlx::SqlitePool;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Home,
+    Safety,
+    Notifications,
+    Images,
+    Roles,
+    Channels,
+    Limits,
+    Reset,
+}
+
+/// Home buttons: `(id, label, emoji, screen)`.
+pub const HOME: &[(&str, &str, char, Screen)] = &[
+    ("go:safety", "الأمان", '🛡', Screen::Safety),
+    ("go:notify", "الإشعارات", '🔔', Screen::Notifications),
+    ("go:images", "الصور المخصصة", '🖼', Screen::Images),
+    ("go:roles", "الرتب والصلاحيات", '👥', Screen::Roles),
+    ("go:channels", "القنوات", '📌', Screen::Channels),
+    ("go:limits", "الحدود", '⏱', Screen::Limits),
+    ("go:reset", "إعادة الضبط", '🗑', Screen::Reset),
+];
+
+const T_NSFW: &str = "s:nsfw";
+const T_MATURE: &str = "s:mature";
+const T_GAMES: &str = "s:games";
+const N_TOGGLE: &str = "n:toggle";
+const N_MODE: &str = "n:mode";
+const N_POP: &str = "n:pop";
+const N_FORMATS: &str = "n:formats";
+const N_KINDS: &str = "n:kinds";
+const I_TOGGLE: &str = "i:toggle";
+const I_POLICY: &str = "i:policy";
+const R_MANAGER: &str = "r:manager";
+const R_PING: &str = "r:ping";
+const R_CLEAR_MANAGER: &str = "r:clear_manager";
+const R_CLEAR_PING: &str = "r:clear_ping";
+const C_CLEAR_BOT: &str = "c:clear_bot";
+const C_CLEAR_NOTIFY: &str = "c:clear_notify";
+const L_COOLDOWN: &str = "l:cooldown";
+const X_CONFIRM: &str = "x:confirm";
+
+/// Everything the panel shows, loaded from the database after each change.
+#[derive(Debug, Clone)]
+pub struct State {
+    pub nsfw: bool,
+    pub mature: bool,
+    pub games: bool,
+    pub images: bool,
+    pub upload_admins: bool,
+    pub manager_role: Option<i64>,
+    pub bot_channel: Option<i64>,
+    pub cooldown: i64,
+    pub feed: FeedConfig,
+}
+
+pub const POPULARITY_CHOICES: [i64; 5] = [500, 1500, 3000, 5000, 10_000];
+pub const COOLDOWN_CHOICES: [i64; 6] = [0, 3, 5, 10, 30, 60];
+
+pub fn mode_label(m: FilterMode) -> &'static str {
+    match m {
+        FilterMode::All => "الكل: كل إصدار لكل عمل",
+        FilterMode::Popular => "الأعمال الشائعة فقط",
+        FilterMode::Profiles => "الأعمال الموجودة في بروفايلات الأعضاء فقط",
+        FilterMode::Formats => "صيغ وأنواع محددة فقط",
+    }
+}
+
+fn kind_label(k: &str) -> &'static str {
+    match k {
+        "anime" => "أنمي",
+        "manga" => "مانجا",
+        "manhwa" => "مانهوا",
+        "manhua" => "مانهوا صينية",
+        "novel" => "رواية",
+        _ => "?",
+    }
+}
+
+fn yes_no(b: bool) -> &'static str {
+    if b {
+        "✅ مفعّل"
+    } else {
+        "❌ معطّل"
+    }
+}
+
+fn channel_text(c: Option<i64>, unset: &str) -> String {
+    c.map_or_else(|| unset.to_string(), |c| format!("<#{c}>"))
+}
+
+/// One option of a select menu: `(label, value, selected)`.
+pub type Opt = (String, String, bool);
+
+pub fn mode_options(current: FilterMode) -> Vec<Opt> {
+    [
+        FilterMode::All,
+        FilterMode::Popular,
+        FilterMode::Profiles,
+        FilterMode::Formats,
+    ]
+    .into_iter()
+    .map(|m| {
+        (
+            mode_label(m).to_string(),
+            m.as_str().to_string(),
+            m == current,
+        )
+    })
+    .collect()
+}
+
+pub fn popularity_options(current: i64) -> Vec<Opt> {
+    POPULARITY_CHOICES
+        .iter()
+        .map(|p| (format!("شعبية ≥ {p}"), p.to_string(), *p == current))
+        .collect()
+}
+
+pub fn format_options(selected: &[String]) -> Vec<Opt> {
+    ALL_FORMATS
+        .iter()
+        .map(|f| {
+            (
+                (*f).to_string(),
+                (*f).to_string(),
+                selected.iter().any(|s| s == f),
+            )
+        })
+        .collect()
+}
+
+pub fn kind_options(selected: &[String]) -> Vec<Opt> {
+    ALL_KINDS
+        .iter()
+        .map(|k| {
+            (
+                kind_label(k).to_string(),
+                (*k).to_string(),
+                selected.iter().any(|s| s == k),
+            )
+        })
+        .collect()
+}
+
+pub fn cooldown_options(current: i64) -> Vec<Opt> {
+    COOLDOWN_CHOICES
+        .iter()
+        .map(|c| {
+            let label = if *c == 0 {
+                "الافتراضي".to_string()
+            } else {
+                format!("{c} ثانية")
+            };
+            (label, c.to_string(), *c == current)
+        })
+        .collect()
+}
+
+fn menu(
+    id: &str,
+    placeholder: &str,
+    opts: Vec<Opt>,
+    min: u8,
+    max: u8,
+    enabled: bool,
+) -> serenity::CreateActionRow {
+    let options = opts
+        .into_iter()
+        .take(25)
+        .map(|(label, value, selected)| {
+            serenity::CreateSelectMenuOption::new(crate::ui::embeds::fit(&label, 100), value)
+                .default_selection(selected)
+        })
+        .collect::<Vec<_>>();
+    let max = max.min(options.len() as u8).max(1);
+    serenity::CreateActionRow::SelectMenu(
+        serenity::CreateSelectMenu::new(id, serenity::CreateSelectMenuKind::String { options })
+            .placeholder(placeholder)
+            .min_values(min.min(max))
+            .max_values(max)
+            .disabled(!enabled),
+    )
+}
+
+fn role_menu(id: &str, placeholder: &str, enabled: bool) -> serenity::CreateActionRow {
+    serenity::CreateActionRow::SelectMenu(
+        serenity::CreateSelectMenu::new(
+            id,
+            serenity::CreateSelectMenuKind::Role {
+                default_roles: None,
+            },
+        )
+        .placeholder(placeholder)
+        .disabled(!enabled),
+    )
+}
+
+fn toggle(id: &str, label: &str, on: bool, enabled: bool) -> serenity::CreateButton {
+    serenity::CreateButton::new(id)
+        .label(format!("{label}: {}", if on { "✅" } else { "❌" }))
+        .style(if on {
+            serenity::ButtonStyle::Success
+        } else {
+            serenity::ButtonStyle::Secondary
+        })
+        .disabled(!enabled)
+}
+
+pub struct AdminView {
+    pool: SqlitePool,
+    guilds: Arc<GuildStore>,
+    guild: i64,
+    screen: Screen,
+    state: State,
+    notice: Option<String>,
+}
+
+impl AdminView {
+    async fn load(pool: &SqlitePool, guilds: &GuildStore, guild: i64) -> Result<State, Error> {
+        Ok(State {
+            nsfw: custom::nsfw_mode(pool, guild).await?,
+            mature: custom::mature_games(pool, guild).await?,
+            games: custom::games_enabled(pool, guild).await?,
+            images: custom::custom_images_enabled(pool, guild).await?,
+            upload_admins: adb::upload_admins_only(pool, guild).await?,
+            manager_role: adb::manager_role(pool, guild).await?,
+            bot_channel: guilds.settings(guild).await?.command_channel,
+            cooldown: adb::cooldown_secs(pool, guild).await?,
+            feed: feed::get_config(pool, guild).await?,
+        })
+    }
+
+    async fn reload(&mut self) {
+        match Self::load(&self.pool, &self.guilds, self.guild).await {
+            Ok(s) => self.state = s,
+            Err(e) => {
+                tracing::warn!("admin panel reload failed: {e:#}");
+                self.notice = Some(i18n::ERR_GENERIC.to_string());
+            }
+        }
+    }
+
+    fn saved(&mut self) {
+        self.notice = Some(i18n::SETTINGS_SAVED.to_string());
+    }
+}
+
+/// The embed of a screen (pure, so it is testable).
+pub fn embed_for(screen: Screen, s: &State, guild: i64) -> Emb {
+    let e = Emb::new();
+    match screen {
+        Screen::Home => e.title("🛠 لوحة الإدارة").description("اختر قسمًا من الأزرار. كل التغييرات تُحفظ فورًا."),
+        Screen::Safety => e.title("🛡 الأمان").description(format!(
+            "• سياسة NSFW: {}\n• عرض الألعاب ذات التصنيف الناضج (M / PEGI 18): {}\n• مصادر الألعاب (IGDB / VNDB): {}\n\nالمحتوى الجنسي مخفي دائمًا مهما كانت الإعدادات.",
+            yes_no(s.nsfw),
+            yes_no(s.mature),
+            yes_no(s.games)
+        )),
+        Screen::Notifications => e.title("🔔 الإشعارات").description(format!(
+            "• الحالة: {}\n• القناة: {}\n• التصفية: **{}**\n• حد الشعبية: {}\n• الصيغ: {}\n• الأنواع: {}\n\nجدول البث متاح للأنمي فقط في AniList؛ المانجا والمانهوا لا يوفّر لها جدول فصول.",
+            yes_no(s.feed.enabled),
+            channel_text(s.feed.channel_id, "غير محددة (استخدم /set-notifications-channel)"),
+            mode_label(s.feed.filter),
+            s.feed.min_popularity,
+            s.feed.formats.join("، "),
+            s.feed.kinds.iter().map(|k| kind_label(k)).collect::<Vec<_>>().join("، ")
+        )),
+        Screen::Images => e.title("🖼 الصور المخصصة").description(format!(
+            "• الصور المخصصة: {}\n• من يستطيع الرفع: **{}**",
+            yes_no(s.images),
+            if s.upload_admins { "المشرفون فقط" } else { "الجميع" }
+        )),
+        Screen::Roles => e.title("👥 الرتب والصلاحيات").description(format!(
+            "• رتبة إدارة البوت: {}\n• رتبة منشن الإشعارات: {}\n\nمن يملك رتبة الإدارة يستطيع استخدام أوامر الإدارة. لتظهر له الأوامر اسمح لها في إعدادات السيرفر ← التكاملات.",
+            s.manager_role.map_or("غير محددة".to_string(), |r| format!("<@&{r}>")),
+            s.feed.role_id.map_or("غير محددة".to_string(), |r| format!("<@&{r}>"))
+        )),
+        Screen::Channels => e.title("📌 القنوات").description(format!(
+            "• قناة البوت (الأوامر تعمل فيها فقط): {}\n• قناة الإشعارات: {}\n\nلتغييرها استخدم `/set-bot-channel` و`/set-notifications-channel`. من هنا يمكنك إلغاء التحديد فقط.\nرابط الخادم: {guild}",
+            channel_text(s.bot_channel, "غير محددة (الأوامر تعمل في كل القنوات)"),
+            channel_text(s.feed.channel_id, "غير محددة (لا إشعارات)")
+        )),
+        Screen::Limits => e.title("⏱ الحدود").description(format!(
+            "• مهلة الأوامر لكل عضو: **{}**\n(المشرفون معفون)",
+            if s.cooldown == 0 { "الافتراضي".to_string() } else { format!("{} ثانية", s.cooldown) }
+        )),
+        Screen::Reset => e.title("🗑 إعادة الضبط").description(
+            "سيتم حذف إعدادات هذا السيرفر: القنوات والإشعارات والصور المخصصة والرتب والنقاط. بروفايلات الأعضاء العامة لا تُحذف.",
+        ),
+    }
+}
+
+/// The components of a screen (pure).
+pub fn components_for(
+    screen: Screen,
+    s: &State,
+    guild: i64,
+    confirming: bool,
+    enabled: bool,
+) -> Vec<serenity::CreateActionRow> {
+    let nav = |extra: Vec<serenity::CreateButton>| {
+        let mut row = extra;
+        row.push(back_button(enabled));
+        row.push(close_button(enabled));
+        buttons(row)
+    };
+    match screen {
+        Screen::Home => {
+            let mk = |slice: &[(&str, &str, char, Screen)]| {
+                buttons(
+                    slice
+                        .iter()
+                        .map(|(id, label, emoji, _)| {
+                            serenity::CreateButton::new(*id)
+                                .label(*label)
+                                .emoji(*emoji)
+                                .style(serenity::ButtonStyle::Secondary)
+                                .disabled(!enabled)
+                        })
+                        .collect(),
+                )
+            };
+            vec![
+                mk(&HOME[..4]),
+                mk(&HOME[4..]),
+                buttons(vec![close_button(enabled)]),
+            ]
+        }
+        Screen::Safety => vec![
+            buttons(vec![
+                toggle(T_NSFW, "NSFW", s.nsfw, enabled),
+                toggle(T_MATURE, "ألعاب ناضجة", s.mature, enabled),
+                toggle(T_GAMES, "الألعاب", s.games, enabled),
+            ]),
+            nav(vec![]),
+        ],
+        Screen::Notifications => vec![
+            buttons(vec![
+                toggle(N_TOGGLE, "الإشعارات", s.feed.enabled, enabled),
+                back_button(enabled),
+                close_button(enabled),
+            ]),
+            menu(
+                N_MODE,
+                "نوع التصفية",
+                mode_options(s.feed.filter),
+                1,
+                1,
+                enabled,
+            ),
+            menu(
+                N_POP,
+                "حد الشعبية (للتصفية الشائعة)",
+                popularity_options(s.feed.min_popularity),
+                1,
+                1,
+                enabled,
+            ),
+            menu(
+                N_FORMATS,
+                "الصيغ (للتصفية بالصيغ)",
+                format_options(&s.feed.formats),
+                0,
+                4,
+                enabled,
+            ),
+            menu(
+                N_KINDS,
+                "الأنواع (للتصفية بالصيغ)",
+                kind_options(&s.feed.kinds),
+                0,
+                5,
+                enabled,
+            ),
+        ],
+        Screen::Images => vec![
+            buttons(vec![
+                toggle(I_TOGGLE, "الصور المخصصة", s.images, enabled),
+                serenity::CreateButton::new(I_POLICY)
+                    .label(format!(
+                        "الرفع: {}",
+                        if s.upload_admins {
+                            "المشرفون"
+                        } else {
+                            "الجميع"
+                        }
+                    ))
+                    .style(serenity::ButtonStyle::Secondary)
+                    .disabled(!enabled),
+            ]),
+            nav(vec![]),
+        ],
+        Screen::Roles => vec![
+            role_menu(R_MANAGER, "اختر رتبة إدارة البوت", enabled),
+            role_menu(R_PING, "اختر رتبة منشن الإشعارات", enabled),
+            nav(vec![
+                serenity::CreateButton::new(R_CLEAR_MANAGER)
+                    .label("إلغاء رتبة الإدارة")
+                    .style(serenity::ButtonStyle::Secondary)
+                    .disabled(!enabled || s.manager_role.is_none()),
+                serenity::CreateButton::new(R_CLEAR_PING)
+                    .label("إلغاء رتبة المنشن")
+                    .style(serenity::ButtonStyle::Secondary)
+                    .disabled(!enabled || s.feed.role_id.is_none()),
+            ]),
+        ],
+        Screen::Channels => {
+            let mut links = Vec::new();
+            for c in [s.bot_channel, s.feed.channel_id].into_iter().flatten() {
+                links.push(
+                    serenity::CreateButton::new_link(format!(
+                        "https://discord.com/channels/{guild}/{c}"
+                    ))
+                    .label(format!("↗ #{c}")),
+                );
+            }
+            let mut rows = vec![buttons(vec![
+                serenity::CreateButton::new(C_CLEAR_BOT)
+                    .label("إلغاء قناة البوت")
+                    .style(serenity::ButtonStyle::Danger)
+                    .disabled(!enabled || s.bot_channel.is_none()),
+                serenity::CreateButton::new(C_CLEAR_NOTIFY)
+                    .label("إلغاء قناة الإشعارات")
+                    .style(serenity::ButtonStyle::Danger)
+                    .disabled(!enabled || s.feed.channel_id.is_none()),
+            ])];
+            if !links.is_empty() {
+                rows.push(buttons(links));
+            }
+            rows.push(nav(vec![]));
+            rows
+        }
+        Screen::Limits => vec![
+            menu(
+                L_COOLDOWN,
+                "مهلة الأوامر لكل عضو",
+                cooldown_options(s.cooldown),
+                1,
+                1,
+                enabled,
+            ),
+            nav(vec![]),
+        ],
+        Screen::Reset => {
+            let mut extra = Vec::new();
+            if confirming {
+                extra.push(
+                    serenity::CreateButton::new(X_CONFIRM)
+                        .label("نعم، احذف كل شيء")
+                        .style(serenity::ButtonStyle::Danger)
+                        .disabled(!enabled),
+                );
+            } else {
+                extra.push(
+                    serenity::CreateButton::new("x:ask")
+                        .label("حذف بيانات السيرفر…")
+                        .style(serenity::ButtonStyle::Danger)
+                        .disabled(!enabled),
+                );
+            }
+            vec![nav(extra)]
+        }
+    }
+}
+
+impl View for AdminView {
+    fn ephemeral(&self) -> bool {
+        true
+    }
+
+    fn render(&self, enabled: bool) -> Page {
+        let confirming = self.screen == Screen::Reset
+            && self.notice.as_deref() == Some(i18n::ADMIN_CONFIRM_RESET);
+        Page::embed(
+            embed_for(self.screen, &self.state, self.guild).build(),
+            components_for(self.screen, &self.state, self.guild, confirming, enabled),
+        )
+        .notice(self.notice.clone())
+    }
+
+    async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
+        self.notice = None;
+        let (pool, g) = (self.pool.clone(), self.guild);
+        let first = values.first().map(String::as_str);
+        let result: Result<(), Error> = async {
+            match id {
+                CLOSE => return Ok(()),
+                BACK => self.screen = Screen::Home,
+                T_NSFW => custom::set_nsfw_mode(&pool, g, !self.state.nsfw).await?,
+                T_MATURE => custom::set_mature_games(&pool, g, !self.state.mature).await?,
+                T_GAMES => custom::set_games(&pool, g, !self.state.games).await?,
+                N_TOGGLE => feed::set_enabled(&pool, g, !self.state.feed.enabled).await?,
+                N_MODE => {
+                    if let Some(m) = first.and_then(FilterMode::parse) {
+                        feed::set_filter_mode(&pool, g, m).await?;
+                    }
+                }
+                N_POP => {
+                    if let Some(n) = first
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .filter(|n| POPULARITY_CHOICES.contains(n))
+                    {
+                        feed::set_min_popularity(&pool, g, n).await?;
+                    }
+                }
+                N_FORMATS => feed::set_formats(&pool, g, values).await?,
+                N_KINDS => feed::set_kinds(&pool, g, values).await?,
+                I_TOGGLE => custom::set_custom_images(&pool, g, !self.state.images).await?,
+                I_POLICY => {
+                    adb::set_upload_admins_only(&pool, g, !self.state.upload_admins).await?
+                }
+                R_MANAGER => {
+                    adb::set_manager_role(&pool, g, first.and_then(|v| v.parse().ok())).await?
+                }
+                R_PING => feed::set_role(&pool, g, first.and_then(|v| v.parse().ok())).await?,
+                R_CLEAR_MANAGER => adb::set_manager_role(&pool, g, None).await?,
+                R_CLEAR_PING => feed::set_role(&pool, g, None).await?,
+                C_CLEAR_BOT => self.guilds.reset(g).await?,
+                C_CLEAR_NOTIFY => feed::clear_channel(&pool, g).await?,
+                L_COOLDOWN => {
+                    if let Some(n) = first
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .filter(|n| COOLDOWN_CHOICES.contains(n))
+                    {
+                        adb::set_cooldown_secs(&pool, g, n).await?;
+                    }
+                }
+                "x:ask" => {
+                    self.notice = Some(i18n::ADMIN_CONFIRM_RESET.to_string());
+                    return Ok(());
+                }
+                X_CONFIRM => {
+                    adb::reset_guild(&pool, g).await?;
+                    self.guilds.reset(g).await?;
+                    self.screen = Screen::Home;
+                }
+                other => {
+                    if let Some((_, _, _, screen)) = HOME.iter().find(|h| h.0 == other) {
+                        self.screen = *screen;
+                    }
+                    return Ok(());
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if id == CLOSE {
+            return Outcome::Close;
+        }
+        match result {
+            Ok(()) => {
+                let is_nav = id == BACK || id.starts_with("go:") || id == "x:ask";
+                self.reload().await;
+                if !is_nav && self.notice.is_none() {
+                    self.saved();
+                }
+            }
+            Err(e) => {
+                tracing::warn!("admin action {id} failed: {e:#}");
+                self.notice = Some(i18n::ERR_GENERIC.to_string());
+            }
+        }
+        Outcome::Update
+    }
+}
+
+/// Is the invoker allowed to manage this server (Manage Guild, Administrator or the management role)?
+pub async fn invoker_can_manage(ctx: Context<'_>) -> bool {
+    let Some(g) = ctx.guild_id() else {
+        return false;
+    };
+    let Some(member) = ctx.author_member().await else {
+        return false;
+    };
+    let roles: Vec<i64> = member.roles.iter().map(|r| r.get() as i64).collect();
+    let manager = adb::manager_role(&ctx.data().db, g.get() as i64)
+        .await
+        .unwrap_or(None);
+    guild::can_manage(member.permissions, &roles, manager)
+}
+
+/// The server admin panel (Manage Guild).
+#[poise::command(
+    slash_command,
+    guild_only,
+    default_member_permissions = "MANAGE_GUILD",
+    name_localized("ar", "إدارة"),
+    description_localized("ar", "لوحة إدارة السيرفر: الأمان والإشعارات والصور والقنوات (للمشرفين)")
+)]
+pub async fn admin(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(g) = ctx.guild_id().map(|g| g.get() as i64) else {
+        return super::say_ephemeral(ctx, i18n::SERVER_ONLY).await;
+    };
+    if !invoker_can_manage(ctx).await {
+        ctx.send(
+            poise::CreateReply::default()
+                .content(i18n::NOT_ADMIN)
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+    let pool = ctx.data().db.clone();
+    let guilds = ctx.data().guilds.clone();
+    let state = AdminView::load(&pool, &guilds, g).await?;
+    session::run(
+        ctx,
+        AdminView {
+            pool,
+            guilds,
+            guild: g,
+            screen: Screen::Home,
+            state,
+            notice: None,
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> State {
+        State {
+            nsfw: false,
+            mature: true,
+            games: true,
+            images: false,
+            upload_admins: false,
+            manager_role: Some(5),
+            bot_channel: Some(10),
+            cooldown: 0,
+            feed: FeedConfig {
+                guild_id: 1,
+                channel_id: Some(20),
+                enabled: true,
+                min_popularity: 1500,
+                formats: vec!["TV".into()],
+                excluded_genres: vec![],
+                digest_hours: 0,
+                daily_cap: 0,
+                role_id: Some(6),
+                filter: FilterMode::All,
+                kinds: vec!["anime".into()],
+                last_digest_at: 0,
+            },
+        }
+    }
+
+    const SCREENS: [Screen; 8] = [
+        Screen::Home,
+        Screen::Safety,
+        Screen::Notifications,
+        Screen::Images,
+        Screen::Roles,
+        Screen::Channels,
+        Screen::Limits,
+        Screen::Reset,
+    ];
+
+    #[test]
+    fn every_screen_fits_discords_five_rows_and_has_a_way_back() {
+        let s = state();
+        for screen in SCREENS {
+            for confirming in [false, true] {
+                let rows = components_for(screen, &s, 1, confirming, true);
+                assert!(
+                    !rows.is_empty() && rows.len() <= 5,
+                    "{screen:?}: {} rows",
+                    rows.len()
+                );
+                let json = serde_json::to_string(&rows).expect("json");
+                let nav = if screen == Screen::Home {
+                    "\"close\""
+                } else {
+                    "\"back\""
+                };
+                assert!(json.contains(nav), "{screen:?} lacks {nav}");
+            }
+            assert!(embed_for(screen, &s, 1).description.is_some());
+        }
+    }
+
+    #[test]
+    fn home_has_every_section_in_two_rows_of_buttons() {
+        assert_eq!(HOME.len(), 7);
+        let rows = components_for(Screen::Home, &state(), 1, false, true);
+        let json = serde_json::to_string(&rows).expect("json");
+        for (id, ..) in HOME {
+            assert!(json.contains(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn option_builders_mark_the_current_value_and_stay_unique() {
+        let modes = mode_options(FilterMode::Profiles);
+        assert_eq!(modes.iter().filter(|o| o.2).count(), 1);
+        assert!(modes.iter().any(|o| o.1 == "profiles" && o.2));
+        assert_eq!(popularity_options(1500).iter().filter(|o| o.2).count(), 1);
+        assert_eq!(
+            format_options(&["TV".into(), "ONA".into()])
+                .iter()
+                .filter(|o| o.2)
+                .count(),
+            2
+        );
+        assert_eq!(kind_options(&[]).iter().filter(|o| o.2).count(), 0);
+        assert_eq!(kind_options(&[]).len(), 5);
+        for opts in [
+            mode_options(FilterMode::All),
+            cooldown_options(0),
+            kind_options(&[]),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            assert!(opts.iter().all(|o| seen.insert(o.1.clone())));
+        }
+    }
+
+    #[test]
+    fn channel_summary_shows_both_channels_and_unset_hints() {
+        let mut s = state();
+        let text = embed_for(Screen::Channels, &s, 1)
+            .description
+            .unwrap_or_default();
+        assert!(text.contains("<#10>") && text.contains("<#20>"));
+        s.bot_channel = None;
+        s.feed.channel_id = None;
+        let text = embed_for(Screen::Channels, &s, 1)
+            .description
+            .unwrap_or_default();
+        assert!(text.contains("غير محددة") && !text.contains("<#"));
+    }
+
+    #[test]
+    fn admin_permission_rules() {
+        use serenity::Permissions as P;
+        assert!(guild::can_manage(Some(P::MANAGE_GUILD), &[], None));
+        assert!(guild::can_manage(Some(P::ADMINISTRATOR), &[], None));
+        assert!(!guild::can_manage(Some(P::SEND_MESSAGES), &[1, 2], None));
+        assert!(!guild::can_manage(None, &[], Some(9)));
+        assert!(
+            guild::can_manage(Some(P::SEND_MESSAGES), &[1, 9], Some(9)),
+            "management role"
+        );
+        assert!(!guild::can_manage(Some(P::SEND_MESSAGES), &[1], Some(9)));
+    }
+}

@@ -110,6 +110,11 @@ pub trait View: Send {
 
     fn render(&self, enabled: bool) -> Page;
 
+    /// Panels that only their opener should ever see (admin menus) are sent ephemerally.
+    fn ephemeral(&self) -> bool {
+        false
+    }
+
     /// Buttons that open a modal instead of a normal update. The modal must be the interaction's first
     /// response, so the engine asks before acknowledging.
     fn modal_for(&self, _id: &str) -> Option<ModalSpec> {
@@ -204,7 +209,8 @@ async fn send_whisper(
 
 /// Send the view and drive it until it closes or times out.
 pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
-    let handle = ctx.send(view.render(true).into_reply()).await?;
+    let reply = view.render(true).into_reply().ephemeral(view.ephemeral());
+    let handle = ctx.send(reply).await?;
     let message_id = handle.message().await?.id;
     let sctx = ctx.serenity_context();
     let owner = ctx.author().id;
@@ -270,6 +276,12 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
         }
         let values = match &i.data.kind {
             ComponentInteractionDataKind::StringSelect { values } => values.clone(),
+            ComponentInteractionDataKind::RoleSelect { values } => {
+                values.iter().map(|v| v.get().to_string()).collect()
+            }
+            ComponentInteractionDataKind::ChannelSelect { values } => {
+                values.iter().map(|v| v.get().to_string()).collect()
+            }
             _ => Vec::new(),
         };
         let outcome = view.on_interaction(&i.data.custom_id, &values).await;
@@ -292,7 +304,13 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
             return Ok(());
         }
     }
-    if let Err(e) = handle.edit(ctx, view.render(false).into_reply()).await {
+    if let Err(e) = handle
+        .edit(
+            ctx,
+            view.render(false).into_reply().ephemeral(view.ephemeral()),
+        )
+        .await
+    {
         tracing::debug!("could not disable components after timeout: {e}");
     }
     Ok(())

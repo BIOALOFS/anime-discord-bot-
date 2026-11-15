@@ -14,7 +14,8 @@ fn cfg() -> FeedConfig {
         digest_hours: 0,
         daily_cap: 0,
         role_id: None,
-        only_listed: false,
+        filter: FilterMode::All,
+        kinds: vec!["anime".into(), "manga".into()],
         last_digest_at: 0,
     }
 }
@@ -29,7 +30,7 @@ fn entry(at: i64, pop: i64, format: &str, genres: &[&str]) -> AiringEntry {
 }
 
 fn due(c: &FeedConfig, e: &AiringEntry) -> Decision {
-    decide(e, c, NOW, None, false, 0)
+    decide(e, c, NOW, false, false, 0)
 }
 
 #[test]
@@ -65,30 +66,74 @@ fn restart_catch_up_is_limited_to_six_hours() {
 fn already_posted_episodes_are_never_repeated() {
     let c = cfg();
     assert_eq!(
-        decide(&entry(NOW - 10, 9999, "TV", &[]), &c, NOW, None, true, 0),
+        decide(&entry(NOW - 10, 9999, "TV", &[]), &c, NOW, false, true, 0),
         Decision::Skip(Skip::AlreadyPosted)
     );
 }
 
+fn with(mode: FilterMode) -> FeedConfig {
+    let mut c = cfg();
+    c.filter = mode;
+    c
+}
+
 #[test]
-fn popularity_format_and_genre_filters() {
+fn default_mode_announces_every_release_of_every_work() {
     let c = cfg();
+    assert_eq!(c.filter, FilterMode::All);
+    // Tiny, odd-format shows are included by default.
+    assert_eq!(due(&c, &entry(NOW - 10, 3, "OVA", &[])), Decision::Post);
+    assert_eq!(due(&c, &entry(NOW - 10, 99_999, "TV", &[])), Decision::Post);
+}
+
+#[test]
+fn popular_mode_uses_the_threshold() {
+    let c = with(FilterMode::Popular);
     assert_eq!(
         due(&c, &entry(NOW - 10, 1499, "TV", &[])),
         Decision::Skip(Skip::BelowPopularity)
     );
     assert_eq!(due(&c, &entry(NOW - 10, 1500, "TV", &[])), Decision::Post);
+}
+
+#[test]
+fn profiles_mode_needs_a_member_favourite() {
+    let c = with(FilterMode::Profiles);
+    let e = entry(NOW - 10, 99_999, "TV", &[]);
     assert_eq!(
-        due(&c, &entry(NOW - 10, 9999, "OVA", &[])),
+        decide(&e, &c, NOW, false, false, 0),
+        Decision::Skip(Skip::NotInProfiles)
+    );
+    assert_eq!(decide(&e, &c, NOW, true, false, 0), Decision::Post);
+}
+
+#[test]
+fn formats_mode_checks_the_selected_formats_and_kinds() {
+    let mut c = with(FilterMode::Formats);
+    c.formats = vec!["MOVIE".into()];
+    assert_eq!(
+        due(&c, &entry(NOW - 10, 1, "TV", &[])),
         Decision::Skip(Skip::WrongFormat)
     );
-    let mut no_format = entry(NOW - 10, 9999, "TV", &[]);
+    assert_eq!(due(&c, &entry(NOW - 10, 1, "MOVIE", &[])), Decision::Post);
+    let mut no_format = entry(NOW - 10, 9999, "MOVIE", &[]);
     no_format.media.format = None;
     assert_eq!(
         due(&c, &no_format),
         Decision::Skip(Skip::WrongFormat),
         "unknown format is not announced"
     );
+    // Airing schedules exist for anime only: a kinds list without anime announces nothing.
+    c.kinds = vec!["manga".into(), "novel".into()];
+    assert_eq!(
+        due(&c, &entry(NOW - 10, 1, "MOVIE", &[])),
+        Decision::Skip(Skip::WrongKind)
+    );
+}
+
+#[test]
+fn excluded_genres_apply_in_every_mode() {
+    let c = cfg();
     assert_eq!(
         due(&c, &entry(NOW - 10, 9999, "TV", &["Action", "ecchi"])),
         Decision::Skip(Skip::ExcludedGenre),
@@ -97,87 +142,25 @@ fn popularity_format_and_genre_filters() {
 }
 
 #[test]
-fn muted_and_pinned_lists() {
-    let c = cfg();
-    let small = entry(NOW - 10, 10, "OVA", &["Ecchi"]);
-    assert_eq!(
-        decide(&small, &c, NOW, Some(ListMode::Muted), false, 0),
-        Decision::Skip(Skip::Muted)
-    );
-    assert_eq!(
-        decide(
-            &entry(NOW - 10, 99_999, "TV", &[]),
-            &c,
-            NOW,
-            Some(ListMode::Muted),
-            false,
-            0
-        ),
-        Decision::Skip(Skip::Muted)
-    );
-    assert_eq!(
-        decide(&small, &c, NOW, Some(ListMode::Pinned), false, 0),
-        Decision::Post,
-        "pins are always posted"
-    );
-    let listed_small = entry(NOW - 10, 10, "TV", &[]);
-    assert_eq!(
-        decide(&listed_small, &c, NOW, Some(ListMode::Listed), false, 0),
-        Decision::Post,
-        "listed shows skip the threshold"
-    );
-}
-
-#[test]
-fn only_listed_mode_ignores_everything_else() {
-    let mut c = cfg();
-    c.only_listed = true;
-    assert_eq!(
-        due(&c, &entry(NOW - 10, 99_999, "TV", &[])),
-        Decision::Skip(Skip::NotListed)
-    );
-    assert_eq!(
-        decide(
-            &entry(NOW - 10, 1, "TV", &[]),
-            &c,
-            NOW,
-            Some(ListMode::Listed),
-            false,
-            0
-        ),
-        Decision::Post
-    );
-    assert_eq!(
-        decide(
-            &entry(NOW - 10, 1, "OVA", &[]),
-            &c,
-            NOW,
-            Some(ListMode::Pinned),
-            false,
-            0
-        ),
-        Decision::Post
-    );
-}
-
-#[test]
 fn daily_cap_and_digest() {
     let mut c = cfg();
     c.daily_cap = 3;
     let e = entry(NOW - 10, 5000, "TV", &[]);
-    assert_eq!(decide(&e, &c, NOW, None, false, 2), Decision::Post);
+    assert_eq!(decide(&e, &c, NOW, false, false, 2), Decision::Post);
     assert_eq!(
-        decide(&e, &c, NOW, None, false, 3),
+        decide(&e, &c, NOW, false, false, 3),
         Decision::Skip(Skip::DailyCap)
-    );
-    assert_eq!(
-        decide(&e, &c, NOW, Some(ListMode::Pinned), false, 99),
-        Decision::Post,
-        "pins ignore the cap"
     );
     c.daily_cap = 0;
     c.digest_hours = 6;
-    assert_eq!(decide(&e, &c, NOW, None, false, 0), Decision::Digest);
+    assert_eq!(decide(&e, &c, NOW, false, false, 0), Decision::Digest);
+}
+
+#[test]
+fn compact_lines_have_no_character_art() {
+    let e = entry(NOW - 10, 5000, "TV", &[]);
+    let line = compact_line(&e.media, e.episode, e.airing_at);
+    assert!(line.starts_with("• **Show**") && !line.contains("http"));
 }
 
 #[test]

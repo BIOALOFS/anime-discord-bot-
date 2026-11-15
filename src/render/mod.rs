@@ -3,6 +3,9 @@
 //! Network fetching is async and bounded; all drawing is pure CPU work run in `spawn_blocking`.
 //! The bundled font has Latin glyphs only (no Arabic shaping), so text that needs Arabic stays in embeds
 //! and glyphs missing from the font are dropped from the images.
+//! (The grid, podium, tier and share renderers are no longer reachable from a command; the banner and guessing-game
+//! renderers are the live part.)
+#![allow(dead_code)]
 
 mod draw;
 mod fetch;
@@ -16,8 +19,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-
-pub use draw::tier_order;
 
 pub const CELL_W: u32 = 230;
 pub const CELL_H: u32 = 345;
@@ -58,6 +59,63 @@ pub struct Rendered {
     pub ext: &'static str,
     pub width: u32,
     pub height: u32,
+}
+
+/// Where a profile banner comes from. Stored as text in `profiles.banner`:
+/// `preset:<key>`, `color:#rrggbb`, `image:<custom image id>` or (legacy) an allow-listed https URL.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BannerSpec {
+    Preset(String),
+    Color(u32),
+    Image(i64),
+    Url(String),
+}
+
+/// `(key, Arabic label, top colour, bottom colour)`.
+pub const BANNER_PRESETS: &[(&str, &str, [u8; 3], [u8; 3])] = &[
+    ("slate", "رمادي هادئ", [52, 58, 76], [24, 27, 38]),
+    ("sunset", "غروب", [255, 138, 92], [120, 40, 110]),
+    ("ocean", "محيط", [56, 189, 248], [30, 58, 138]),
+    ("forest", "غابة", [74, 190, 120], [18, 70, 50]),
+    ("sakura", "ساكورا", [255, 183, 213], [190, 80, 130]),
+    ("night", "ليل", [88, 70, 200], [14, 12, 40]),
+];
+
+pub const DEFAULT_BANNER_PRESET: &str = "slate";
+
+impl BannerSpec {
+    /// Unknown or empty values give the neutral default gradient.
+    pub fn parse(stored: Option<&str>) -> Self {
+        let s = stored.map(str::trim).unwrap_or("");
+        if let Some(k) = s.strip_prefix("preset:") {
+            if BANNER_PRESETS.iter().any(|p| p.0 == k) {
+                return Self::Preset(k.to_string());
+            }
+        } else if let Some(c) = s.strip_prefix("color:") {
+            let hex = c.trim_start_matches('#');
+            if hex.len() == 6 {
+                if let Ok(v) = u32::from_str_radix(hex, 16) {
+                    return Self::Color(v);
+                }
+            }
+        } else if let Some(id) = s.strip_prefix("image:") {
+            if let Ok(id) = id.parse() {
+                return Self::Image(id);
+            }
+        } else if s.starts_with("https://") {
+            return Self::Url(s.to_string());
+        }
+        Self::Preset(DEFAULT_BANNER_PRESET.to_string())
+    }
+
+    pub fn encode(&self) -> String {
+        match self {
+            Self::Preset(k) => format!("preset:{k}"),
+            Self::Color(c) => format!("color:#{c:06x}"),
+            Self::Image(id) => format!("image:{id}"),
+            Self::Url(u) => u.clone(),
+        }
+    }
 }
 
 pub type Images = HashMap<String, Arc<RgbaImage>>;
@@ -246,6 +304,30 @@ impl Renderer {
             draw::share_image(&cells, header.as_ref(), accent, theme, imgs)
         })
         .await
+    }
+
+    /// The 1200x300 strip above the profile card. `uploaded` is the stored picture for `BannerSpec::Image`.
+    pub async fn banner(
+        &self,
+        spec: BannerSpec,
+        uploaded: Option<Vec<u8>>,
+        title: String,
+    ) -> Option<Rendered> {
+        let base = match (&spec, uploaded) {
+            (BannerSpec::Image(_), Some(bytes)) => {
+                tokio::task::spawn_blocking(move || first_frame(&bytes))
+                    .await
+                    .ok()?
+            }
+            (BannerSpec::Url(u), _) => {
+                let images = self.fetch_all(vec![u.clone()]).await;
+                images.get(u).map(|i| (**i).clone())
+            }
+            _ => None,
+        };
+        tokio::task::spawn_blocking(move || draw::banner(base.as_ref(), &spec, &title))
+            .await
+            .ok()?
     }
 
     /// A cropped, blurred piece of a character picture for the guessing game (never cached: random).

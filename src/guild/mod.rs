@@ -6,11 +6,21 @@
 use moka::future::Cache;
 use poise::serenity_prelude as serenity;
 use sqlx::{Row, SqlitePool};
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 pub const MAX_EXTRA_CHANNELS: usize = 5;
 /// Commands that always work so a server can be configured.
-const EXEMPT_ROOTS: &[&str] = &["settings", "help"];
+const EXEMPT_ROOTS: &[&str] = &[
+    "settings",
+    "help",
+    "admin",
+    "set-bot-channel",
+    "set-notifications-channel",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelSettings {
@@ -73,17 +83,42 @@ pub enum ExtraResult {
 pub struct GuildStore {
     pool: SqlitePool,
     cache: Cache<i64, Arc<ChannelSettings>>,
+    /// Last command time per (server, user) for the per-server cooldown.
+    last_use: Mutex<HashMap<(i64, i64), Instant>>,
 }
 
 impl GuildStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool,
+            last_use: Mutex::new(HashMap::new()),
             cache: Cache::builder()
                 .max_capacity(2_000)
                 .time_to_live(Duration::from_secs(30))
                 .build(),
         }
+    }
+
+    /// `Some(wait)` when the user must still wait `wait` before another command (server cooldown, `secs` > 0).
+    pub fn cooldown_left(&self, guild: i64, user: i64, secs: u64) -> Option<Duration> {
+        if secs == 0 {
+            return None;
+        }
+        let mut map = self.last_use.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        // Bounded: forget entries older than the longest cooldown.
+        if map.len() > 10_000 {
+            map.retain(|_, t| now.duration_since(*t) < Duration::from_secs(600));
+        }
+        let limit = Duration::from_secs(secs);
+        if let Some(last) = map.get(&(guild, user)) {
+            let since = now.duration_since(*last);
+            if since < limit {
+                return Some(limit - since);
+            }
+        }
+        map.insert((guild, user), now);
+        None
     }
 
     pub async fn settings(&self, guild: i64) -> Result<Arc<ChannelSettings>, sqlx::Error> {
@@ -208,6 +243,15 @@ pub fn is_admin(perms: Option<serenity::Permissions>) -> bool {
     perms.is_some_and(|p| p.manage_guild() || p.administrator())
 }
 
+/// Admin commands: Manage Guild / Administrator, or the server's configured management role.
+pub fn can_manage(
+    perms: Option<serenity::Permissions>,
+    member_roles: &[i64],
+    manager_role: Option<i64>,
+) -> bool {
+    is_admin(perms) || manager_role.is_some_and(|r| member_roles.contains(&r))
+}
+
 /// Shared by commands, autocomplete and components: `Some(text)` is the ephemeral refusal.
 /// Errors fail open (a broken settings read must not lock everyone out).
 pub async fn denial(
@@ -253,6 +297,25 @@ pub async fn command_check(ctx: crate::error::Context<'_>) -> Result<bool, crate
     }
     let admin = is_admin(ctx.author_member().await.and_then(|m| m.permissions));
     let data = ctx.data();
+    if let Some(g) = ctx.guild_id() {
+        let secs = crate::db::admin::cooldown_secs(&data.db, g.get() as i64)
+            .await
+            .unwrap_or(0);
+        if let Some(wait) =
+            data.guilds
+                .cooldown_left(g.get() as i64, ctx.author().id.get() as i64, secs as u64)
+        {
+            if !admin {
+                ctx.send(
+                    poise::CreateReply::default()
+                        .content(crate::i18n::cooldown_wait(wait.as_secs() + 1))
+                        .ephemeral(true),
+                )
+                .await?;
+                return Ok(false);
+            }
+        }
+    }
     let Some(text) = denial(
         &data.guilds,
         &ctx.serenity_context().http,

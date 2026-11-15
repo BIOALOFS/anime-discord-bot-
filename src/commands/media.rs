@@ -9,7 +9,6 @@ use crate::{
         AniError, ContentPolicy, MediaKind, SafeAniList,
     },
     db::{
-        feed::{self, ListMode},
         profile as pdb,
         works::{self, MediaCacheRow},
     },
@@ -30,7 +29,6 @@ use std::sync::Arc;
 
 const BTN_CHARACTERS: &str = "characters";
 const BTN_STAR: &str = "star";
-const BTN_BELL: &str = "bell";
 const BTN_REROLL: &str = "reroll";
 const MAX_HISTORY: usize = 8;
 
@@ -61,8 +59,6 @@ pub struct MediaView {
     api: Arc<SafeAniList>,
     pool: SqlitePool,
     user: i64,
-    guild: Option<i64>,
-    is_admin: bool,
     policy: ContentPolicy,
     source: Source,
     mode: Mode,
@@ -105,13 +101,10 @@ pub fn media_cache_row(m: &Media, now: i64) -> MediaCacheRow {
 
 impl MediaView {
     pub async fn new(ctx: Context<'_>, source: Source, mode: Mode) -> Self {
-        let admin = crate::guild::is_admin(ctx.author_member().await.and_then(|m| m.permissions));
         let mut v = Self {
             api: ctx.data().anilist.clone(),
             pool: ctx.data().db.clone(),
             user: ctx.author().id.get() as i64,
-            guild: ctx.guild_id().map(|g| g.get() as i64),
-            is_admin: admin,
             policy: policy(ctx),
             source,
             mode,
@@ -297,35 +290,6 @@ impl MediaView {
         Outcome::Update
     }
 
-    /// 🔔: admins add the anime to the notification list; members send a request for approval.
-    async fn bell(&mut self) -> Outcome {
-        let (Some(m), Some(guild)) = (self.current_card(), self.guild) else {
-            self.whisper = Some(Whisper::text(i18n::GUILD_ONLY));
-            return Outcome::Keep;
-        };
-        let title = m.title.main().to_string();
-        let text = if self.is_admin {
-            match feed::set_list_entry(&self.pool, guild, m.id, &title, ListMode::Listed).await {
-                Ok(()) => i18n::ALERT_ADDED.to_string(),
-                Err(e) => {
-                    tracing::warn!("alert list update failed: {e}");
-                    i18n::ERR_GENERIC.to_string()
-                }
-            }
-        } else {
-            match feed::add_request(&self.pool, guild, m.id, &title, self.user).await {
-                Ok(true) => i18n::ALERT_REQUESTED.to_string(),
-                Ok(false) => i18n::ALERT_ALREADY_REQUESTED.to_string(),
-                Err(e) => {
-                    tracing::warn!("alert request failed: {e}");
-                    i18n::ERR_GENERIC.to_string()
-                }
-            }
-        };
-        self.whisper = Some(Whisper::text(text));
-        Outcome::Keep
-    }
-
     fn card_rows(&self, m: &Media, enabled: bool) -> Vec<serenity::CreateActionRow> {
         let secondary = serenity::ButtonStyle::Secondary;
         let (star_label, star_style) = if self.added {
@@ -345,15 +309,6 @@ impl MediaView {
                 .style(secondary)
                 .disabled(!enabled),
         ];
-        if kind_of(m) == MediaKind::Anime && self.guild.is_some() {
-            main.push(
-                serenity::CreateButton::new(BTN_BELL)
-                    .label(i18n::BTN_ALERTS)
-                    .emoji('🔔')
-                    .style(secondary)
-                    .disabled(!enabled),
-            );
-        }
         if let Some(url) = &m.site_url {
             main.push(
                 serenity::CreateButton::new_link(url).label(format!("🔗 {}", i18n::BTN_ANILIST)),
@@ -425,7 +380,6 @@ impl View for MediaView {
                 None => Outcome::Keep,
             },
             BTN_STAR => self.toggle_favourite().await,
-            BTN_BELL => self.bell().await,
             BTN_CHARACTERS => self.open_characters().await,
             BTN_REROLL => self.reroll().await,
             PICK_ID => self.open_picked(values).await,

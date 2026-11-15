@@ -17,6 +17,7 @@ pub enum Section {
 }
 
 impl Section {
+    #[allow(dead_code)]
     pub fn key(self) -> &'static str {
         match self {
             Self::Characters => "characters",
@@ -32,6 +33,7 @@ impl Section {
     }
 }
 
+#[allow(dead_code)] // tier / image id stay part of the model
 #[derive(Debug, Clone)]
 pub struct Item {
     pub section: Section,
@@ -116,30 +118,6 @@ impl Item {
     pub fn display_title(&self) -> Option<&str> {
         self.custom_title.as_deref()
     }
-}
-
-/// A page of items (already converted); cache refresh is the caller's job.
-pub async fn load_page(
-    pool: &SqlitePool,
-    user: i64,
-    section: Section,
-    group: Option<i64>,
-    list: Option<&str>,
-    offset: i64,
-    limit: i64,
-) -> Result<Vec<Item>, pdb::ProfileError> {
-    Ok(match section {
-        Section::Characters => pdb::list_page(pool, user, group, offset, limit)
-            .await?
-            .iter()
-            .map(Item::from_character)
-            .collect(),
-        Section::Works => works::list_page(pool, user, group, list, offset, limit)
-            .await?
-            .iter()
-            .map(Item::from_work)
-            .collect(),
-    })
 }
 
 pub async fn count(
