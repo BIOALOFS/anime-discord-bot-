@@ -5,4 +5,5 @@ pub mod format;
 pub mod pagination;
 pub mod select;
 pub mod session;
+pub mod styles;
 pub mod text;

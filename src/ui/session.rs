@@ -4,8 +4,9 @@
 use crate::{error::Context, error::Error, i18n};
 use poise::serenity_prelude as serenity;
 use serenity::{
-    ComponentInteractionCollector, ComponentInteractionDataKind, CreateActionRow, CreateEmbed,
-    CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
+    ComponentInteractionCollector, ComponentInteractionDataKind, CreateActionRow, CreateAttachment,
+    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, EditInteractionResponse,
 };
 use std::{future::Future, time::Duration};
 
@@ -16,14 +17,23 @@ pub struct Page {
     pub content: Option<String>,
     pub embeds: Vec<CreateEmbed>,
     pub components: Vec<CreateActionRow>,
+    /// Attached images; an edit always replaces the previous attachments.
+    pub files: Vec<CreateAttachment>,
 }
 
 impl Page {
+    #[allow(dead_code)] // used by the image styles (collage, podium, tier)
+    pub fn with_files(mut self, files: Vec<CreateAttachment>) -> Self {
+        self.files = files;
+        self
+    }
+
     pub fn embed(embed: CreateEmbed, components: Vec<CreateActionRow>) -> Self {
         Self {
             content: None,
             embeds: vec![embed],
             components,
+            files: Vec::new(),
         }
     }
 
@@ -32,23 +42,31 @@ impl Page {
         self
     }
 
-    fn into_reply(self) -> poise::CreateReply {
+    pub fn into_reply(self) -> poise::CreateReply {
         let mut r = poise::CreateReply::default().content(self.content.unwrap_or_default());
         for e in self.embeds {
             r = r.embed(e);
+        }
+        for f in self.files {
+            r = r.attachment(f);
         }
         r.components(self.components)
     }
 
     fn into_edit(self) -> EditInteractionResponse {
-        EditInteractionResponse::new()
+        let mut e = EditInteractionResponse::new()
             .content(self.content.unwrap_or_default())
             .embeds(self.embeds)
             .components(self.components)
+            .clear_attachments();
+        for f in self.files {
+            e = e.new_attachment(f);
+        }
+        e
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// Re-render the message.
     Update,
@@ -56,6 +74,8 @@ pub enum Outcome {
     Keep,
     /// Disable the components and end the session.
     Close,
+    /// Leave the message as is and show this text to the presser only (ephemeral follow-up).
+    Whisper(String),
 }
 
 pub trait View: Send {
@@ -116,6 +136,15 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
             _ => Vec::new(),
         };
         let outcome = view.on_interaction(&i.data.custom_id, &values).await;
+        if let Outcome::Whisper(text) = &outcome {
+            let followup = CreateInteractionResponseFollowup::new()
+                .content(text)
+                .ephemeral(true);
+            if let Err(e) = i.create_followup(sctx, followup).await {
+                tracing::debug!("could not send ephemeral follow-up: {e}");
+            }
+            continue;
+        }
         if outcome != Outcome::Keep {
             let page = view.render(outcome != Outcome::Close).into_edit();
             if let Err(e) = i.edit_response(sctx, page).await {

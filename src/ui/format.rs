@@ -94,36 +94,6 @@ pub fn relation_ar(r: &str) -> &'static str {
     }
 }
 
-pub fn gender_ar(g: &str) -> String {
-    match g.to_lowercase().as_str() {
-        "male" => "ذكر".into(),
-        "female" => "أنثى".into(),
-        "non-binary" | "nonbinary" => "غير ثنائي".into(),
-        _ => g.to_string(),
-    }
-}
-
-pub fn month_ar(m: u32) -> &'static str {
-    const NAMES: [&str; 12] = [
-        "يناير",
-        "فبراير",
-        "مارس",
-        "أبريل",
-        "مايو",
-        "يونيو",
-        "يوليو",
-        "أغسطس",
-        "سبتمبر",
-        "أكتوبر",
-        "نوفمبر",
-        "ديسمبر",
-    ];
-    NAMES
-        .get((m as usize).wrapping_sub(1))
-        .copied()
-        .unwrap_or("")
-}
-
 pub fn weekday_ar(w: Weekday) -> &'static str {
     match w {
         Weekday::Mon => "الاثنين",
@@ -242,13 +212,5 @@ mod tests {
         assert_eq!(season_from_date(2026, 6), ("SUMMER", 2026));
         assert_eq!(season_from_date(2026, 8), ("SUMMER", 2026));
         assert_eq!(season_from_date(2026, 9), ("FALL", 2026));
-    }
-
-    #[test]
-    fn month_names() {
-        assert_eq!(month_ar(1), "يناير");
-        assert_eq!(month_ar(12), "ديسمبر");
-        assert_eq!(month_ar(0), "");
-        assert_eq!(month_ar(13), "");
     }
 }

@@ -1,6 +1,7 @@
 pub mod airing;
 pub mod character;
 pub mod media;
+pub mod profile;
 pub mod random;
 pub mod seasonal;
 

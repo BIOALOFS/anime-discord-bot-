@@ -3,12 +3,21 @@ name = "anpot"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Faster allocator than musl's default; enabled by default so release/static builds use it.
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
+ab_glyph = "0.2"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dotenvy = "0.15"
 envy = "0.4"
+futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 governor = "0.8"
+mimalloc = { version = "0.1", optional = true }
 moka = { version = "0.12", features = ["future"] }
 poise = "0.6"
 rand = "0.9"
@@ -22,5 +31,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
+opt-level = 3
 lto = "thin"
+codegen-units = 1
 strip = true
+# panic stays "unwind": a panic in one task must not take the whole bot down.

@@ -1,0 +1,80 @@
+name: Build static binary
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Build static release binary
+        run: cargo build --release --target ${{ env.TARGET }}
+
+      - name: Verify the binary is static
+        run: |
+          BIN=target/${{ env.TARGET }}/release/anpot
+          file "$BIN"
+          file "$BIN" | grep -E "statically linked|static-pie linked"
+          if ldd "$BIN" 2>&1; then echo "binary is dynamically linked" >&2; exit 1; fi
+          ls -l "$BIN"
+          echo "Binary size: $(du -h "$BIN" | cut -f1)"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ env.TARGET }}/release/anpot dist/anpot
+          chmod +x dist/anpot
+          cp .env.example dist/.env.example
+          cp RUN.md dist/RUN.md
+          cd dist && zip -9 ../anpot-linux.zip anpot .env.example RUN.md
+          unzip -l ../anpot-linux.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anpot-linux
+          path: anpot-linux.zip
+          retention-days: 30
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: anpot-linux
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: anpot-linux.zip
