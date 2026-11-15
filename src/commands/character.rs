@@ -1,6 +1,6 @@
 //! `/character search` and the interactive character card (also used by `/random character`).
 
-use super::{buttons, fail, parse_id, policy, say_ephemeral};
+use super::{buttons, fail, parse_id, policy, roster::Roster, say_ephemeral};
 use crate::{
     anilist::{
         models::{Character, MediaRef},
@@ -18,7 +18,7 @@ use crate::{
             CLOSE,
         },
         select::{character_choices, pick_row, PICK_ID},
-        session::{self, Outcome, Page, View},
+        session::{self, ModalSpec, Outcome, Page, View},
         text::clean_description_max,
     },
 };
@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 const BTN_WORKS: &str = "works";
 const BTN_RANDOM: &str = "random_character";
+const BTN_ROSTER: &str = "open_roster";
 const BTN_DESCRIBE: &str = "describe";
 const BTN_ADD: &str = "add_to_profile";
 const DESCRIPTION_CHARS: usize = 200;
@@ -48,6 +49,7 @@ pub struct CharacterView {
     notice: Option<String>,
     pool: SqlitePool,
     user: i64,
+    roster: Option<Roster>,
 }
 
 /// Appearances that may be shown under the given policy.
@@ -79,6 +81,7 @@ impl CharacterView {
             notice: None,
             pool,
             user,
+            roster: None,
         }
     }
 
@@ -122,6 +125,9 @@ impl CharacterView {
 
 impl View for CharacterView {
     fn render(&self, enabled: bool) -> Page {
+        if let Some(r) = &self.roster {
+            return r.render(enabled);
+        }
         let (embed, mut rows) = match &self.mode {
             Mode::Pick(list) => {
                 let body = list
@@ -167,7 +173,11 @@ impl View for CharacterView {
                             .label(format!("🔗 {}", i18n::BTN_ANILIST)),
                     );
                 }
-                let mut extra = Vec::new();
+                let mut extra = vec![serenity::CreateButton::new(BTN_ROSTER)
+                    .label(i18n::BTN_ROSTER)
+                    .emoji('👥')
+                    .style(serenity::ButtonStyle::Secondary)
+                    .disabled(!enabled)];
                 if !self.history.is_empty() {
                     extra.push(back_button(enabled));
                 }
@@ -193,8 +203,24 @@ impl View for CharacterView {
         Page::embed(embed.build(), rows).notice(self.notice.clone())
     }
 
+    fn modal_for(&self, id: &str) -> Option<ModalSpec> {
+        self.roster.as_ref().and_then(|r| r.modal_for(id))
+    }
+
+    async fn on_modal(&mut self, id: &str, input: String) -> Outcome {
+        let step = match self.roster.as_mut() {
+            Some(r) => r.on_modal(id, input).await,
+            None => return Outcome::Keep,
+        };
+        step.apply(&mut self.roster)
+    }
+
     async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
         self.notice = None;
+        if let Some(r) = self.roster.as_mut() {
+            let step = r.handle(id, values).await;
+            return step.apply(&mut self.roster);
+        }
         match id {
             CLOSE => Outcome::Close,
             BACK => match self.history.pop() {
@@ -216,6 +242,17 @@ impl View for CharacterView {
                 Outcome::Update
             }
             BTN_ADD => self.add_to_profile().await,
+            BTN_ROSTER => {
+                let Mode::Card(c) = &self.mode else {
+                    return Outcome::Keep;
+                };
+                match Roster::start(self.api.clone(), self.policy, c).await {
+                    Ok(Some(r)) => self.roster = Some(r),
+                    Ok(None) => self.notice = Some(i18n::ROSTER_NO_WORKS.to_string()),
+                    Err(e) => return self.fail(e),
+                }
+                Outcome::Update
+            }
             BTN_DESCRIBE => {
                 let Mode::Card(c) = &self.mode else {
                     return Outcome::Keep;

@@ -9,4 +9,5 @@ pub mod safety;
 pub use client::AniError;
 pub use safe::{
     AiringEntry, AiringInfo, CharacterLookup, ContentPolicy, MediaKind, SafeAniList, SeasonalQuery,
+    CAST_PAGE_SIZE,
 };

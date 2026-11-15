@@ -74,6 +74,17 @@ pub struct AiringInfo {
     pub previous_at: Option<i64>,
 }
 
+/// One AniList page (25) of a work's cast. `index` is the character's rank in the full cast (0-based);
+/// hidden characters leave gaps so numbering stays stable across pages.
+#[derive(Debug, Clone)]
+pub struct CastPage {
+    pub total: usize,
+    pub entries: Vec<(usize, Character, String)>,
+}
+
+/// AniList page size used for the cast query.
+pub const CAST_PAGE_SIZE: usize = 25;
+
 pub struct SafeAniList {
     client: AniListClient,
     /// Safety verdict per character id (true = safe to show), from the 50-appearance window.
@@ -237,6 +248,40 @@ impl SafeAniList {
             has_next,
             last_page,
         })
+    }
+
+    /// One page of the cast, each character judged by its own appearances (cached 6 h per page).
+    pub async fn work_cast_page(
+        &self,
+        id: i64,
+        page: usize,
+        policy: ContentPolicy,
+    ) -> Result<CastPage, AniError> {
+        let key = format!("wc:{id}:{page}");
+        let vars = json!({"id": id, "page": page});
+        let Some(doc) = self
+            .client
+            .get(Which::Details, key, queries::WORK_CAST, vars)
+            .await?
+        else {
+            return Ok(CastPage {
+                total: 0,
+                entries: Vec::new(),
+            });
+        };
+        let edges: Vec<CharacterEdge> = parse(&doc, "/Media/characters/edges")?;
+        let total = doc
+            .pointer("/Media/characters/pageInfo/total")
+            .and_then(Value::as_u64)
+            .map_or(edges.len(), |n| n as usize);
+        let base = page.saturating_sub(1) * CAST_PAGE_SIZE;
+        let entries = edges
+            .into_iter()
+            .enumerate()
+            .filter(|(_, e)| safety::character_allowed(&e.node, policy.allow_adult))
+            .map(|(i, e)| (base + i, e.node, e.role.unwrap_or_default()))
+            .collect();
+        Ok(CastPage { total, entries })
     }
 
     pub async fn recommendations(

@@ -230,3 +230,22 @@ pub const TIER_NONE: &str = "لم تضع أي شخصية في فئة بعد، ا
 pub const SHARE_TITLE: &str = "صورة بروفايلك جاهزة للمشاركة 📸";
 pub const BTN_DESCRIPTION: &str = "الوصف";
 pub const NO_DESCRIPTION: &str = "لا يوجد وصف متاح لهذه الشخصية.";
+
+// ---- work roster ----
+pub const BTN_ROSTER: &str = "شخصيات العمل";
+pub const BTN_BACK_TO_LIST: &str = "رجوع للقائمة";
+pub const ROSTER_TITLE: &str = "شخصيات";
+pub const ROSTER_PICK_WORK: &str = "هذه الشخصية تظهر في عدة أعمال، اختر العمل:";
+pub const ROSTER_WORK_PLACEHOLDER: &str = "اختر العمل…";
+pub const ROSTER_RANGE_PLACEHOLDER: &str = "انتقل إلى نطاق…";
+pub const ROSTER_GROUP_PLACEHOLDER: &str = "اختر مجموعة النطاقات…";
+pub const ROSTER_CHAR_PLACEHOLDER: &str = "افتح شخصية…";
+pub const ROSTER_NO_WORKS: &str = "لا توجد أعمال معروفة لهذه الشخصية.";
+pub const ROSTER_JUMP_TITLE: &str = "الانتقال إلى صفحة";
+pub const ROSTER_BAD_PAGE: &str = "رقم صفحة غير صالح.";
+pub fn roster_jump_label(pages: usize) -> String {
+    format!("رقم الصفحة (1–{pages})")
+}
+pub fn roster_footer(page: usize, pages: usize, total: usize) -> String {
+    format!("صفحة {page} / {pages} · {total} شخصية · {POWERED_BY}")
+}
