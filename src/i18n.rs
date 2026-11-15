@@ -297,3 +297,4 @@ pub const BIO_TOO_LONG: &str = "النبذة أطول من 300 حرف.";
 pub const TITLE_TOO_LONG: &str = "الاسم أطول من 40 حرفًا.";
 pub const EDIT_NEEDS_CHARACTER: &str = "اختر شخصية من بروفايلك في خيار «الشخصية».";
 pub const EDIT_NEEDS_WORK: &str = "اختر عملًا من أعمالك في خيار «القيمة».";
+pub const CAST_PLACEHOLDER: &str = "اختر شخصية لعرض بطاقتها…";

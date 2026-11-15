@@ -170,8 +170,16 @@ pub(super) async fn take_upload(
         private_reply(ctx, i18n::IMAGE_DOWNLOAD_FAILED).await?;
         return Ok(None);
     };
-    if !allow_gif && imaging::sniff(&bytes) == Some(imaging::Format::Gif) {
-        private_reply(ctx, i18n::BANNER_NO_GIF).await?;
+    if !imaging::format_allowed(&bytes, allow_gif) {
+        private_reply(
+            ctx,
+            if allow_gif {
+                i18n::IMAGE_INVALID
+            } else {
+                i18n::BANNER_NO_GIF
+            },
+        )
+        .await?;
         return Ok(None);
     }
     match tokio::task::spawn_blocking(move || imaging::process(&bytes)).await {

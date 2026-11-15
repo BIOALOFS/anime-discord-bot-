@@ -68,6 +68,8 @@ pub struct CharacterView {
     /// Game / visual-novel matches shown next to the AniList ones in the pick menu.
     extra: Vec<Work>,
     cover: Option<Arc<Vec<u8>>>,
+    /// Opened from another view (work card, /top): always offer Back, which returns to that view.
+    from_parent: bool,
 }
 
 /// Appearances that may be shown under the given policy.
@@ -104,7 +106,19 @@ impl CharacterView {
             providers: None,
             extra: Vec::new(),
             cover: None,
+            from_parent: false,
         }
+    }
+
+    /// Mark the view as a child of another view.
+    pub fn with_back(mut self) -> Self {
+        self.from_parent = true;
+        self
+    }
+
+    /// Back at the first screen of a child view means "return to the parent".
+    pub fn wants_to_leave(&self, id: &str) -> bool {
+        self.from_parent && id == BACK && self.history.is_empty() && self.roster.is_none()
     }
 
     /// Attach the provider handle and game/VN character matches.
@@ -242,7 +256,7 @@ impl View for CharacterView {
                     .emoji('👥')
                     .style(serenity::ButtonStyle::Secondary)
                     .disabled(!enabled)];
-                if !self.history.is_empty() {
+                if !self.history.is_empty() || self.from_parent {
                     extra.push(back_button(enabled));
                 }
                 extra.push(close_button(enabled));
