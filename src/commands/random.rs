@@ -15,6 +15,9 @@ use poise::serenity_prelude as serenity;
 use std::time::Duration;
 
 async fn ac_genre(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
     let api = ctx.data().anilist.clone();
     let needle = partial.trim().to_lowercase();
     let genres = tokio::time::timeout(Duration::from_millis(2500), api.genres())

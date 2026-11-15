@@ -6,7 +6,7 @@ use poise::serenity_prelude as serenity;
 use serenity::{
     ComponentInteractionCollector, ComponentInteractionDataKind, CreateActionRow, CreateAttachment,
     CreateEmbed, CreateInteractionResponse, CreateInteractionResponseFollowup,
-    CreateInteractionResponseMessage, EditInteractionResponse,
+    CreateInteractionResponseMessage, CreateQuickModal, EditInteractionResponse,
 };
 use std::{future::Future, time::Duration};
 
@@ -78,8 +78,26 @@ pub enum Outcome {
     Whisper(String),
 }
 
+/// A one-field modal a button can open (e.g. "go to page").
+#[derive(Debug, Clone)]
+pub struct ModalSpec {
+    pub title: String,
+    pub label: String,
+}
+
 pub trait View: Send {
     fn render(&self, enabled: bool) -> Page;
+
+    /// Buttons that open a modal instead of a normal update. The modal must be the interaction's first
+    /// response, so the engine asks before acknowledging.
+    fn modal_for(&self, _id: &str) -> Option<ModalSpec> {
+        None
+    }
+
+    fn on_modal(&mut self, _id: &str, _input: String) -> impl Future<Output = Outcome> + Send {
+        async { Outcome::Keep }
+    }
+
     fn on_interaction(
         &mut self,
         id: &str,
@@ -123,6 +141,56 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
     let owner = ctx.author().id;
 
     while let Some(i) = next_owner_interaction(sctx, message_id, owner).await {
+        // The channel lock also applies to buttons, selects and modals of older messages.
+        let admin = crate::guild::is_admin(i.member.as_ref().and_then(|m| m.permissions));
+        if let Some(text) = crate::guild::denial(
+            &ctx.data().guilds,
+            &sctx.http,
+            i.guild_id,
+            i.channel_id,
+            admin,
+        )
+        .await
+        {
+            let refusal = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(text)
+                    .ephemeral(true),
+            );
+            if let Err(e) = i.create_response(sctx, refusal).await {
+                tracing::debug!("could not send channel refusal: {e}");
+            }
+            continue;
+        }
+        if let Some(spec) = view.modal_for(&i.data.custom_id) {
+            let builder = CreateQuickModal::new(spec.title)
+                .timeout(Duration::from_secs(120))
+                .short_field(spec.label);
+            let Ok(Some(answer)) = i.quick_modal(sctx, builder).await else {
+                continue;
+            };
+            if answer
+                .interaction
+                .create_response(sctx, CreateInteractionResponse::Acknowledge)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let input = answer.inputs.first().cloned().unwrap_or_default();
+            let outcome = view.on_modal(&i.data.custom_id, input).await;
+            if outcome != Outcome::Keep {
+                let page = view.render(outcome != Outcome::Close).into_edit();
+                if let Err(e) = answer.interaction.edit_response(sctx, page).await {
+                    tracing::debug!("could not edit message after modal: {e}");
+                    return Ok(());
+                }
+            }
+            if outcome == Outcome::Close {
+                return Ok(());
+            }
+            continue;
+        }
         // Acknowledge first so slow AniList calls never hit Discord's 3 s limit.
         if let Err(e) = i
             .create_response(sctx, CreateInteractionResponse::Acknowledge)

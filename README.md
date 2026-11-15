@@ -44,19 +44,6 @@ Small hosts (bot-hosting.net and similar) kill `cargo run --release`. Build in G
 The binary is a fully static `x86_64-unknown-linux-musl` build (rustls, bundled SQLite); migrations and the font are
 embedded, so no other files are required.
 
-## Deploy on Fly.io
-
-One machine, one volume, no HTTP port (the bot is a worker):
-
-```bash
-fly volume create data --size 1
-fly secrets set DISCORD_TOKEN=...
-fly deploy --ha=false
-fly scale count 1
-```
-
-`fly.toml` mounts the volume at `/data` and sets `DATABASE_URL=sqlite:///data/bot.db?mode=rwc`.
-
 ## Development
 
 ```bash

@@ -210,6 +210,9 @@ pub async fn own_or_reply(ctx: Context<'_>, input: &str) -> Result<Option<(i64, 
 
 /// Autocomplete over the caller's own favourites (values are `id:123`).
 pub async fn ac_own(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
     match db::search_own(&ctx.data().db, uid(ctx), partial, 25).await {
         Ok(hits) => to_choices(
             hits.into_iter()

@@ -56,6 +56,13 @@ pub const MEDIA_CHARACTERS: &str = "query($id: Int, $page: Int) { Media(id: $id)
     id name { full native } image { large } favourites siteUrl \
     media(perPage: 25, sort: [POPULARITY_DESC]) { pageInfo { hasNextPage } nodes { isAdult genres } } } } } } }";
 
+/// Full cast of a work, 25 per AniList page. Nested appearances are capped at 15 so a page stays under
+/// AniList's query-complexity limit.
+pub const WORK_CAST: &str = "query($id: Int, $page: Int) { Media(id: $id) { \
+    characters(page: $page, perPage: 25, sort: [ROLE, FAVOURITES_DESC]) { pageInfo { total lastPage hasNextPage } edges { role node { \
+    id name { full native } image { large } favourites siteUrl \
+    media(perPage: 15, sort: [POPULARITY_DESC]) { pageInfo { hasNextPage } nodes { id title { romaji english native } isAdult genres siteUrl } } } } } } }";
+
 pub const RECOMMENDATIONS: &str = with_media_fragment!(
     "query($id: Int, $page: Int) { Media(id: $id) { \
      recommendations(page: $page, perPage: 5, sort: [RATING_DESC]) { pageInfo { hasNextPage lastPage } nodes { mediaRecommendation { ...M } } } } }"

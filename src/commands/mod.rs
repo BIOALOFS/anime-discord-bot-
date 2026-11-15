@@ -3,7 +3,9 @@ pub mod character;
 pub mod media;
 pub mod profile;
 pub mod random;
+pub mod roster;
 pub mod seasonal;
+pub mod setup;
 
 use crate::{
     anilist::{AniError, ContentPolicy},

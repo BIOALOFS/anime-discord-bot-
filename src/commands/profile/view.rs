@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     anilist::{models::Character, CharacterLookup, ContentPolicy, SafeAniList},
-    commands::{buttons, policy, say_ephemeral},
+    commands::{buttons, policy, roster::Roster, say_ephemeral},
     db::profile::{self as db, Entry, Group, Profile},
     error::{Context, Error},
     i18n,
@@ -17,7 +17,7 @@ use crate::{
         embeds::Emb,
         pagination::{apply_nav, close_button, nav_row, page_count, parse_nav, CLOSE},
         select::{select_row, Choice},
-        session::{self, Outcome, Page, View},
+        session::{self, ModalSpec, Outcome, Page, View},
         styles::{self, Style},
     },
 };
@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 const STYLE_ID: &str = "style";
 const ANOTHER_ID: &str = "another";
+const ROSTER_ID: &str = "open_roster";
 
 pub struct ProfileView {
     pub api: Arc<SafeAniList>,
@@ -49,6 +50,8 @@ pub struct ProfileView {
     /// Rendered image for the collage / podium / tier styles (`None`: text fallback).
     pub image: Option<Arc<Rendered>>,
     pub image_label: String,
+    /// The work roster, shown in place of the profile while open.
+    pub roster: Option<Roster>,
 }
 
 impl ProfileView {
@@ -284,6 +287,9 @@ impl ProfileView {
 
 impl View for ProfileView {
     fn render(&self, enabled: bool) -> Page {
+        if let Some(r) = &self.roster {
+            return r.render(enabled);
+        }
         let hidden = self.entries.iter().filter(|e| !e.visible()).count();
         let embeds: Vec<_> = self.embeds().into_iter().map(Emb::build).collect();
 
@@ -316,6 +322,17 @@ impl View for ProfileView {
                     .disabled(!enabled),
             );
         }
+        if matches!(self.style, Style::Cards | Style::Gallery | Style::Random)
+            && self.card.is_some()
+        {
+            actions.push(
+                serenity::CreateButton::new(ROSTER_ID)
+                    .label(i18n::BTN_ROSTER)
+                    .emoji('👥')
+                    .style(serenity::ButtonStyle::Secondary)
+                    .disabled(!enabled),
+            );
+        }
         actions.push(close_button(enabled));
         rows.push(buttons(actions));
 
@@ -343,8 +360,38 @@ impl View for ProfileView {
         }
     }
 
+    fn modal_for(&self, id: &str) -> Option<ModalSpec> {
+        self.roster.as_ref().and_then(|r| r.modal_for(id))
+    }
+
+    async fn on_modal(&mut self, id: &str, input: String) -> Outcome {
+        let step = match self.roster.as_mut() {
+            Some(r) => r.on_modal(id, input).await,
+            None => return Outcome::Keep,
+        };
+        step.apply(&mut self.roster)
+    }
+
     async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
         self.notice = None;
+        if let Some(r) = self.roster.as_mut() {
+            let step = r.handle(id, values).await;
+            return step.apply(&mut self.roster);
+        }
+        if id == ROSTER_ID {
+            let Some(card) = self.card.clone() else {
+                return Outcome::Keep;
+            };
+            match Roster::start(self.api.clone(), self.policy, &card).await {
+                Ok(Some(r)) => self.roster = Some(r),
+                Ok(None) => self.notice = Some(i18n::ROSTER_NO_WORKS.to_string()),
+                Err(e) => {
+                    tracing::warn!("roster failed: {e}");
+                    self.notice = Some(crate::commands::ani_message(&e).to_string());
+                }
+            }
+            return Outcome::Update;
+        }
         match id {
             CLOSE => return Outcome::Close,
             STYLE_ID => {
@@ -447,6 +494,7 @@ pub async fn view(
         renderer: ctx.data().renderer.clone(),
         image: None,
         image_label: String::new(),
+        roster: None,
     };
     view.load().await?;
     session::run(ctx, view).await
@@ -506,6 +554,7 @@ pub async fn share(
         renderer: ctx.data().renderer.clone(),
         image: None,
         image_label: String::new(),
+        roster: None,
     };
     view.load().await?;
     let mut shared = view.static_page();

@@ -230,3 +230,59 @@ pub const TIER_NONE: &str = "لم تضع أي شخصية في فئة بعد، ا
 pub const SHARE_TITLE: &str = "صورة بروفايلك جاهزة للمشاركة 📸";
 pub const BTN_DESCRIPTION: &str = "الوصف";
 pub const NO_DESCRIPTION: &str = "لا يوجد وصف متاح لهذه الشخصية.";
+
+// ---- work roster ----
+pub const BTN_ROSTER: &str = "شخصيات العمل";
+pub const BTN_BACK_TO_LIST: &str = "رجوع للقائمة";
+pub const ROSTER_TITLE: &str = "شخصيات";
+pub const ROSTER_PICK_WORK: &str = "هذه الشخصية تظهر في عدة أعمال، اختر العمل:";
+pub const ROSTER_WORK_PLACEHOLDER: &str = "اختر العمل…";
+pub const ROSTER_RANGE_PLACEHOLDER: &str = "انتقل إلى نطاق…";
+pub const ROSTER_GROUP_PLACEHOLDER: &str = "اختر مجموعة النطاقات…";
+pub const ROSTER_CHAR_PLACEHOLDER: &str = "افتح شخصية…";
+pub const ROSTER_NO_WORKS: &str = "لا توجد أعمال معروفة لهذه الشخصية.";
+pub const ROSTER_JUMP_TITLE: &str = "الانتقال إلى صفحة";
+pub const ROSTER_BAD_PAGE: &str = "رقم صفحة غير صالح.";
+pub fn roster_jump_label(pages: usize) -> String {
+    format!("رقم الصفحة (1–{pages})")
+}
+pub fn roster_footer(page: usize, pages: usize, total: usize) -> String {
+    format!("صفحة {page} / {pages} · {total} شخصية · {POWERED_BY}")
+}
+
+// ---- /setup (command channel lock) ----
+pub fn wrong_channel(channel: i64) -> String {
+    format!("استخدم البوت في القناة <#{channel}> فقط.")
+}
+pub fn setup_channel_set(channel: i64) -> String {
+    format!("تم! البوت سيرد على الأوامر في <#{channel}> فقط (المشرفون يستطيعون تجاوز القيد حسب إعداد `admin-bypass`).")
+}
+pub fn setup_extra_added(channel: i64) -> String {
+    format!("تمت إضافة <#{channel}> إلى القنوات المسموحة.")
+}
+pub const SETUP_EXTRA_EXISTS: &str = "هذه القناة مسموحة بالفعل.";
+pub fn setup_extra_full(max: usize) -> String {
+    format!("وصلت إلى الحد الأقصى ({max} قنوات إضافية). احذف قناة أولًا.")
+}
+pub fn setup_extra_removed(channel: i64) -> String {
+    format!("تمت إزالة <#{channel}> من القنوات المسموحة.")
+}
+pub const SETUP_EXTRA_MISSING: &str = "هذه القناة ليست في قائمة القنوات الإضافية.";
+pub const SETUP_RESET: &str = "تم إلغاء القيد: البوت يعمل الآن في كل القنوات.";
+pub fn setup_bypass(on: bool) -> &'static str {
+    if on {
+        "تجاوز المشرفين للقيد: مفعّل."
+    } else {
+        "تجاوز المشرفين للقيد: معطّل."
+    }
+}
+pub const SETUP_TITLE: &str = "إعدادات قناة الأوامر";
+pub const SETUP_NONE: &str = "لا توجد قناة محددة، البوت يعمل في كل القنوات.";
+pub const SETUP_MAIN: &str = "قناة الأوامر";
+pub const SETUP_EXTRA: &str = "قنوات إضافية";
+pub const SETUP_BYPASS: &str = "تجاوز المشرفين";
+pub const SETUP_ON: &str = "مفعّل";
+pub const SETUP_OFF: &str = "معطّل";
+pub const SETUP_DELETED_WARNING: &str =
+    "⚠️ القناة المحددة محذوفة، لذلك القيد معطّل حاليًا. اختر قناة جديدة بالأمر `/setup channel`.";
+pub const GUILD_ONLY: &str = "هذا الأمر يعمل داخل السيرفرات فقط.";

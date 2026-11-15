@@ -450,6 +450,9 @@ pub async fn move_to(
 // ---- rank / note ------------------------------------------------------------------------
 
 async fn ac_tier(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
     let mut options: Vec<String> = ["S", "A", "B", "C"].iter().map(|s| s.to_string()).collect();
     if let Ok(groups) = db::list_groups(&ctx.data().db, uid(ctx)).await {
         options.extend(groups.into_iter().map(|g| g.name));
