@@ -111,7 +111,14 @@ async fn main() -> anyhow::Result<()> {
         shutdown_signal().await;
         tracing::info!("shutting down");
         let _ = stop_tx.send(true);
-        shards.shutdown_all().await;
+        // A watchdog thread (independent of the async runtime) guarantees the process ends even if the
+        // gateway never connected and a clean shutdown would wait forever.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            eprintln!("gateway did not stop in time; exiting");
+            std::process::exit(0);
+        });
+        tokio::spawn(async move { shards.shutdown_all().await });
     });
 
     let result = client.start().await;
