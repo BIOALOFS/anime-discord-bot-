@@ -1,4 +1,4 @@
-//! `/game mode`: guess the character, guess the anime, versus and the leaderboard.
+//! `/game mode`: the collective games (see `arena`), versus and the leaderboards.
 
 use super::{
     buttons,
@@ -6,14 +6,12 @@ use super::{
     fail, policy, say_ephemeral,
 };
 use crate::{
-    anilist::{models::Character, models::Media, ContentPolicy, MediaKind, SafeAniList},
+    anilist::{models::Character, models::Media, ContentPolicy, SafeAniList},
     db::{custom, game},
     error::{Context, Error},
     i18n,
-    render::Rendered,
     ui::{
         autocomplete::to_choices,
-        cards,
         embeds::Emb,
         select::{character_choices, select_row},
         session::{self, Outcome, Page, View, Whisper},
@@ -22,51 +20,18 @@ use crate::{
 };
 use poise::serenity_prelude as serenity;
 use sqlx::SqlitePool;
-use std::{
-    collections::HashSet,
-    sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
-};
-
-const ANSWER_SECONDS: u64 = 20;
 
 pub fn modes() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("خمّن الشخصية", "guess-character"),
-        ("خمّن الأنمي", "guess-anime"),
-        ("أيهما تفضّل؟", "versus"),
-        ("الترتيب", "leaderboard"),
-    ]
+    let mut v: Vec<(&'static str, &'static str)> = super::arena::MODES
+        .iter()
+        .map(|(l, k, _)| (*l, *k))
+        .collect();
+    v.push(("أيهما تفضّل؟", "versus"));
+    v.push(("الترتيب", "leaderboard"));
+    v
 }
 
 // ---- one active game per user per channel -------------------------------------------------------
-
-fn active() -> &'static Mutex<HashSet<(u64, u64)>> {
-    static ACTIVE: OnceLock<Mutex<HashSet<(u64, u64)>>> = OnceLock::new();
-    ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// Dropping it frees the slot, however the game ends.
-pub struct ActiveGuard(u64, u64);
-
-impl Drop for ActiveGuard {
-    fn drop(&mut self) {
-        if let Ok(mut set) = active().lock() {
-            set.remove(&(self.0, self.1));
-        }
-    }
-}
-
-pub fn try_start(user: u64, channel: u64) -> Option<ActiveGuard> {
-    let mut set = active().lock().ok()?;
-    // `then_some` would build (and immediately drop) a guard even on failure, freeing the other game's slot
-    // and deadlocking on the lock held here.
-    if set.insert((user, channel)) {
-        Some(ActiveGuard(user, channel))
-    } else {
-        None
-    }
-}
 
 // ---- pure helpers -------------------------------------------------------------------------------
 
@@ -109,11 +74,6 @@ pub fn win_rate(wins: i64, shown: i64) -> u32 {
     }
 }
 
-/// Difficulty grows with the streak: 0, 1 then 2 (max).
-pub fn level_for_streak(streak: i64) -> u8 {
-    (streak / 3).clamp(0, 2) as u8
-}
-
 /// `(options, index of the answer)` with the answer in a random position.
 pub fn shuffle_options<T>(answer: T, decoys: Vec<T>) -> (Vec<T>, usize) {
     let mut all = decoys;
@@ -124,169 +84,7 @@ pub fn shuffle_options<T>(answer: T, decoys: Vec<T>) -> (Vec<T>, usize) {
 
 // ---- quiz (characters and anime) --------------------------------------------------------------------
 
-struct Quiz {
-    pool: SqlitePool,
-    guild: Option<i64>,
-    user: i64,
-    labels: Vec<String>,
-    correct: usize,
-    started: Instant,
-    question: Emb,
-    reveal: Emb,
-    image: Option<Rendered>,
-    result: Option<(bool, usize, i64)>,
-    /// The character behind a guess-the-character round: after the answer it is shown with the usual character
-    /// buttons (add to / remove from my profile, works, source link).
-    answer: Option<(std::sync::Arc<SafeAniList>, ContentPolicy, Character)>,
-    sub: Option<CharacterView>,
-    _guard: ActiveGuard,
-}
-
-impl View for Quiz {
-    fn take_whisper(&mut self) -> Option<Whisper> {
-        self.sub.as_mut().and_then(|s| s.take_whisper())
-    }
-
-    fn render(&self, enabled: bool) -> Page {
-        if let Some(sub) = &self.sub {
-            return sub.render(enabled);
-        }
-        let style = |i: usize| match &self.result {
-            Some(_) if i == self.correct => serenity::ButtonStyle::Success,
-            Some((_, chosen, _)) if i == *chosen => serenity::ButtonStyle::Danger,
-            _ => serenity::ButtonStyle::Primary,
-        };
-        let row = buttons(
-            self.labels
-                .iter()
-                .enumerate()
-                .map(|(i, l)| {
-                    serenity::CreateButton::new(format!("ans:{i}"))
-                        .label(crate::ui::embeds::fit(l, 80))
-                        .style(style(i))
-                        .disabled(!enabled || self.result.is_some())
-                })
-                .collect(),
-        );
-        match &self.result {
-            None => {
-                let page = Page::embed(self.question.clone().build(), vec![row]);
-                match &self.image {
-                    Some(img) => page.with_files(vec![serenity::CreateAttachment::bytes(
-                        img.bytes.clone(),
-                        format!("guess.{}", img.ext),
-                    )]),
-                    None => page,
-                }
-            }
-            Some((correct, _, streak)) => {
-                let head = if *correct {
-                    i18n::game_correct(*streak)
-                } else {
-                    i18n::GAME_WRONG.to_string()
-                };
-                Page::embed(self.reveal.clone().build(), vec![row]).notice(Some(head))
-            }
-        }
-    }
-
-    async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
-        if let Some(sub) = self.sub.as_mut() {
-            return sub.on_interaction(id, values).await;
-        }
-        let Some(i) = id
-            .strip_prefix("ans:")
-            .and_then(|n| n.parse::<usize>().ok())
-            .filter(|i| *i < self.labels.len())
-        else {
-            return Outcome::Keep;
-        };
-        // Late answers count as a miss.
-        let on_time = self.started.elapsed() <= Duration::from_secs(ANSWER_SECONDS + 2);
-        let correct = on_time && i == self.correct;
-        let streak = match self.guild {
-            Some(g) => game::record_result(&self.pool, g, self.user, correct)
-                .await
-                .unwrap_or(0),
-            None => 0,
-        };
-        self.result = Some((correct, i, streak));
-        match self.answer.take() {
-            // Keep the session open: the revealed character gets its action buttons.
-            Some((api, policy, character)) => {
-                let head = if correct {
-                    i18n::game_correct(streak)
-                } else {
-                    i18n::GAME_WRONG.to_string()
-                };
-                let mut view = CharacterView::new(
-                    api,
-                    policy,
-                    CharMode::Card(character),
-                    self.pool.clone(),
-                    self.user,
-                )
-                .with_notice(head);
-                view.prepare().await;
-                self.sub = Some(view);
-                Outcome::Update
-            }
-            None => Outcome::Close,
-        }
-    }
-}
-
-async fn start_quiz_character(ctx: Context<'_>, guild: Option<i64>) -> Result<(), Error> {
-    let (api, pol) = (ctx.data().anilist.clone(), policy(ctx));
-    let (answer, decoys) = match api.random_character_set(pol).await {
-        Ok(Some(v)) => v,
-        Ok(None) => return say_ephemeral(ctx, i18n::RANDOM_FAILED).await,
-        Err(e) => return fail(ctx, e).await,
-    };
-    let streak = match guild {
-        Some(g) => game::current_streak(&ctx.data().db, g, ctx.author().id.get() as i64)
-            .await
-            .unwrap_or(0),
-        None => 0,
-    };
-    let level = level_for_streak(streak);
-    let Some(url) = answer.image_url().map(str::to_string) else {
-        return say_ephemeral(ctx, i18n::RANDOM_FAILED).await;
-    };
-    let image = ctx.data().renderer.guess_image(&url, level).await;
-    let Some(guard) = try_start(ctx.author().id.get(), ctx.channel_id().get()) else {
-        return say_ephemeral(ctx, i18n::GAME_ALREADY_ACTIVE).await;
-    };
-    let names: Vec<String> = decoys
-        .iter()
-        .map(|c| c.display_name().to_string())
-        .collect();
-    let (labels, correct) = shuffle_options(answer.display_name().to_string(), names);
-    let mut question = Emb::new()
-        .title(i18n::GUESS_CHARACTER_TITLE)
-        .description(i18n::guess_hint(ANSWER_SECONDS, level, streak));
-    if image.is_some() {
-        question = question.image(Some("attachment://guess.webp"));
-    }
-    let quiz = Quiz {
-        pool: ctx.data().db.clone(),
-        guild,
-        user: ctx.author().id.get() as i64,
-        labels,
-        correct,
-        started: Instant::now(),
-        question,
-        reveal: cards::character_card(&answer),
-        image,
-        result: None,
-        answer: Some((api.clone(), pol, answer.clone())),
-        sub: None,
-        _guard: guard,
-    };
-    session::run(ctx, quiz).await
-}
-
-fn masked_clue(m: &Media) -> String {
+pub fn masked_clue(m: &Media) -> String {
     let titles: Vec<&str> = [
         m.title.romaji.as_deref(),
         m.title.english.as_deref(),
@@ -321,43 +119,6 @@ fn masked_clue(m: &Media) -> String {
         Some(d) => format!("{d}\n\n{}", facts.join(" · ")),
         None => facts.join(" · "),
     }
-}
-
-async fn start_quiz_anime(ctx: Context<'_>, guild: Option<i64>) -> Result<(), Error> {
-    let (api, pol) = (ctx.data().anilist.clone(), policy(ctx));
-    let (answer, decoys) = match api.random_media_set(MediaKind::Anime, pol).await {
-        Ok(Some(v)) => v,
-        Ok(None) => return say_ephemeral(ctx, i18n::RANDOM_FAILED).await,
-        Err(e) => return fail(ctx, e).await,
-    };
-    let Some(guard) = try_start(ctx.author().id.get(), ctx.channel_id().get()) else {
-        return say_ephemeral(ctx, i18n::GAME_ALREADY_ACTIVE).await;
-    };
-    let names: Vec<String> = decoys.iter().map(|m| m.title.main().to_string()).collect();
-    let (labels, correct) = shuffle_options(answer.title.main().to_string(), names);
-    let question = Emb::new()
-        .title(i18n::GUESS_ANIME_TITLE)
-        .description(format!(
-            "{}\n\n{}",
-            masked_clue(&answer),
-            i18n::guess_hint(ANSWER_SECONDS, 0, 0)
-        ));
-    let quiz = Quiz {
-        pool: ctx.data().db.clone(),
-        guild,
-        user: ctx.author().id.get() as i64,
-        labels,
-        correct,
-        started: Instant::now(),
-        question,
-        reveal: cards::work_card(&answer),
-        image: None,
-        result: None,
-        answer: None,
-        sub: None,
-        _guard: guard,
-    };
-    session::run(ctx, quiz).await
 }
 
 // ---- versus -------------------------------------------------------------------------------------------------
@@ -530,6 +291,20 @@ async fn show_leaderboard(ctx: Context<'_>, guild: Option<i64>) -> Result<(), Er
     };
     let mut embed = Emb::new().title(i18n::LEADERBOARD_TITLE);
     if let Some(g) = guild {
+        // This week's points of the collective games first, then the all-time server table.
+        let week = game::week_key(chrono::Utc::now().timestamp());
+        let weekly = game::weekly_leaderboard(pool, g, &week, 10).await?;
+        let weekly = if weekly.is_empty() {
+            i18n::EMPTY_LIST.to_string()
+        } else {
+            weekly
+                .iter()
+                .enumerate()
+                .map(|(i, (u, p, c))| format!("**{}.** <@{u}> — {p} ({c} ✅)", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        embed = embed.field(i18n::ARENA_WEEKLY, weekly, false);
         embed = embed.field(
             i18n::SCOPE_SERVER,
             fmt(game::leaderboard(pool, Some(g), 10).await?),
@@ -560,11 +335,28 @@ async fn ac_mode(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteC
     )
 }
 
-/// Guess the character, guess the anime, versus or the leaderboard.
+async fn ac_difficulty(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    if !crate::guild::autocomplete_allowed(ctx).await {
+        return Vec::new();
+    }
+    let n = partial.trim().to_lowercase();
+    to_choices(
+        super::arena::DIFFICULTIES
+            .iter()
+            .filter(|(l, k)| n.is_empty() || l.contains(&n) || k.contains(&n))
+            .map(|(l, k)| ((*l).to_string(), (*k).to_string()))
+            .collect(),
+    )
+}
+
+/// Collective games, versus and the leaderboard.
 #[poise::command(
     slash_command,
     name_localized("ar", "لعبة"),
-    description_localized("ar", "ألعاب: خمّن الشخصية أو الأنمي، أيهما تفضّل، والترتيب")
+    description_localized(
+        "ar",
+        "ألعاب جماعية في القناة: خمّن، صح أم خطأ، الأعلى تقييمًا، الترتيب بالسنة، السباق"
+    )
 )]
 pub async fn game(
     ctx: Context<'_>,
@@ -573,6 +365,11 @@ pub async fn game(
     #[name_localized("ar", "النوع")]
     #[autocomplete = "ac_mode"]
     mode: String,
+    #[description = "Difficulty: easy, normal or hard"]
+    #[description_localized("ar", "الصعوبة: سهل أو عادي أو صعب")]
+    #[name_localized("ar", "الصعوبة")]
+    #[autocomplete = "ac_difficulty"]
+    difficulty: Option<String>,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let guild = ctx.guild_id().map(|g| g.get() as i64);
@@ -581,9 +378,11 @@ pub async fn game(
             return say_ephemeral(ctx, i18n::GAMES_DISABLED).await;
         }
     }
+    let level = super::arena::Difficulty::parse(difficulty.as_deref().unwrap_or("normal"));
+    if let Some(m) = super::arena::mode_of(&mode) {
+        return super::arena::start(ctx, m, level).await;
+    }
     match mode.trim() {
-        "guess-character" => start_quiz_character(ctx, guild).await,
-        "guess-anime" => start_quiz_anime(ctx, guild).await,
         "versus" => start_versus(ctx).await,
         "leaderboard" => show_leaderboard(ctx, guild).await,
         _ => say_ephemeral(ctx, i18n::GAME_PICK_MODE).await,
@@ -626,15 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn difficulty_rises_with_the_streak_up_to_a_cap() {
-        let levels: Vec<u8> = [0, 2, 3, 5, 6, 30]
-            .iter()
-            .map(|s| level_for_streak(*s))
-            .collect();
-        assert_eq!(levels, vec![0, 0, 1, 1, 2, 2]);
-    }
-
-    #[test]
     fn the_answer_is_somewhere_among_the_options() {
         for _ in 0..50 {
             let (opts, at) = shuffle_options("answer", vec!["a", "b", "c"]);
@@ -644,24 +434,21 @@ mod tests {
     }
 
     #[test]
-    fn only_one_game_per_user_per_channel() {
-        let first = try_start(1, 100).expect("free");
-        assert!(try_start(1, 100).is_none(), "same user, same channel");
-        assert!(try_start(1, 101).is_some(), "another channel is fine");
-        assert!(try_start(2, 100).is_some(), "another user is fine");
-        drop(first);
-        assert!(
-            try_start(1, 100).is_some(),
-            "the slot frees when the game ends"
-        );
-    }
-
-    #[test]
     fn every_mode_is_listed() {
         let keys: Vec<_> = modes().into_iter().map(|(_, k)| k).collect();
         assert_eq!(
             keys,
-            vec!["guess-character", "guess-anime", "versus", "leaderboard"]
+            vec![
+                "character-image",
+                "work-cover",
+                "character-hints",
+                "true-false",
+                "higher-lower",
+                "order-years",
+                "race",
+                "versus",
+                "leaderboard"
+            ]
         );
     }
 }

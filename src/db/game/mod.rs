@@ -34,17 +34,6 @@ pub async fn record_result(pool: &SqlitePool, guild: i64, user: i64, correct: bo
         .await
 }
 
-pub async fn current_streak(pool: &SqlitePool, guild: i64, user: i64) -> Result<i64> {
-    Ok(
-        sqlx::query_scalar("SELECT streak FROM game_scores WHERE guild_id = ?1 AND user_id = ?2")
-            .bind(guild)
-            .bind(user)
-            .fetch_optional(pool)
-            .await?
-            .unwrap_or(0),
-    )
-}
-
 /// `(user_id, correct, played, best_streak)` best first; `guild = None` sums every server.
 pub async fn leaderboard(
     pool: &SqlitePool,
@@ -63,6 +52,53 @@ pub async fn leaderboard(
         .iter()
         .map(|r| (r.get("user_id"), r.get("c"), r.get("p"), r.get("b")))
         .collect())
+}
+
+/// ISO year and week of a unix time, e.g. `2026-W46`.
+pub fn week_key(unix: i64) -> String {
+    use chrono::Datelike;
+    let d = chrono::DateTime::from_timestamp(unix, 0)
+        .unwrap_or_default()
+        .iso_week();
+    format!("{}-W{:02}", d.year(), d.week())
+}
+
+/// Add points to a member's weekly score in this server.
+pub async fn add_weekly(
+    pool: &SqlitePool,
+    guild: i64,
+    week: &str,
+    user: i64,
+    points: i64,
+    correct: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO weekly_scores (guild_id, week, user_id, points, correct) VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(guild_id, week, user_id) DO UPDATE SET points = points + excluded.points, correct = correct + excluded.correct",
+    )
+    .bind(guild)
+    .bind(week)
+    .bind(user)
+    .bind(points)
+    .bind(correct)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// `(user, points, correct)` best first.
+pub async fn weekly_leaderboard(
+    pool: &SqlitePool,
+    guild: i64,
+    week: &str,
+    limit: i64,
+) -> Result<Vec<(i64, i64, i64)>> {
+    sqlx::query_as("SELECT user_id, points, correct FROM weekly_scores WHERE guild_id = ?1 AND week = ?2 ORDER BY points DESC, correct DESC, user_id LIMIT ?3")
+        .bind(guild)
+        .bind(week)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn total_correct(pool: &SqlitePool, user: i64) -> Result<i64> {
@@ -165,5 +201,43 @@ mod tests {
             hidden_recommendations(&pool, 5).await.expect("h"),
             vec![100]
         );
+    }
+
+    #[test]
+    fn weeks_follow_iso_numbering() {
+        assert_eq!(week_key(1_700_000_000), "2023-W46");
+        assert_eq!(
+            week_key(1_767_225_600),
+            "2026-W01",
+            "1 Jan 2026 is in ISO week 1"
+        );
+        assert_ne!(
+            week_key(1_700_000_000),
+            week_key(1_700_000_000 + 7 * 86_400)
+        );
+    }
+
+    #[tokio::test]
+    async fn weekly_points_accumulate_per_week_and_server() {
+        let pool = connect_memory().await;
+        add_weekly(&pool, 1, "2026-W46", 10, 15, 1)
+            .await
+            .expect("a");
+        add_weekly(&pool, 1, "2026-W46", 10, 10, 1)
+            .await
+            .expect("b");
+        add_weekly(&pool, 1, "2026-W46", 11, 30, 2)
+            .await
+            .expect("c");
+        add_weekly(&pool, 1, "2026-W47", 10, 99, 9)
+            .await
+            .expect("next week");
+        add_weekly(&pool, 2, "2026-W46", 10, 99, 9)
+            .await
+            .expect("other server");
+        let board = weekly_leaderboard(&pool, 1, "2026-W46", 10)
+            .await
+            .expect("board");
+        assert_eq!(board, vec![(11, 30, 2), (10, 25, 2)]);
     }
 }

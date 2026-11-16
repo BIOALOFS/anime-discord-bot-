@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod airing;
+pub mod arena;
 pub mod channels;
 pub mod character;
 pub mod fallback;

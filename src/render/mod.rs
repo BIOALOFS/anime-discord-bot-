@@ -148,10 +148,9 @@ impl Renderer {
     }
 
     /// A cropped, blurred piece of a character picture for the guessing game (never cached: random).
-    pub async fn guess_image(&self, url: &str, level: u8) -> Option<Rendered> {
+    pub async fn guess_image(&self, url: &str, level: u8, seed: u64) -> Option<Rendered> {
         let images = self.fetch_all(vec![url.to_string()]).await;
         let img = images.get(url)?.clone();
-        let seed = rand::random::<u64>();
         tokio::task::spawn_blocking(move || draw::guess_image(&img, level, seed))
             .await
             .ok()?
