@@ -1020,6 +1020,136 @@ mod tests {
         );
     }
 
+    async fn sample_arena(starter: u64, channel: u64) -> Arena {
+        let round = Round {
+            title: "t".into(),
+            prompt: "p".into(),
+            picture: None,
+            level: 0,
+            options: vec!["A".into(), "B".into(), "C".into()],
+            correct: 1,
+            hints: Vec::new(),
+            reveal: "r".into(),
+        };
+        Arena {
+            api: Arc::new(SafeAniList::with_fixture(|_, _| {
+                Err(crate::anilist::AniError::NotFound)
+            })),
+            renderer: Arc::new(Renderer::new(reqwest::Client::new())),
+            policy: ContentPolicy::SAFE,
+            pool: crate::db::connect_memory().await,
+            guild: Some(1),
+            starter: uid(starter),
+            mode: Mode::TrueFalse,
+            difficulty: Difficulty::Normal,
+            total_rounds: 3,
+            round_no: 1,
+            round,
+            picture: None,
+            hint_lines: Vec::new(),
+            phase: Phase::Asking {
+                started: Instant::now(),
+                hints_shown: 0,
+            },
+            scores: HashMap::new(),
+            locked: HashSet::new(),
+            last_press: HashMap::new(),
+            _guard: try_claim(channel).expect("free channel"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_member_other_than_the_starter_can_answer_and_the_first_correct_answer_wins_the_point(
+    ) {
+        let mut g = sample_arena(1, 9_100_001).await;
+        assert!(g.shared(), "answers are not restricted to the invoker");
+        // Member 2 (not the starter) answers correctly.
+        let out = g.on_user_interaction(uid(2), false, "ans:1", &[]).await;
+        assert_eq!(out, Outcome::Update);
+        assert_eq!(g.scores[&uid(2)].1, 1);
+        assert!(
+            g.scores[&uid(2)].0 >= 10,
+            "base points plus the speed bonus"
+        );
+        assert!(matches!(g.phase, Phase::Revealing { winner: Some(w), .. } if w == uid(2)));
+        // A later correct answer in the same round scores nothing: the round is already decided.
+        let late = g.on_user_interaction(uid(3), false, "ans:1", &[]).await;
+        assert_eq!(late, Outcome::Keep);
+        assert!(!g.scores.contains_key(&uid(3)));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_answer_locks_that_member_out_of_the_round_only() {
+        let mut g = sample_arena(1, 9_100_002).await;
+        let wrong = g.on_user_interaction(uid(2), false, "ans:0", &[]).await;
+        assert_eq!(wrong, Outcome::Whisper(i18n::ARENA_WRONG.to_string()));
+        tokio::time::sleep(PRESS_GAP + Duration::from_millis(50)).await;
+        let again = g.on_user_interaction(uid(2), false, "ans:1", &[]).await;
+        assert_eq!(
+            again,
+            Outcome::Whisper(i18n::ARENA_ALREADY_ANSWERED.to_string()),
+            "no second try in the same round"
+        );
+        assert!(g.scores.is_empty());
+        // Someone else can still win it.
+        assert_eq!(
+            g.on_user_interaction(uid(3), false, "ans:1", &[]).await,
+            Outcome::Update
+        );
+    }
+
+    #[tokio::test]
+    async fn spamming_the_buttons_is_ignored() {
+        let mut g = sample_arena(1, 9_100_003).await;
+        g.on_user_interaction(uid(2), false, "ans:0", &[]).await;
+        // Immediately again: ignored silently (not even the "already answered" reply).
+        assert_eq!(
+            g.on_user_interaction(uid(2), false, "ans:1", &[]).await,
+            Outcome::Keep
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_starter_or_an_admin_can_skip_or_end() {
+        let mut g = sample_arena(1, 9_100_004).await;
+        let denied = Outcome::Whisper(i18n::ARENA_MANAGE_DENIED.to_string());
+        assert_eq!(
+            g.on_user_interaction(uid(2), false, SKIP, &[]).await,
+            denied
+        );
+        assert_eq!(g.on_user_interaction(uid(2), false, END, &[]).await, denied);
+        assert!(
+            matches!(g.phase, Phase::Asking { .. }),
+            "a refusal changes nothing"
+        );
+        assert_eq!(
+            g.on_user_interaction(uid(1), false, SKIP, &[]).await,
+            Outcome::Update,
+            "the starter skips"
+        );
+        assert!(matches!(g.phase, Phase::Revealing { winner: None, .. }));
+        assert_eq!(
+            g.on_user_interaction(uid(9), true, END, &[]).await,
+            Outcome::Close,
+            "an admin ends the game"
+        );
+        assert!(matches!(g.phase, Phase::Finished));
+    }
+
+    #[tokio::test]
+    async fn finishing_saves_the_weekly_points_per_server() {
+        let mut g = sample_arena(1, 9_100_005).await;
+        g.on_user_interaction(uid(2), false, "ans:1", &[]).await;
+        g.finish().await;
+        let week = gdb::week_key(chrono::Utc::now().timestamp());
+        let board = gdb::weekly_leaderboard(&g.pool, 1, &week, 10)
+            .await
+            .expect("board");
+        assert_eq!(board.len(), 1);
+        assert_eq!((board[0].0, board[0].2), (2, 1));
+        assert!(board[0].1 >= 10);
+    }
+
     #[test]
     fn fixed_rounds_never_hand_out_adult_content() {
         // Every round comes from `SafeAniList` (isAdult filtered); the module has no raw client access.

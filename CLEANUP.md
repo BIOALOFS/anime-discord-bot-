@@ -31,3 +31,12 @@ What was removed and what was merged. Nothing here is reachable from a command a
 
 ## New in this round
 `/suggest`, reminders, ready-made banners, GIF banners, the three-embed profile, character action buttons everywhere.
+
+## Round 6
+- **Profile**: the three-embed layout is replaced by one Components V2 container (embed fallback of at most two embeds kept in
+  the same view). `info_embed`/`item_embed` and the author-icon helper are gone; `ui::styles::item_card` and `Style` leftovers deleted.
+- **Games**: the owner-only `guess-character` / `guess-anime` quizzes and the per-user channel guard are removed, superseded by the
+  collective games in `commands/arena.rs` (one shared session per channel).
+- **Recommend**: the dropdown only "selected" an item for the add/hide buttons; it now opens the work card.
+- New: `ui::v2` (Components V2 builders), shared sessions and timers in the session engine, `show work` global handler, chapter sources
+  (`chapters/`), weekly leaderboard, suggestion pictures.
