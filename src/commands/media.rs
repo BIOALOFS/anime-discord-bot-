@@ -80,6 +80,8 @@ pub struct MediaView {
     cast_for: Option<i64>,
     /// A character card opened from the dropdown; Back returns here.
     sub: Option<CharacterView>,
+    /// Opened from another view (the recommendation list): Back at the first screen returns to that view.
+    from_parent: bool,
 }
 
 pub fn pages_of(last_page: Option<usize>, has_next: bool, page: usize) -> usize {
@@ -129,10 +131,40 @@ impl MediaView {
             cast: Vec::new(),
             cast_for: None,
             sub: None,
+            from_parent: false,
         };
         v.refresh_added().await;
         v.ensure_cast().await;
         v
+    }
+
+    /// A work card opened from another view (no command context needed); Back returns to the parent.
+    pub async fn child(api: Arc<SafeAniList>, pool: SqlitePool, user: i64, policy: ContentPolicy, media: Media) -> Self {
+        let mut v = Self {
+            api,
+            pool,
+            user,
+            policy,
+            source: Source::Plain,
+            mode: Mode::Card(Box::new(media)),
+            history: Vec::new(),
+            notice: None,
+            added: false,
+            reminded: false,
+            whisper: None,
+            cast: Vec::new(),
+            cast_for: None,
+            sub: None,
+            from_parent: true,
+        };
+        v.refresh_added().await;
+        v.ensure_cast().await;
+        v
+    }
+
+    /// Back at the first screen of a child view means "return to the parent".
+    pub fn wants_to_leave(&self, id: &str) -> bool {
+        self.from_parent && id == BACK && self.history.is_empty() && self.sub.is_none()
     }
 
     /// Load the first page of the cast of the shown card (cached by the API layer); failures leave it empty.
@@ -453,7 +485,7 @@ impl MediaView {
                     .disabled(!enabled),
             );
         }
-        if !self.history.is_empty() {
+        if !self.history.is_empty() || self.from_parent {
             extra.push(back_button(enabled));
         }
         extra.push(close_button(enabled));
