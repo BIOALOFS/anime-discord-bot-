@@ -79,13 +79,19 @@ mod tests {
                 let p = e.path();
                 if p.is_dir() {
                     walk(&p, out);
-                } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("tests.rs") && !p.ends_with("ui/select.rs") {
+                } else if p.extension().is_some_and(|x| x == "rs")
+                    && !p.ends_with("tests.rs")
+                    && !p.ends_with("ui/select.rs")
+                {
                     out.push(p);
                 }
             }
         }
         let mut files = Vec::new();
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
         let mut checked = 0;
         for f in files {
             let text = std::fs::read_to_string(&f).expect("read");
@@ -94,13 +100,25 @@ mod tests {
             let mut rest = prod;
             while let Some(i) = rest.find("select_row(") {
                 rest = &rest[i + "select_row(".len()..];
-                let arg: String = rest.chars().skip_while(|c| c.is_whitespace()).take_while(|c| c.is_ascii_uppercase() || *c == '_' || c.is_ascii_digit()).collect();
+                let arg: String = rest
+                    .chars()
+                    .skip_while(|c| c.is_whitespace())
+                    .take_while(|c| c.is_ascii_uppercase() || *c == '_' || c.is_ascii_digit())
+                    .collect();
                 if arg.len() < 3 {
                     continue;
                 }
                 checked += 1;
-                let handled = prod.contains(&format!("{arg} =>")) || prod.contains(&format!("{arg} |")) || prod.contains(&format!("| {arg}")) || prod.contains(&format!("== {arg}")) || prod.contains(&format!("{arg}) ="));
-                assert!(handled, "{}: select menu id {arg} has no handler", f.display());
+                let handled = prod.contains(&format!("{arg} =>"))
+                    || prod.contains(&format!("{arg} |"))
+                    || prod.contains(&format!("| {arg}"))
+                    || prod.contains(&format!("== {arg}"))
+                    || prod.contains(&format!("{arg}) ="));
+                assert!(
+                    handled,
+                    "{}: select menu id {arg} has no handler",
+                    f.display()
+                );
             }
         }
         assert!(checked >= 15, "the scan found only {checked} select menus");

@@ -215,11 +215,22 @@ impl View for RecView {
             PICK_ID => {
                 // Choosing a work opens its card (cover, status, count, score, add and remind buttons).
                 self.selected = values.first().and_then(|v| v.parse().ok());
-                let Some(c) = self.selected.and_then(|s| self.items.iter().find(|c| c.media.id == s)).cloned() else {
+                let Some(c) = self
+                    .selected
+                    .and_then(|s| self.items.iter().find(|c| c.media.id == s))
+                    .cloned()
+                else {
                     return Outcome::Keep;
                 };
                 self.sub = Some(
-                    MediaView::child(self.api.clone(), self.pool.clone(), self.user, self.policy, c.media).await,
+                    MediaView::child(
+                        self.api.clone(),
+                        self.pool.clone(),
+                        self.user,
+                        self.policy,
+                        c.media,
+                    )
+                    .await,
                 );
                 Outcome::Update
             }

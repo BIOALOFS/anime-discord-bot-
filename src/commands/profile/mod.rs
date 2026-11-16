@@ -115,7 +115,6 @@ async fn show(ctx: Context<'_>, user: Option<serenity::User>) -> Result<(), Erro
         profile,
         owner,
         target.display_name().to_string(),
-        Some(target.face()),
         Section::Characters,
     );
     view.load().await?;

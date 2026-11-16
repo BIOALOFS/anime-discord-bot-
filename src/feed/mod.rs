@@ -326,7 +326,10 @@ pub fn parse_show_work(custom_id: &str, values: &[String]) -> Option<i64> {
 
 /// The button every notification carries.
 pub fn show_work_button(anilist_id: i64) -> serenity::CreateButton {
-    serenity::CreateButton::new(show_work_id(anilist_id)).label(i18n::BTN_SHOW_WORK).emoji('📖').style(serenity::ButtonStyle::Primary)
+    serenity::CreateButton::new(show_work_id(anilist_id))
+        .label(i18n::BTN_SHOW_WORK)
+        .emoji('📖')
+        .style(serenity::ButtonStyle::Primary)
 }
 
 /// Up to this many releases get their own card; more are grouped so a busy night is a few messages, not a flood.
@@ -381,7 +384,9 @@ async fn send_batch<'a>(
                 value: e.media.id.to_string(),
             })
             .collect();
-        if let Some(menu) = crate::ui::select::select_row(SHOW_WORK_PICK, i18n::BTN_SHOW_WORK, choices, true) {
+        if let Some(menu) =
+            crate::ui::select::select_row(SHOW_WORK_PICK, i18n::BTN_SHOW_WORK, choices, true)
+        {
             msg = msg.components(vec![menu]);
         }
         if let Some(role) = cfg.role_id {

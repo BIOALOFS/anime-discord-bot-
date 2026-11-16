@@ -109,7 +109,10 @@ pub fn parse_accent_value(v: &str) -> Option<AccentChoice> {
     if v.eq_ignore_ascii_case("reset") || super::actions_clear_word(v) {
         return Some(AccentChoice::Reset);
     }
-    if let Some((_, _, c)) = ACCENT_PRESETS.iter().find(|(k, l, _)| k.eq_ignore_ascii_case(v) || *l == v) {
+    if let Some((_, _, c)) = ACCENT_PRESETS
+        .iter()
+        .find(|(k, l, _)| k.eq_ignore_ascii_case(v) || *l == v)
+    {
         return Some(AccentChoice::Color(*c));
     }
     parse_color(v).map(AccentChoice::Color)
@@ -545,7 +548,11 @@ async fn ac_value(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocomplete
         ),
         ("profile", "color") => matching(
             std::iter::once(("إعادة للافتراضي".to_string(), "reset".to_string()))
-                .chain(ACCENT_PRESETS.iter().map(|(k, l, _)| ((*l).to_string(), (*k).to_string())))
+                .chain(
+                    ACCENT_PRESETS
+                        .iter()
+                        .map(|(k, l, _)| ((*l).to_string(), (*k).to_string())),
+                )
                 .collect(),
             partial,
         ),
@@ -687,15 +694,36 @@ mod tests {
     #[test]
     fn accent_values_are_presets_validated_hex_or_reset() {
         assert_eq!(parse_accent_value("reset"), Some(AccentChoice::Reset));
-        assert_eq!(parse_accent_value("orange"), Some(AccentChoice::Color(0xFF8800)));
-        assert_eq!(parse_accent_value("أخضر"), Some(AccentChoice::Color(0x57F287)));
-        assert_eq!(parse_accent_value("#12abEF"), Some(AccentChoice::Color(0x12abef)));
-        assert_eq!(parse_accent_value("12abef"), Some(AccentChoice::Color(0x12abef)));
-        for bad in ["", "#12", "#gggggg", "#1234567", "not a colour", "javascript:1"] {
-            assert_eq!(parse_accent_value(bad), if bad.is_empty() { None } else { None }, "{bad}");
+        assert_eq!(
+            parse_accent_value("orange"),
+            Some(AccentChoice::Color(0xFF8800))
+        );
+        assert_eq!(
+            parse_accent_value("أخضر"),
+            Some(AccentChoice::Color(0x57F287))
+        );
+        assert_eq!(
+            parse_accent_value("#12abEF"),
+            Some(AccentChoice::Color(0x12abef))
+        );
+        assert_eq!(
+            parse_accent_value("12abef"),
+            Some(AccentChoice::Color(0x12abef))
+        );
+        for bad in [
+            "",
+            "#12",
+            "#gggggg",
+            "#1234567",
+            "not a colour",
+            "javascript:1",
+        ] {
+            assert_eq!(parse_accent_value(bad), None, "{bad}");
         }
         let mut seen = std::collections::HashSet::new();
-        assert!(ACCENT_PRESETS.iter().all(|(k, _, c)| seen.insert(*k) && *c <= 0xFF_FFFF));
+        assert!(ACCENT_PRESETS
+            .iter()
+            .all(|(k, _, c)| seen.insert(*k) && *c <= 0xFF_FFFF));
     }
 
     #[test]

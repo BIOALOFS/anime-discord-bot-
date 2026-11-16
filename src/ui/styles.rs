@@ -1,10 +1,6 @@
-//! Profile card pieces: badges, the header embed and the item card.
+//! Profile badges (computed from activity; nothing is stored).
 
-use super::{embeds::Emb, format::thousands};
-use crate::{
-    commands::profile::items::{Item, Section},
-    i18n,
-};
+use crate::i18n;
 
 /// Profile badges, computed from activity (nothing is stored).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,91 +32,9 @@ pub fn badges(characters: i64, works: i64, watched: i64, guess_correct: i64) -> 
     out
 }
 
-fn subtitle_link(i: &Item) -> Option<String> {
-    let s = i.subtitle.as_deref()?;
-    Some(match &i.subtitle_url {
-        Some(u) => format!("[{s}]({u})"),
-        None => s.to_string(),
-    })
-}
-
-/// One item as a simple card, built from cached data only (no AniList call at render time).
-pub fn item_card(i: &Item, total: i64, own: bool) -> Emb {
-    let name = match i.native.as_deref().filter(|n| !n.is_empty()) {
-        Some(n) => format!("{} ({n})", i.name),
-        None => i.name.clone(),
-    };
-    let mut desc = Vec::new();
-    if let Some(t) = i.display_title() {
-        desc.push(format!("✨ **{t}**"));
-    }
-    if let Some(w) = subtitle_link(i) {
-        desc.push(if i.section == Section::Characters {
-            format!("📺 {w}")
-        } else {
-            w
-        });
-    }
-    if own {
-        if let Some(n) = i.note.as_deref() {
-            desc.push(format!("📝 **{}:** {n}", i18n::NOTE_LABEL));
-        }
-    }
-    let mut emb = Emb::new()
-        .title(name)
-        .author(i18n::position_of(i.position, total))
-        .image(i.image_url.clone());
-    if !desc.is_empty() {
-        emb = emb.description(desc.join("\n"));
-    }
-    if let Some(f) = i.favourites {
-        emb = emb.field("❤", thousands(f), true);
-    }
-    emb
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn item(pos: i64, name: &str) -> Item {
-        Item {
-            section: Section::Characters,
-            key: pos.to_string(),
-            position: pos,
-            name: name.into(),
-            native: Some("名".into()),
-            subtitle: Some("Work".into()),
-            subtitle_url: Some("https://anilist.co/anime/1".into()),
-            image_url: Some("https://img".into()),
-            tier: None,
-            note: Some("my note".into()),
-            custom_title: None,
-            custom_description: None,
-            custom_image_id: None,
-            favourites: Some(1500),
-            visible: true,
-        }
-    }
-
-    #[test]
-    fn item_card_is_simple_and_notes_are_private() {
-        let mut i = item(12, "Alpha");
-        i.custom_title = Some("Mine".into());
-        let own = item_card(&i, 143, true);
-        assert_eq!(own.author.as_deref(), Some("12 / 143"));
-        let d = own.description.as_deref().expect("d");
-        assert!(d.contains("✨ **Mine**") && d.contains("📺 [Work]") && d.contains("my note"));
-        let other = item_card(&i, 143, false);
-        assert!(
-            !other
-                .description
-                .as_deref()
-                .unwrap_or("")
-                .contains("my note"),
-            "notes are only for the owner"
-        );
-    }
 
     #[test]
     fn badges_follow_activity() {

@@ -139,7 +139,13 @@ impl MediaView {
     }
 
     /// A work card opened from another view (no command context needed); Back returns to the parent.
-    pub async fn child(api: Arc<SafeAniList>, pool: SqlitePool, user: i64, policy: ContentPolicy, media: Media) -> Self {
+    pub async fn child(
+        api: Arc<SafeAniList>,
+        pool: SqlitePool,
+        user: i64,
+        policy: ContentPolicy,
+        media: Media,
+    ) -> Self {
         let mut v = Self {
             api,
             pool,

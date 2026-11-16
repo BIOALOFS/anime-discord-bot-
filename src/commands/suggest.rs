@@ -3,7 +3,7 @@
 
 use super::{buttons, fail, fallback::game_flags, media::media_label_for_suggest, say_ephemeral};
 use crate::{
-    anilist::ContentPolicy,
+    anilist::{ContentPolicy, SafeAniList},
     db::{
         admin as adb,
         custom::sanitize_text,
@@ -11,17 +11,20 @@ use crate::{
     },
     error::{Context, Error},
     guild, i18n,
-    providers::Work,
+    providers::{Providers, Work},
     ui::{
         autocomplete::to_choices,
+        cards,
         embeds::{fit, Emb},
         pagination::{apply_nav, close_button, nav_row, page_count, parse_nav, CLOSE},
         select::{normalize_choices, select_row, Choice},
-        session::{self, Outcome, Page, View},
+        session::{self, CardFollowup, Outcome, Page, View},
+        v2,
     },
 };
 use poise::serenity_prelude as serenity;
 use sqlx::SqlitePool;
+use std::sync::Arc;
 
 const PAGE: usize = 10;
 const ANOTHER: &str = "suggest_another";
@@ -34,14 +37,26 @@ pub struct Picked {
     pub id: String,
     pub title: String,
     pub url: Option<String>,
+    /// Cover picture (AniList URL, or the provider's, which is downloaded and attached, never hotlinked).
+    pub image: Option<String>,
 }
 
 impl Picked {
+    fn from_media(m: &crate::anilist::models::Media) -> Self {
+        Self {
+            id: format!("anilist:{}", m.id),
+            title: m.title.main().to_string(),
+            url: m.site_url.clone(),
+            image: m.cover().map(str::to_string),
+        }
+    }
+
     fn from_work(w: &Work) -> Self {
         Self {
             id: w.id.clone(),
             title: w.title.clone(),
             url: w.url.clone(),
+            image: w.cover_url.clone(),
         }
     }
 }
@@ -55,23 +70,6 @@ pub fn clean_reason(text: &str) -> Option<String> {
 fn link_ok(url: &Option<String>) -> Option<&str> {
     url.as_deref()
         .filter(|u| u.starts_with("https://") && u.len() <= 512)
-}
-
-/// The embed of one suggestion; the author is shown as a mention (embeds never ping).
-pub fn suggestion_embed(s: &Suggestion) -> Emb {
-    let mut e = Emb::new()
-        .title(fit(
-            &format!("🔗 {} ↔ {}", s.first_title, s.second_title),
-            250,
-        ))
-        .description(format!(
-            "{}\n\n{} <@{}>",
-            fit(&s.reason, MAX_REASON),
-            i18n::SUGGESTED_BY,
-            s.author_id
-        ));
-    e.footer = None;
-    e
 }
 
 /// Options for deleting one of my suggestions.
@@ -160,11 +158,7 @@ async fn resolve(ctx: Context<'_>, raw: &str) -> Result<Option<Picked>, Error> {
         .and_then(|v| v.parse::<i64>().ok());
     if let Some(id) = ani_id {
         return match data.anilist.media_by_id(id, ContentPolicy::SAFE).await {
-            Ok(Some(m)) => Ok(Some(Picked {
-                id: format!("anilist:{}", m.id),
-                title: m.title.main().to_string(),
-                url: m.site_url.clone(),
-            })),
+            Ok(Some(m)) => Ok(Some(Picked::from_media(&m))),
             Ok(None) => {
                 say_ephemeral(ctx, i18n::NOT_FOUND).await?;
                 Ok(None)
@@ -192,11 +186,7 @@ async fn resolve(ctx: Context<'_>, raw: &str) -> Result<Option<Picked>, Error> {
     match data.anilist.search_any(raw, 1, ContentPolicy::SAFE).await {
         Ok(mut list) if !list.is_empty() => {
             let m = list.remove(0);
-            return Ok(Some(Picked {
-                id: format!("anilist:{}", m.id),
-                title: m.title.main().to_string(),
-                url: m.site_url.clone(),
-            }));
+            return Ok(Some(Picked::from_media(&m)));
         }
         Ok(_) => {}
         Err(e) if !games_on => {
@@ -281,20 +271,34 @@ pub async fn add(
         second_title: b.title,
         first_url: a.url,
         second_url: b.url,
+        first_image: a.image,
+        second_image: b.image,
         reason,
     };
     match suggest::add(pool, &new, limit).await? {
         AddResult::Added(id) => {
-            let s = suggest::get(pool, guild_id, id).await?;
-            let mut embed = s.as_ref().map(suggestion_embed).unwrap_or_default();
-            embed.footer = None;
-            ctx.send(
-                poise::CreateReply::default()
-                    .content(i18n::SUGGEST_ADDED)
-                    .embed(embed.build()),
-            )
-            .await?;
-            Ok(())
+            let Some(current) = suggest::get(pool, guild_id, id).await? else {
+                return Ok(());
+            };
+            let (_, mature) = game_flags(ctx).await;
+            let mut view = SuggestView {
+                pool: pool.clone(),
+                api: ctx.data().anilist.clone(),
+                providers: ctx.data().providers.clone(),
+                guild: guild_id,
+                user: ctx.author().id.get() as i64,
+                admin: false,
+                mature,
+                filter: None,
+                current: Some(current),
+                covers: [None, None],
+                can_reroll: false,
+                header: Some(i18n::SUGGEST_ADDED.to_string()),
+                notice: None,
+                card: None,
+            };
+            view.load_covers().await;
+            session::run(ctx, view).await
         }
         AddResult::Duplicate { author } => say_ephemeral(ctx, &i18n::suggest_exists(author)).await,
         AddResult::LimitReached => say_ephemeral(ctx, &i18n::suggest_limit(limit)).await,
@@ -342,14 +346,22 @@ pub async fn random(
             .await
             .unwrap_or(None),
     );
-    let mut view = RandomView {
+    let (_, mature) = game_flags(ctx).await;
+    let mut view = SuggestView {
         pool: ctx.data().db.clone(),
+        api: ctx.data().anilist.clone(),
+        providers: ctx.data().providers.clone(),
         guild: guild_id,
         user: ctx.author().id.get() as i64,
         admin,
+        mature,
         filter,
         current: None,
+        covers: [None, None],
+        can_reroll: true,
+        header: None,
         notice: None,
+        card: None,
     };
     view.roll().await?;
     if view.current.is_none() {
@@ -385,17 +397,61 @@ pub async fn mine(ctx: Context<'_>) -> Result<(), Error> {
 
 // ---- views ---------------------------------------------------------------------------------
 
-struct RandomView {
+const OPEN_PICK: &str = "suggest_open";
+
+/// A suggestion shown as one block: both covers first (side by side), then the reason, the author and the date,
+/// then buttons and a menu with the two works. Used by `random` and by the confirmation of `add`.
+struct SuggestView {
     pool: SqlitePool,
+    api: Arc<SafeAniList>,
+    providers: Arc<Providers>,
     guild: i64,
     user: i64,
     admin: bool,
+    mature: bool,
     filter: Option<String>,
     current: Option<Suggestion>,
+    /// Pictures of providers that must not be hotlinked: `(attachment name, bytes)` per side.
+    covers: [Option<(String, Vec<u8>)>; 2],
+    /// `add` shows the new suggestion once; `random` can roll another.
+    can_reroll: bool,
+    header: Option<String>,
     notice: Option<String>,
+    card: Option<CardFollowup>,
 }
 
-impl RandomView {
+/// A cover URL a message may reference directly: AniList's own CDN. Everything else is attached.
+pub fn hosted_cover(url: &str) -> bool {
+    url.starts_with("https://s4.anilist.co/")
+}
+
+/// The two pictures of a suggestion as media URLs (`attachment://` for downloaded ones), in order; sides without a
+/// usable picture are skipped.
+pub fn gallery_urls(s: &Suggestion, covers: &[Option<(String, Vec<u8>)>; 2]) -> Vec<String> {
+    [(&s.first_image, &covers[0]), (&s.second_image, &covers[1])]
+        .into_iter()
+        .filter_map(|(url, attached)| match (url, attached) {
+            (_, Some((name, _))) => Some(format!("attachment://{name}")),
+            (Some(u), None) if hosted_cover(u) => Some(u.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The text under the pictures: the connection, then the author and the date.
+pub fn suggestion_text(s: &Suggestion) -> String {
+    format!(
+        "**{} ↔ {}**\n{}\n\n{} <@{}> · <t:{}:D>",
+        s.first_title,
+        s.second_title,
+        fit(&s.reason, MAX_REASON),
+        i18n::SUGGESTED_BY,
+        s.author_id,
+        s.created_at
+    )
+}
+
+impl SuggestView {
     async fn roll(&mut self) -> Result<(), sqlx::Error> {
         let previous = self.current.as_ref().map(|s| s.id);
         let mut next = suggest::random(&self.pool, self.guild, self.filter.as_deref()).await?;
@@ -406,23 +462,40 @@ impl RandomView {
                 .or(next);
         }
         self.current = next;
+        self.load_covers().await;
         Ok(())
     }
-}
 
-impl View for RandomView {
-    fn render(&self, enabled: bool) -> Page {
-        let Some(s) = &self.current else {
-            return Page::embed(
-                Emb::new().description(i18n::SUGGEST_NONE).build(),
-                vec![buttons(vec![close_button(enabled)])],
+    /// Download (through the bot, allow-listed hosts only) the pictures that are not on AniList's CDN.
+    async fn load_covers(&mut self) {
+        self.covers = [None, None];
+        let Some(s) = &self.current else { return };
+        for (n, url) in [&s.first_image, &s.second_image].into_iter().enumerate() {
+            let Some(url) = url.as_deref().filter(|u| !hosted_cover(u)) else {
+                continue;
+            };
+            if let Some(bytes) = self.providers.image_bytes(url).await {
+                let name = format!(
+                    "work{}.{}",
+                    n + 1,
+                    super::fallback::cover_name(&bytes).trim_start_matches("cover.")
+                );
+                self.covers[n] = Some((name, bytes.to_vec()));
+            }
+        }
+    }
+
+    fn rows(&self, s: &Suggestion, enabled: bool) -> Vec<serenity::CreateActionRow> {
+        let mut row = Vec::new();
+        if self.can_reroll {
+            row.push(
+                serenity::CreateButton::new(ANOTHER)
+                    .label(i18n::SUGGEST_ANOTHER)
+                    .emoji('🔀')
+                    .style(serenity::ButtonStyle::Primary)
+                    .disabled(!enabled),
             );
-        };
-        let mut row = vec![serenity::CreateButton::new(ANOTHER)
-            .label(i18n::SUGGEST_ANOTHER)
-            .emoji('🔀')
-            .style(serenity::ButtonStyle::Primary)
-            .disabled(!enabled)];
+        }
         if let Some(u) = link_ok(&s.first_url) {
             row.push(
                 serenity::CreateButton::new_link(u)
@@ -435,7 +508,7 @@ impl View for RandomView {
                     .label(format!("🔗 {}", fit(&s.second_title, 60))),
             );
         }
-        if s.author_id == self.user || self.admin {
+        if self.can_reroll && (s.author_id == self.user || self.admin) {
             row.push(
                 serenity::CreateButton::new(DELETE)
                     .label(i18n::BTN_DELETE)
@@ -444,23 +517,165 @@ impl View for RandomView {
                     .disabled(!enabled),
             );
         }
-        let mut rows = vec![buttons(row)];
+        let mut rows = Vec::new();
+        if !row.is_empty() {
+            rows.push(buttons(row));
+        }
+        rows.extend(select_row(
+            OPEN_PICK,
+            i18n::SUGGEST_OPEN_PLACEHOLDER,
+            open_choices(s),
+            enabled,
+        ));
         rows.push(buttons(vec![close_button(enabled)]));
-        Page::embed(suggestion_embed(s).build(), rows).notice(self.notice.clone())
+        rows
     }
 
-    async fn on_interaction(&mut self, id: &str, _values: &[String]) -> Outcome {
+    fn files(&self) -> Vec<serenity::CreateAttachment> {
+        self.covers
+            .iter()
+            .flatten()
+            .map(|(name, bytes)| serenity::CreateAttachment::bytes(bytes.clone(), name.clone()))
+            .collect()
+    }
+
+    /// The card of one of the two works, as a new ephemeral message.
+    async fn work_card(&self, key: &str) -> Option<CardFollowup> {
+        if let Some(id) = key
+            .strip_prefix("anilist:")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            let m = self
+                .api
+                .media_by_id(id, ContentPolicy::SAFE)
+                .await
+                .ok()
+                .flatten()?;
+            return Some(CardFollowup {
+                embed: cards::work_card(&m).build(),
+                files: Vec::new(),
+                link: m
+                    .site_url
+                    .clone()
+                    .map(|u| (u, format!("🔗 {}", i18n::BTN_ANILIST))),
+            });
+        }
+        let w = self.providers.work_by_key(key, self.mature).await?;
+        let cover = self.providers.cover(&w).await;
+        let name = cover
+            .as_ref()
+            .map_or("cover.jpg", |c| super::fallback::cover_name(c));
+        Some(CardFollowup {
+            embed: super::fallback::card(&w, cover.is_some(), name).build(),
+            files: cover
+                .map(|c| {
+                    vec![serenity::CreateAttachment::bytes(
+                        c.to_vec(),
+                        name.to_string(),
+                    )]
+                })
+                .unwrap_or_default(),
+            link: w
+                .url
+                .clone()
+                .map(|u| (u, format!("🔗 {}", w.source.credit()))),
+        })
+    }
+}
+
+/// The two works as menu options (value: their provider-prefixed ids).
+pub fn open_choices(s: &Suggestion) -> Vec<Choice> {
+    normalize_choices(vec![
+        Choice {
+            label: fit(&s.first_title, 100),
+            description: None,
+            value: s.first_id.clone(),
+        },
+        Choice {
+            label: fit(&s.second_title, 100),
+            description: None,
+            value: s.second_id.clone(),
+        },
+    ])
+}
+
+impl View for SuggestView {
+    fn take_card(&mut self) -> Option<CardFollowup> {
+        self.card.take()
+    }
+
+    fn render(&self, enabled: bool) -> Page {
+        let Some(s) = &self.current else {
+            return Page::embed(
+                Emb::new().description(i18n::SUGGEST_NONE).build(),
+                vec![buttons(vec![close_button(enabled)])],
+            );
+        };
+        let rows = self.rows(s, enabled);
+        let mut text = suggestion_text(s);
+        if let Some(h) = &self.header {
+            text = format!("{h}\n{text}");
+        }
+        if let Some(n) = &self.notice {
+            text = format!("{n}\n{text}");
+        }
+        // V2: pictures first, then text, then the controls, all in one container.
+        let mut kids = Vec::new();
+        let urls = gallery_urls(s, &self.covers);
+        if !urls.is_empty() {
+            kids.push(v2::gallery(&urls));
+        }
+        kids.push(v2::text(&text));
+        kids.extend(v2::rows(&rows));
+        // Embed fallback: one embed per picture, the text under the second.
+        let mut embeds = Vec::new();
+        for (n, url) in urls.iter().enumerate() {
+            let mut e = Emb::new();
+            e.footer = None;
+            e.image = Some(url.clone());
+            if n + 1 == urls.len() {
+                e.description = Some(text.clone());
+            }
+            embeds.push(e.build());
+        }
+        if embeds.is_empty() {
+            embeds.push(Emb::new().description(text).build());
+        }
+        Page {
+            content: None,
+            embeds,
+            components: rows,
+            files: self.files(),
+            v2: Some(vec![v2::container(kids, None)]),
+        }
+    }
+
+    async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
         self.notice = None;
         match id {
             CLOSE => Outcome::Close,
-            ANOTHER => {
+            OPEN_PICK => {
+                let Some(key) = values.first().filter(|k| {
+                    self.current
+                        .as_ref()
+                        .is_some_and(|s| &s.first_id == *k || &s.second_id == *k)
+                }) else {
+                    return Outcome::Keep;
+                };
+                match self.work_card(key).await {
+                    Some(card) => self.card = Some(card),
+                    None => self.whisper_fail(),
+                }
+                Outcome::Keep
+            }
+            ANOTHER if self.can_reroll => {
                 if let Err(e) = self.roll().await {
                     tracing::warn!("suggest roll failed: {e}");
                     self.notice = Some(i18n::ERR_GENERIC.to_string());
                 }
                 Outcome::Update
             }
-            DELETE => {
+            DELETE if self.can_reroll => {
                 let Some(s) = self.current.clone() else {
                     return Outcome::Keep;
                 };
@@ -486,6 +701,12 @@ impl View for RandomView {
             }
             _ => Outcome::Keep,
         }
+    }
+}
+
+impl SuggestView {
+    fn whisper_fail(&mut self) {
+        self.notice = Some(i18n::SHOW_WORK_UNAVAILABLE.to_string());
     }
 }
 
@@ -614,6 +835,8 @@ mod tests {
             second_title: "Game".into(),
             first_url: Some("https://anilist.co/anime/1".into()),
             second_url: Some("http://insecure.example".into()),
+            first_image: Some("https://s4.anilist.co/a.png".into()),
+            second_image: Some("https://images.igdb.com/b.jpg".into()),
             reason: reason.into(),
             created_at: 0,
         }
@@ -639,14 +862,47 @@ mod tests {
     }
 
     #[test]
-    fn the_embed_mentions_the_author_and_both_titles() {
-        let e = suggestion_embed(&sug(1, "similar tone"));
-        assert!(
-            e.title.as_deref().unwrap_or("").contains("Anime")
-                && e.title.as_deref().unwrap_or("").contains("Game")
+    fn the_pictures_come_first_hosted_ones_by_url_and_provider_ones_as_attachments() {
+        let s = sug(1, "r");
+        let none: [Option<(String, Vec<u8>)>; 2] = [None, None];
+        assert_eq!(
+            gallery_urls(&s, &none),
+            vec!["https://s4.anilist.co/a.png".to_string()],
+            "a provider picture is never hotlinked"
         );
-        let d = e.description.as_deref().unwrap_or("");
-        assert!(d.contains("similar tone") && d.contains("<@7>"));
+        let attached = [None, Some(("work2.jpg".to_string(), vec![1u8]))];
+        assert_eq!(
+            gallery_urls(&s, &attached),
+            vec![
+                "https://s4.anilist.co/a.png".to_string(),
+                "attachment://work2.jpg".to_string()
+            ]
+        );
+        assert!(
+            hosted_cover("https://s4.anilist.co/x.png")
+                && !hosted_cover("https://images.igdb.com/x.jpg")
+        );
+    }
+
+    #[test]
+    fn the_text_is_titles_then_reason_then_author_and_date() {
+        let t = suggestion_text(&sug(1, "similar tone"));
+        let (a, b, c) = (
+            t.find("Anime ↔ Game"),
+            t.find("similar tone"),
+            t.find("<@7>"),
+        );
+        assert!(a < b && b < c, "{t}");
+        assert!(t.contains("<t:0:D>"), "the added date");
+    }
+
+    #[test]
+    fn the_menu_offers_the_two_works_by_provider_prefixed_id() {
+        let c = open_choices(&sug(1, "r"));
+        assert_eq!(
+            c.iter().map(|c| c.value.as_str()).collect::<Vec<_>>(),
+            vec!["anilist:1", "igdb:2"]
+        );
     }
 
     #[test]

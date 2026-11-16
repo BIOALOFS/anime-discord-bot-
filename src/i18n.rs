@@ -108,9 +108,6 @@ pub fn privacy_ar(p: &str) -> &'static str {
         _ => "خاص",
     }
 }
-pub fn position_of(pos: i64, total: i64) -> String {
-    format!("{pos} / {total}")
-}
 pub const NOTE_LABEL: &str = "ملاحظتك";
 pub const NICKNAMES: &str = "الأسماء المستعارة";
 pub const BTN_DESCRIPTION: &str = "الوصف";
@@ -292,10 +289,8 @@ pub const PAGES_NEXT_GROUP: &str = "مجموعة الصفحات التالية �
 pub const SELECT_PAGE_PLACEHOLDER: &str = "انتقل إلى صفحة…";
 pub const F_PROFILE_CHARACTERS: &str = "الشخصيات";
 pub const F_PROFILE_WORKS: &str = "الأعمال";
-pub const F_PROFILE_PRIVACY: &str = "الخصوصية";
 pub const F_PROFILE_JOINED: &str = "انضم";
 pub const F_PROFILE_SUGGESTIONS: &str = "الاقتراحات";
-pub const F_PROFILE_BADGES: &str = "الأوسمة";
 pub const BANNER_PICKER_TITLE: &str = "🎨 اختر غلافًا جاهزًا";
 pub const BANNER_PICKER_HELP: &str = "اختر من القائمة لترى المعاينة ثم اضغط «تطبيق».\nلرفع صورتك أو GIF: `/edit` ← البروفايل ← الغلاف وأرفق الملف (إن سمح السيرفر بالصور المخصصة). للون: اكتب `#ff8800` في القيمة.";
 pub const BANNER_PICKER_PLACEHOLDER: &str = "الأغلفة الجاهزة…";
@@ -341,3 +336,4 @@ pub fn current_privacy(label: &str) -> String {
 }
 pub const BTN_SHOW_WORK: &str = "أظهر العمل";
 pub const SHOW_WORK_UNAVAILABLE: &str = "تعذر عرض العمل الآن.";
+pub const SUGGEST_OPEN_PLACEHOLDER: &str = "افتح بطاقة أحد العملين…";

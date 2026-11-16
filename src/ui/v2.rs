@@ -20,13 +20,13 @@ pub fn text(content: &str) -> Value {
     json!({"type": 10, "content": content})
 }
 
-pub fn separator() -> Value {
-    json!({"type": 14, "divider": true, "spacing": 1})
-}
-
 /// A media gallery; `urls` may be `attachment://file` references or hosted https URLs. At most 10 items.
 pub fn gallery(urls: &[String]) -> Value {
-    let items: Vec<Value> = urls.iter().take(MAX_GALLERY_ITEMS).map(|u| json!({"media": {"url": u}})).collect();
+    let items: Vec<Value> = urls
+        .iter()
+        .take(MAX_GALLERY_ITEMS)
+        .map(|u| json!({"media": {"url": u}}))
+        .collect();
     json!({"type": 12, "items": items})
 }
 
@@ -41,7 +41,9 @@ pub fn container(children: Vec<Value>, accent: Option<u32>) -> Value {
 
 /// serenity's own serialisation of buttons and select menus, as JSON values (action rows are valid V2 children).
 pub fn rows(rows: &[CreateActionRow]) -> Vec<Value> {
-    rows.iter().filter_map(|r| serde_json::to_value(r).ok()).collect()
+    rows.iter()
+        .filter_map(|r| serde_json::to_value(r).ok())
+        .collect()
 }
 
 /// Every component of the tree, counting nested ones (Discord's limit counts them all).
@@ -49,7 +51,9 @@ pub fn count_components(v: &Value) -> usize {
     match v {
         Value::Array(a) => a.iter().map(count_components).sum(),
         Value::Object(o) if o.contains_key("type") => {
-            1 + o.get("components").map_or(0, count_components) + o.get("items").map_or(0, |i| i.as_array().map_or(0, Vec::len))
+            1 + o.get("components").map_or(0, count_components)
+                + o.get("items")
+                    .map_or(0, |i| i.as_array().map_or(0, Vec::len))
         }
         _ => 0,
     }
@@ -59,7 +63,13 @@ fn text_chars(v: &Value) -> usize {
     match v {
         Value::Array(a) => a.iter().map(text_chars).sum(),
         Value::Object(o) => {
-            let own = if o.get("type") == Some(&json!(10)) { o.get("content").and_then(Value::as_str).map_or(0, |s| s.chars().count()) } else { 0 };
+            let own = if o.get("type") == Some(&json!(10)) {
+                o.get("content")
+                    .and_then(Value::as_str)
+                    .map_or(0, |s| s.chars().count())
+            } else {
+                0
+            };
             own + o.get("components").map_or(0, text_chars)
         }
         _ => 0,
@@ -68,7 +78,10 @@ fn text_chars(v: &Value) -> usize {
 
 /// Check a component tree against Discord's limits before sending it.
 pub fn validate(components: &[Value]) -> Result<(), String> {
-    let n: usize = components.iter().map(|c| count_components(&Value::Array(vec![c.clone()]))).sum();
+    let n: usize = components
+        .iter()
+        .map(|c| count_components(&Value::Array(vec![c.clone()])))
+        .sum();
     if n > MAX_COMPONENTS {
         return Err(format!("{n} components (max {MAX_COMPONENTS})"));
     }
@@ -82,7 +95,11 @@ pub fn validate(components: &[Value]) -> Result<(), String> {
 /// The request body of a V2 message: no `content`, no `embeds`, attachments listed by index so that
 /// `attachment://name` URLs resolve.
 pub fn payload(components: Vec<Value>, files: &[CreateAttachment]) -> Value {
-    let attachments: Vec<Value> = files.iter().enumerate().map(|(i, f)| json!({"id": i, "filename": f.filename})).collect();
+    let attachments: Vec<Value> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| json!({"id": i, "filename": f.filename}))
+        .collect();
     json!({"flags": IS_COMPONENTS_V2, "components": components, "attachments": attachments})
 }
 
@@ -92,8 +109,15 @@ mod tests {
     use poise::serenity_prelude as serenity;
 
     fn sample() -> Vec<Value> {
-        let buttons = CreateActionRow::Buttons(vec![serenity::CreateButton::new("a").label("A"), serenity::CreateButton::new("b").label("B")]);
-        let mut kids = vec![gallery(&["attachment://banner.gif".into()]), text("hello"), gallery(&["attachment://item.png".into()])];
+        let buttons = CreateActionRow::Buttons(vec![
+            serenity::CreateButton::new("a").label("A"),
+            serenity::CreateButton::new("b").label("B"),
+        ]);
+        let mut kids = vec![
+            gallery(&["attachment://banner.gif".into()]),
+            text("hello"),
+            gallery(&["attachment://item.png".into()]),
+        ];
         kids.extend(rows(&[buttons]));
         vec![container(kids, Some(0x3DB4F2))]
     }
@@ -103,23 +127,44 @@ mod tests {
         let c = &sample()[0];
         assert_eq!(c["type"], 17);
         assert_eq!(c["accent_color"], 0x3DB4F2);
-        let kinds: Vec<i64> = c["components"].as_array().expect("children").iter().map(|k| k["type"].as_i64().unwrap_or(0)).collect();
-        assert_eq!(kinds, vec![12, 10, 12, 1], "banner gallery, text, item gallery, action row");
-        assert_eq!(c["components"][0]["items"][0]["media"]["url"], "attachment://banner.gif");
+        let kinds: Vec<i64> = c["components"]
+            .as_array()
+            .expect("children")
+            .iter()
+            .map(|k| k["type"].as_i64().unwrap_or(0))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![12, 10, 12, 1],
+            "banner gallery, text, item gallery, action row"
+        );
+        assert_eq!(
+            c["components"][0]["items"][0]["media"]["url"],
+            "attachment://banner.gif"
+        );
     }
 
     #[test]
     fn the_payload_sets_the_v2_flag_and_never_carries_content_or_embeds() {
-        let files = vec![CreateAttachment::bytes(vec![1, 2, 3], "banner.gif"), CreateAttachment::bytes(vec![4], "item.png")];
+        let files = vec![
+            CreateAttachment::bytes(vec![1, 2, 3], "banner.gif"),
+            CreateAttachment::bytes(vec![4], "item.png"),
+        ];
         let p = payload(sample(), &files);
         assert_eq!(p["flags"], 32768);
         assert!(p.get("content").is_none() && p.get("embeds").is_none());
-        assert_eq!(p["attachments"], json!([{"id": 0, "filename": "banner.gif"}, {"id": 1, "filename": "item.png"}]));
+        assert_eq!(
+            p["attachments"],
+            json!([{"id": 0, "filename": "banner.gif"}, {"id": 1, "filename": "item.png"}])
+        );
     }
 
     #[test]
     fn accent_colours_are_masked_to_24_bits_and_optional() {
-        assert_eq!(container(vec![], Some(0x1_FF00FF))["accent_color"], 0xFF00FF);
+        assert_eq!(
+            container(vec![], Some(0x1_FF00FF))["accent_color"],
+            0xFF00FF
+        );
         assert!(container(vec![], None).get("accent_color").is_none());
     }
 
@@ -135,7 +180,13 @@ mod tests {
         // container + 3 non-row children + row + 2 buttons (+ gallery items)
         assert!(count_components(&Value::Array(sample())) >= 8);
         let many: Vec<Value> = (0..45).map(|_| text("x")).collect();
-        assert!(validate(&[container(many, None)]).is_err(), "over 40 components");
-        assert!(validate(&[container(vec![text(&"x".repeat(4001))], None)]).is_err(), "over 4000 characters");
+        assert!(
+            validate(&[container(many, None)]).is_err(),
+            "over 40 components"
+        );
+        assert!(
+            validate(&[container(vec![text(&"x".repeat(4001))], None)]).is_err(),
+            "over 4000 characters"
+        );
     }
 }

@@ -55,7 +55,6 @@ pub struct ProfileView {
     pub viewer: i64,
     pub owner: i64,
     pub owner_name: String,
-    pub owner_avatar: Option<String>,
     pub profile: Profile,
     pub section: Section,
     /// 0-based index of the shown item within the section.
@@ -178,7 +177,6 @@ impl ProfileView {
         profile: Profile,
         owner: i64,
         owner_name: String,
-        owner_avatar: Option<String>,
         section: Section,
     ) -> Self {
         Self {
@@ -189,7 +187,6 @@ impl ProfileView {
             viewer: super::util::uid(ctx),
             owner,
             owner_name,
-            owner_avatar,
             profile,
             section,
             index: 0,
@@ -306,7 +303,9 @@ impl ProfileView {
 
     /// The compact details line: "الشخصيات 4 · الأعمال 1 · عام · انضم 2026-11-15" (+ suggestions).
     pub fn details_line(&self) -> String {
-        let joined = chrono::DateTime::from_timestamp(self.profile.created_at, 0).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+        let joined = chrono::DateTime::from_timestamp(self.profile.created_at, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
         let mut parts = vec![
             format!("{} {}", i18n::F_PROFILE_CHARACTERS, self.counts.0),
             format!("{} {}", i18n::F_PROFILE_WORKS, self.counts.1),
@@ -314,14 +313,22 @@ impl ProfileView {
             format!("{} {joined}", i18n::F_PROFILE_JOINED),
         ];
         if self.suggestions > 0 {
-            parts.push(format!("{} {}", i18n::F_PROFILE_SUGGESTIONS, self.suggestions));
+            parts.push(format!(
+                "{} {}",
+                i18n::F_PROFILE_SUGGESTIONS,
+                self.suggestions
+            ));
         }
         parts.join(" · ")
     }
 
     /// Name, bio, quote, details and badges as lines of text.
     pub fn info_text(&self) -> String {
-        let mut lines = vec![format!("**{} {}**", i18n::PROFILE_TITLE, fit(&self.shown_name(), 60))];
+        let mut lines = vec![format!(
+            "**{} {}**",
+            i18n::PROFILE_TITLE,
+            fit(&self.shown_name(), 60)
+        )];
         if let Some(b) = &self.profile.bio {
             lines.push(fit(b, 300));
         }
@@ -330,7 +337,13 @@ impl ProfileView {
         }
         lines.push(self.details_line());
         if !self.badges.is_empty() {
-            lines.push(self.badges.iter().map(|b| b.label).collect::<Vec<_>>().join(" · "));
+            lines.push(
+                self.badges
+                    .iter()
+                    .map(|b| b.label)
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            );
         }
         lines.join("\n")
     }
@@ -338,7 +351,9 @@ impl ProfileView {
     /// The current item as text: name, personal title and description, work, and the counter (shown once).
     pub fn item_text(&self) -> String {
         let counter = format!("`{}/{}`", self.index + 1, self.total.max(1));
-        let Some(i) = self.current() else { return format!("{}\n{counter}", i18n::PROFILE_EMPTY) };
+        let Some(i) = self.current() else {
+            return format!("{}\n{counter}", i18n::PROFILE_EMPTY);
+        };
         if !i.visible {
             return format!("{}\n{counter}", i18n::HIDDEN_NOTICE);
         }
@@ -351,7 +366,11 @@ impl ProfileView {
             lines.push(format!("✨ **{t}**"));
         }
         if let Some(w) = i.subtitle.as_deref().filter(|w| !w.is_empty()) {
-            lines.push(if i.section == Section::Characters { format!("📺 {w}") } else { w.to_string() });
+            lines.push(if i.section == Section::Characters {
+                format!("📺 {w}")
+            } else {
+                w.to_string()
+            });
         }
         if let Some(d) = &i.custom_description {
             lines.push(format!("📝 {d}"));
@@ -381,7 +400,9 @@ impl ProfileView {
     }
 
     fn banner_url(&self) -> Option<String> {
-        self.banner.as_ref().map(|b| format!("attachment://{}", b.name))
+        self.banner
+            .as_ref()
+            .map(|b| format!("attachment://{}", b.name))
     }
 
     /// The whole profile as one Components V2 container: banner, text, item picture, item text, the three rows.
@@ -400,7 +421,10 @@ impl ProfileView {
         }
         kids.push(v2::text(&self.item_text()));
         kids.extend(v2::rows(&self.rows(enabled)));
-        vec![v2::container(kids, Some(self.accent().unwrap_or(DEFAULT_ACCENT)))]
+        vec![v2::container(
+            kids,
+            Some(self.accent().unwrap_or(DEFAULT_ACCENT)),
+        )]
     }
 
     /// The fallback when V2 is refused: two embeds at most. Embed 1 is the banner alone; embed 2 holds the info and
@@ -410,7 +434,8 @@ impl ProfileView {
         banner.footer = None;
         banner.colour = self.accent();
         banner.image = self.banner_url();
-        let mut card = Emb::new().description(format!("{}\n\n{}", self.info_text(), self.item_text()));
+        let mut card =
+            Emb::new().description(format!("{}\n\n{}", self.info_text(), self.item_text()));
         card.colour = self.accent();
         card.image = self.item_image();
         card.footer = None;
@@ -573,14 +598,15 @@ mod tests {
 
     async fn sample_view() -> ProfileView {
         ProfileView {
-            api: Arc::new(SafeAniList::with_fixture(|_, _| Err(crate::anilist::AniError::NotFound))),
+            api: Arc::new(SafeAniList::with_fixture(|_, _| {
+                Err(crate::anilist::AniError::NotFound)
+            })),
             pool: crate::db::connect_memory().await,
             policy: ContentPolicy::SAFE,
             renderer: Arc::new(Renderer::new(reqwest::Client::new())),
             viewer: 1,
             owner: 1,
             owner_name: "Alice".into(),
-            owner_avatar: None,
             profile: Profile {
                 user_id: 1,
                 bio: Some("bio text".into()),
@@ -601,7 +627,10 @@ mod tests {
             window: vec![item(1, "Rem")],
             window_start: 0,
             custom: None,
-            banner: Some(Arc::new(BannerFile { name: "banner.gif".into(), bytes: vec![1] })),
+            banner: Some(Arc::new(BannerFile {
+                name: "banner.gif".into(),
+                bytes: vec![1],
+            })),
             notice: None,
         }
     }
@@ -612,23 +641,41 @@ mod tests {
         let body = v.v2_body(true);
         assert_eq!(body.len(), 1, "one visual block");
         assert_eq!(body[0]["type"], 17);
-        assert_eq!(body[0]["accent_color"], 0xFF8800, "the member's colour is the side bar");
-        let kinds: Vec<i64> = body[0]["components"].as_array().expect("kids").iter().map(|k| k["type"].as_i64().unwrap_or(0)).collect();
+        assert_eq!(
+            body[0]["accent_color"], 0xFF8800,
+            "the member's colour is the side bar"
+        );
+        let kinds: Vec<i64> = body[0]["components"]
+            .as_array()
+            .expect("kids")
+            .iter()
+            .map(|k| k["type"].as_i64().unwrap_or(0))
+            .collect();
         // banner gallery, info text, item text (no picture: this item has none), then button row + two selects
         assert_eq!(kinds, vec![12, 10, 10, 1, 1, 1]);
         assert!(super::v2::validate(&body).is_ok());
-        assert_eq!(body[0]["components"][0]["items"][0]["media"]["url"], "attachment://banner.gif");
+        assert_eq!(
+            body[0]["components"][0]["items"][0]["media"]["url"],
+            "attachment://banner.gif"
+        );
     }
 
     #[tokio::test]
     async fn the_info_is_compact_and_the_counter_appears_once() {
         let v = sample_view().await;
         let details = v.details_line();
-        assert!(details.starts_with("الشخصيات 4 · الأعمال 1 · عام · انضم 2027-01-15"), "{details}");
+        assert!(
+            details.starts_with("الشخصيات 4 · الأعمال 1 · عام · انضم 2027-01-15"),
+            "{details}"
+        );
         assert!(!details.contains('\n'), "one line, not one field per line");
         let page = v.main_page(true);
         let all: String = v.info_text() + &v.item_text();
-        assert_eq!(all.matches("1/4").count(), 1, "the position counter is shown once");
+        assert_eq!(
+            all.matches("1/4").count(),
+            1,
+            "the position counter is shown once"
+        );
         assert!(page.content.is_none(), "no content next to a V2 body");
     }
 
@@ -639,9 +686,16 @@ mod tests {
         assert_eq!(e.len(), 2);
         let first = serde_json::to_value(&e[0]).expect("json");
         assert_eq!(first["image"]["url"], "attachment://banner.gif");
-        assert!(first.get("title").is_none() && first.get("description").is_none(), "embed 1 is the banner only");
+        assert!(
+            first.get("title").is_none() && first.get("description").is_none(),
+            "embed 1 is the banner only"
+        );
         v.banner = None;
-        assert_eq!(v.fallback_embeds().len(), 1, "without a banner there is one embed");
+        assert_eq!(
+            v.fallback_embeds().len(),
+            1,
+            "without a banner there is one embed"
+        );
     }
 
     #[tokio::test]
