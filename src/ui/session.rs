@@ -19,6 +19,9 @@ pub struct Page {
     pub components: Vec<CreateActionRow>,
     /// Attached images; an edit always replaces the previous attachments.
     pub files: Vec<CreateAttachment>,
+    /// The same page as Components V2 JSON (see `ui::v2`). When present and V2 works, it is sent instead of the
+    /// embeds and `content`; otherwise the embeds are the fallback.
+    pub v2: Option<Vec<serde_json::Value>>,
 }
 
 impl Page {
@@ -34,7 +37,13 @@ impl Page {
             embeds: vec![embed],
             components,
             files: Vec::new(),
+            v2: None,
         }
+    }
+
+    pub fn with_v2(mut self, components: Vec<serde_json::Value>) -> Self {
+        self.v2 = Some(components);
+        self
     }
 
     pub fn notice(mut self, text: Option<String>) -> Self {
@@ -110,6 +119,32 @@ pub trait View: Send {
 
     fn render(&self, enabled: bool) -> Page;
 
+    /// Shared sessions (games) accept presses from every member; only `on_user_interaction` tells them apart.
+    fn shared(&self) -> bool {
+        false
+    }
+
+    /// A press by `who` (`admin`: Manage Guild). The default ignores who it was.
+    fn on_user_interaction(
+        &mut self,
+        _who: serenity::UserId,
+        _admin: bool,
+        id: &str,
+        values: &[String],
+    ) -> impl Future<Output = Outcome> + Send {
+        self.on_interaction(id, values)
+    }
+
+    /// Time until the view wants `on_tick` (round timers, progressive hints); `None` = no timer.
+    fn tick_after(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Called when `tick_after` passed without a press.
+    fn on_tick(&mut self) -> impl Future<Output = Outcome> + Send {
+        async { Outcome::Keep }
+    }
+
     /// Runs once before the first render (load covers, check profile state...).
     fn on_start(&mut self) -> impl Future<Output = ()> + Send {
         async {}
@@ -137,32 +172,69 @@ pub trait View: Send {
     ) -> impl Future<Output = Outcome> + Send;
 }
 
-/// Wait for the next press by `owner` on `message`; others get an ephemeral refusal.
-/// `None` once `TIMEOUT` passes without an owner interaction.
-async fn next_owner_interaction(
+/// What `next_interaction` returned.
+enum Wait {
+    Press(serenity::ComponentInteraction),
+    /// `wait` passed without a press.
+    Quiet,
+}
+
+/// Wait up to `wait` for the next press on `message`. With `owner` set, others get an ephemeral refusal and the wait
+/// goes on; shared sessions pass `None` and accept everyone.
+async fn next_interaction(
     ctx: &serenity::Context,
     message: serenity::MessageId,
-    owner: serenity::UserId,
-) -> Option<serenity::ComponentInteraction> {
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    owner: Option<serenity::UserId>,
+    wait: Duration,
+) -> Wait {
+    let deadline = tokio::time::Instant::now() + wait;
     loop {
-        let remaining = deadline.checked_duration_since(tokio::time::Instant::now())?;
-        let i = ComponentInteractionCollector::new(ctx)
-            .message_id(message)
-            .timeout(remaining)
-            .await?;
-        if i.user.id == owner {
-            return Some(i);
+        let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+            return Wait::Quiet;
+        };
+        let Some(i) = ComponentInteractionCollector::new(ctx).message_id(message).timeout(remaining).await else {
+            return Wait::Quiet;
+        };
+        if owner.is_none_or(|o| i.user.id == o) {
+            return Wait::Press(i);
         }
         let refusal = CreateInteractionResponse::Message(
-            CreateInteractionResponseMessage::new()
-                .content(i18n::NOT_YOURS)
-                .ephemeral(true),
+            CreateInteractionResponseMessage::new().content(i18n::NOT_YOURS).ephemeral(true),
         );
         if let Err(e) = i.create_response(ctx, refusal).await {
             tracing::debug!("could not answer non-owner interaction: {e}");
         }
     }
+}
+
+/// Send a page as Components V2 through the original (deferred) response; returns the message id.
+async fn present_v2(ctx: Context<'_>, page: &Page, ephemeral: bool) -> Result<serenity::MessageId, String> {
+    let Context::Application(app) = ctx else {
+        return Err("not an application command".into());
+    };
+    let comps = page.v2.clone().ok_or("no V2 body")?;
+    super::v2::validate(&comps)?;
+    if ephemeral {
+        ctx.defer_ephemeral().await.map_err(|e| e.to_string())?;
+    } else {
+        ctx.defer().await.map_err(|e| e.to_string())?;
+    }
+    let payload = super::v2::payload(comps, &page.files);
+    let msg = ctx
+        .serenity_context()
+        .http
+        .edit_original_interaction_response(&app.interaction.token, &payload, page.files.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(msg.id)
+}
+
+/// Edit the message a component sits on with a V2 page (the interaction was acknowledged first).
+async fn edit_v2(sctx: &serenity::Context, token: &str, page: &Page) -> Result<(), String> {
+    let comps = page.v2.clone().ok_or("no V2 body")?;
+    super::v2::validate(&comps)?;
+    let payload = super::v2::payload(comps, &page.files);
+    sctx.http.edit_original_interaction_response(token, &payload, page.files.clone()).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
 async fn send_whisper(
@@ -212,31 +284,79 @@ async fn send_whisper(
     }
 }
 
-/// Send the view and drive it until it closes or times out.
+/// Send the view and drive it until it closes or times out. Pages with a Components V2 body are sent as one
+/// container; when Discord refuses that, the embed version of the same page is used for the whole session.
 pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
     view.on_start().await;
-    let reply = view.render(true).into_reply().ephemeral(view.ephemeral());
-    let handle = ctx.send(reply).await?;
-    let message_id = handle.message().await?.id;
     let sctx = ctx.serenity_context();
+    let first = view.render(true);
+    let mut use_v2 = first.v2.is_some() && matches!(ctx, Context::Application(_));
+    let mut message_id = None;
+    let mut legacy_handle = None;
+    if use_v2 {
+        match present_v2(ctx, &first, view.ephemeral()).await {
+            Ok(id) => message_id = Some(id),
+            Err(e) => {
+                tracing::warn!("Components V2 refused, using embeds: {e}");
+                use_v2 = false;
+            }
+        }
+    }
+    if !use_v2 {
+        let reply = view.render(true).into_reply().ephemeral(view.ephemeral());
+        let handle = ctx.send(reply).await?;
+        message_id = Some(handle.message().await?.id);
+        legacy_handle = Some(handle);
+    }
+    let Some(message_id) = message_id else { return Ok(()) };
     let owner = ctx.author().id;
+    let shared = view.shared();
+    let mut last_activity = tokio::time::Instant::now();
 
-    while let Some(i) = next_owner_interaction(sctx, message_id, owner).await {
+    loop {
+        let idle_left = TIMEOUT.saturating_sub(last_activity.elapsed());
+        if idle_left.is_zero() {
+            break;
+        }
+        let wait = view.tick_after().map_or(idle_left, |t| t.min(idle_left));
+        let i = match next_interaction(sctx, message_id, (!shared).then_some(owner), wait).await {
+            Wait::Press(i) => i,
+            Wait::Quiet => {
+                // A round timer fired (not the inactivity timeout): let the view advance.
+                if view.tick_after().is_some_and(|t| t <= wait) {
+                    let outcome = view.on_tick().await;
+                    if outcome != Outcome::Keep {
+                        let page = view.render(outcome != Outcome::Close);
+                        let sent = if use_v2 && page.v2.is_some() {
+                            // Ticks have no interaction token of their own: use the command's.
+                            match ctx {
+                                Context::Application(app) => edit_v2(sctx, &app.interaction.token, &page).await.is_ok(),
+                                _ => false,
+                            }
+                        } else {
+                            match &legacy_handle {
+                                Some(h) => h.edit(ctx, page.into_reply().ephemeral(view.ephemeral())).await.is_ok(),
+                                None => false,
+                            }
+                        };
+                        if !sent {
+                            tracing::debug!("could not edit the message after a timer");
+                        }
+                    }
+                    if outcome == Outcome::Close {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                break;
+            }
+        };
+        last_activity = tokio::time::Instant::now();
         // The channel lock also applies to buttons, selects and modals of older messages.
         let admin = crate::guild::is_admin(i.member.as_ref().and_then(|m| m.permissions));
-        if let Some(text) = crate::guild::denial(
-            &ctx.data().guilds,
-            &sctx.http,
-            i.guild_id,
-            i.channel_id,
-            admin,
-        )
-        .await
-        {
+        if let Some(text) = crate::guild::denial(&ctx.data().guilds, &sctx.http, i.guild_id, i.channel_id, admin).await {
             let refusal = CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new()
-                    .content(text)
-                    .ephemeral(true),
+                CreateInteractionResponseMessage::new().content(text).ephemeral(true),
             );
             if let Err(e) = i.create_response(sctx, refusal).await {
                 tracing::debug!("could not send channel refusal: {e}");
@@ -250,20 +370,20 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
             let Ok(Some(answer)) = i.quick_modal(sctx, builder).await else {
                 continue;
             };
-            if answer
-                .interaction
-                .create_response(sctx, CreateInteractionResponse::Acknowledge)
-                .await
-                .is_err()
-            {
+            if answer.interaction.create_response(sctx, CreateInteractionResponse::Acknowledge).await.is_err() {
                 continue;
             }
             let input = answer.inputs.first().cloned().unwrap_or_default();
             let outcome = view.on_modal(&i.data.custom_id, input).await;
             if outcome != Outcome::Keep {
-                let page = view.render(outcome != Outcome::Close).into_edit();
-                if let Err(e) = answer.interaction.edit_response(sctx, page).await {
-                    tracing::debug!("could not edit message after modal: {e}");
+                let page = view.render(outcome != Outcome::Close);
+                let sent = if use_v2 && page.v2.is_some() {
+                    edit_v2(sctx, &answer.interaction.token, &page).await.is_ok()
+                } else {
+                    answer.interaction.edit_response(sctx, page.into_edit()).await.is_ok()
+                };
+                if !sent {
+                    tracing::debug!("could not edit message after modal");
                     return Ok(());
                 }
             }
@@ -273,51 +393,52 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
             continue;
         }
         // Acknowledge first so slow AniList calls never hit Discord's 3 s limit.
-        if let Err(e) = i
-            .create_response(sctx, CreateInteractionResponse::Acknowledge)
-            .await
-        {
+        if let Err(e) = i.create_response(sctx, CreateInteractionResponse::Acknowledge).await {
             tracing::debug!("could not acknowledge interaction: {e}");
             continue;
         }
         let values = match &i.data.kind {
             ComponentInteractionDataKind::StringSelect { values } => values.clone(),
-            ComponentInteractionDataKind::RoleSelect { values } => {
-                values.iter().map(|v| v.get().to_string()).collect()
-            }
-            ComponentInteractionDataKind::ChannelSelect { values } => {
-                values.iter().map(|v| v.get().to_string()).collect()
-            }
+            ComponentInteractionDataKind::RoleSelect { values } => values.iter().map(|v| v.get().to_string()).collect(),
+            ComponentInteractionDataKind::ChannelSelect { values } => values.iter().map(|v| v.get().to_string()).collect(),
             _ => Vec::new(),
         };
-        let outcome = view.on_interaction(&i.data.custom_id, &values).await;
+        let outcome = view.on_user_interaction(i.user.id, admin, &i.data.custom_id, &values).await;
         if let Outcome::Whisper(text) = &outcome {
-            send_whisper(sctx, &i, Whisper::text(text.clone()), owner).await;
+            send_whisper(sctx, &i, Whisper::text(text.clone()), i.user.id).await;
             continue;
         }
         if outcome != Outcome::Keep {
-            let page = view.render(outcome != Outcome::Close).into_edit();
-            if let Err(e) = i.edit_response(sctx, page).await {
+            let page = view.render(outcome != Outcome::Close);
+            let sent = if use_v2 && page.v2.is_some() {
+                edit_v2(sctx, &i.token, &page).await.is_ok()
+            } else {
+                i.edit_response(sctx, page.into_edit()).await.is_ok()
+            };
+            if !sent {
                 // e.g. the message was deleted: stop quietly.
-                tracing::debug!("could not edit message: {e}");
+                tracing::debug!("could not edit message");
                 return Ok(());
             }
         }
         if let Some(w) = view.take_whisper() {
-            send_whisper(sctx, &i, w, owner).await;
+            send_whisper(sctx, &i, w, i.user.id).await;
         }
         if outcome == Outcome::Close {
             return Ok(());
         }
     }
-    if let Err(e) = handle
-        .edit(
-            ctx,
-            view.render(false).into_reply().ephemeral(view.ephemeral()),
-        )
-        .await
-    {
-        tracing::debug!("could not disable components after timeout: {e}");
+    let page = view.render(false);
+    if use_v2 && page.v2.is_some() {
+        if let Context::Application(app) = ctx {
+            if let Err(e) = edit_v2(sctx, &app.interaction.token, &page).await {
+                tracing::debug!("could not disable components after timeout: {e}");
+            }
+        }
+    } else if let Some(h) = legacy_handle {
+        if let Err(e) = h.edit(ctx, page.into_reply().ephemeral(view.ephemeral())).await {
+            tracing::debug!("could not disable components after timeout: {e}");
+        }
     }
     Ok(())
 }

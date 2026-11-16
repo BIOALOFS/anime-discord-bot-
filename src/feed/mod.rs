@@ -308,6 +308,27 @@ async fn serve_guild(
     Ok(())
 }
 
+/// Custom id of the "show the work" button (`shownotif:<anilist id>`) and of the menu of grouped messages.
+pub const SHOW_WORK_PREFIX: &str = "shownotif";
+pub const SHOW_WORK_PICK: &str = "shownotif:pick";
+
+pub fn show_work_id(anilist_id: i64) -> String {
+    format!("{SHOW_WORK_PREFIX}:{anilist_id}")
+}
+
+/// The work a "show the work" press asks for: from the button id, or the chosen value of the menu.
+pub fn parse_show_work(custom_id: &str, values: &[String]) -> Option<i64> {
+    if custom_id == SHOW_WORK_PICK {
+        return values.first()?.parse().ok();
+    }
+    custom_id.strip_prefix("shownotif:")?.parse().ok()
+}
+
+/// The button every notification carries.
+pub fn show_work_button(anilist_id: i64) -> serenity::CreateButton {
+    serenity::CreateButton::new(show_work_id(anilist_id)).label(i18n::BTN_SHOW_WORK).emoji('📖').style(serenity::ButtonStyle::Primary)
+}
+
 /// Up to this many releases get their own card; more are grouped so a busy night is a few messages, not a flood.
 pub const MAX_INDIVIDUAL: usize = 3;
 /// Lines per grouped message.
@@ -351,6 +372,18 @@ async fn send_batch<'a>(
                 .description(body)
                 .build(),
         );
+        // One menu with the works of this message: each choice sends the work card as a new message.
+        let choices: Vec<crate::ui::select::Choice> = chunk
+            .iter()
+            .map(|e| crate::ui::select::Choice {
+                label: crate::ui::embeds::fit(e.media.title.main(), 100),
+                description: None,
+                value: e.media.id.to_string(),
+            })
+            .collect();
+        if let Some(menu) = crate::ui::select::select_row(SHOW_WORK_PICK, i18n::BTN_SHOW_WORK, choices, true) {
+            msg = msg.components(vec![menu]);
+        }
         if let Some(role) = cfg.role_id {
             msg = msg.content(format!("<@&{role}>")).allowed_mentions(
                 serenity::CreateAllowedMentions::new()
@@ -372,7 +405,7 @@ async fn send_episode(
     e: &AiringEntry,
 ) -> bool {
     let m = &e.media;
-    let mut links = Vec::new();
+    let mut links = vec![show_work_button(m.id)];
     if let Some(u) = &m.site_url {
         links.push(serenity::CreateButton::new_link(u).label(format!("🔗 {}", i18n::BTN_ANILIST)));
     }

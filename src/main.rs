@@ -7,6 +7,7 @@ mod commands;
 mod config;
 mod db;
 mod error;
+mod events;
 mod feed;
 mod guild;
 mod i18n;
@@ -49,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         .options(poise::FrameworkOptions {
             commands: commands_with_cooldown(config.command_cooldown_secs),
             on_error: |e| Box::pin(error::on_error(e)),
+            event_handler: |ctx, event, _framework, data| Box::pin(events::handle(ctx, event, data)),
             command_check: Some(|ctx| Box::pin(guild::command_check(ctx))),
             ..Default::default()
         })

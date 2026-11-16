@@ -431,6 +431,7 @@ impl View for Versus {
             embeds: vec![ea.build(), eb.build()],
             components,
             files: vec![],
+            v2: None,
         }
     }
 

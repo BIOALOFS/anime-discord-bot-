@@ -339,3 +339,5 @@ pub fn current_language(label: &str) -> String {
 pub fn current_privacy(label: &str) -> String {
     format!("الخصوصية الحالية: **{label}**. اختر قيمة لتغييرها.")
 }
+pub const BTN_SHOW_WORK: &str = "أظهر العمل";
+pub const SHOW_WORK_UNAVAILABLE: &str = "تعذر عرض العمل الآن.";
