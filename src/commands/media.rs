@@ -458,8 +458,8 @@ impl MediaView {
                 .style(secondary)
                 .disabled(!enabled),
         ];
-        // Only anime has release times, so only anime cards can remind.
-        if kind_of(m) == MediaKind::Anime {
+        // Anime episodes and the chapters of tracked manga can remind.
+        if kind_of(m) != MediaKind::Novel {
             main.push(
                 serenity::CreateButton::new(BTN_REMIND)
                     .label(if self.reminded {

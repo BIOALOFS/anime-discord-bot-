@@ -4,7 +4,7 @@
 use super::buttons;
 use crate::{
     db::{
-        admin as adb, custom,
+        admin as adb, chapters as cdb, custom,
         feed::{self, FeedConfig, FilterMode, ALL_FORMATS, ALL_KINDS},
     },
     error::{Context, Error},
@@ -13,7 +13,7 @@ use crate::{
     ui::{
         embeds::Emb,
         pagination::{back_button, close_button, BACK, CLOSE},
-        session::{self, Outcome, Page, View},
+        session::{self, ModalSpec, Outcome, Page, View},
     },
 };
 use poise::serenity_prelude as serenity;
@@ -29,6 +29,7 @@ pub enum Screen {
     Roles,
     Channels,
     Limits,
+    Chapters,
     Reset,
 }
 
@@ -40,6 +41,7 @@ pub const HOME: &[(&str, &str, char, Screen)] = &[
     ("go:roles", "الرتب والصلاحيات", '👥', Screen::Roles),
     ("go:channels", "القنوات", '📌', Screen::Channels),
     ("go:limits", "الحدود", '⏱', Screen::Limits),
+    ("go:chapters", "مصادر الفصول", '📖', Screen::Chapters),
     ("go:reset", "إعادة الضبط", '🗑', Screen::Reset),
 ];
 
@@ -63,6 +65,12 @@ const C_CLEAR_BOT: &str = "c:clear_bot";
 const C_CLEAR_NOTIFY: &str = "c:clear_notify";
 const L_COOLDOWN: &str = "l:cooldown";
 const X_CONFIRM: &str = "x:confirm";
+const CH_MANGADEX: &str = "ch:mangadex";
+const CH_MANGAUPDATES: &str = "ch:mangaupdates";
+const CH_RSS: &str = "ch:rss";
+const CH_LANG: &str = "ch:lang";
+const CH_ADD_FEED: &str = "ch:addfeed";
+const CH_REMOVE_FEED: &str = "ch:rmfeed";
 
 /// Everything the panel shows, loaded from the database after each change.
 #[derive(Debug, Clone)]
@@ -78,6 +86,8 @@ pub struct State {
     pub suggest_limit: i64,
     pub reminder_ping: bool,
     pub feed: FeedConfig,
+    pub chapters: cdb::Settings,
+    pub feeds: Vec<cdb::Feed>,
 }
 
 pub const POPULARITY_CHOICES: [i64; 5] = [500, 1500, 3000, 5000, 10_000];
@@ -170,6 +180,33 @@ pub fn kind_options(selected: &[String]) -> Vec<Opt> {
         .collect()
 }
 
+/// Options to remove a feed: the work it maps to and its host.
+pub fn feed_options(feeds: &[cdb::Feed]) -> Vec<Opt> {
+    feeds
+        .iter()
+        .take(25)
+        .map(|f| {
+            let host = reqwest::Url::parse(&f.url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_default();
+            (
+                format!("{} — {host}", f.title_match),
+                f.id.to_string(),
+                false,
+            )
+        })
+        .collect()
+}
+
+/// `"https://site/feed.xml | Work title"` -> (url, title).
+pub fn parse_feed_input(input: &str) -> Option<(String, String)> {
+    let (url, title) = input.split_once('|')?;
+    let (url, title) = (url.trim(), title.trim());
+    (!url.is_empty() && title.chars().count() >= 3 && title.chars().count() <= 80)
+        .then(|| (url.to_string(), title.to_string()))
+}
+
 pub fn cooldown_options(current: i64) -> Vec<Opt> {
     COOLDOWN_CHOICES
         .iter()
@@ -257,6 +294,8 @@ impl AdminView {
             suggest_limit: adb::suggest_limit(pool, guild).await?,
             reminder_ping: adb::reminder_ping(pool, guild).await?,
             feed: feed::get_config(pool, guild).await?,
+            chapters: cdb::settings(pool, guild).await?,
+            feeds: cdb::feeds(pool, guild).await?,
         })
     }
 
@@ -266,6 +305,30 @@ impl AdminView {
             Err(e) => {
                 tracing::warn!("admin panel reload failed: {e:#}");
                 self.notice = Some(i18n::ERR_GENERIC.to_string());
+            }
+        }
+    }
+
+    /// Validate and store an RSS feed; returns the message for the admin.
+    async fn add_feed(&self, input: &str) -> String {
+        use crate::chapters::ssrf;
+        let Some((url, title)) = parse_feed_input(input) else {
+            return i18n::FEED_INPUT_HELP.to_string();
+        };
+        let parsed = match ssrf::check_syntax(&url) {
+            Ok(u) => u,
+            Err(e) => return i18n::feed_url_error(&format!("{e:?}")),
+        };
+        if let Err(e) = ssrf::resolve_public(&parsed).await {
+            return i18n::feed_url_error(&format!("{e:?}"));
+        }
+        match cdb::add_feed(&self.pool, self.guild, parsed.as_str(), &title).await {
+            Ok(cdb::AddFeed::Added) => i18n::FEED_ADDED.to_string(),
+            Ok(cdb::AddFeed::Duplicate) => i18n::FEED_DUPLICATE.to_string(),
+            Ok(cdb::AddFeed::Full) => i18n::FEED_FULL.to_string(),
+            Err(e) => {
+                tracing::warn!("feed add failed: {e}");
+                i18n::ERR_GENERIC.to_string()
             }
         }
     }
@@ -315,6 +378,14 @@ pub fn embed_for(screen: Screen, s: &State, guild: i64) -> Emb {
             "• مهلة الأوامر لكل عضو: **{}** (المشرفون معفون)\n• حد الاقتراحات اليومي لكل عضو: **{}**",
             if s.cooldown == 0 { "الافتراضي".to_string() } else { format!("{} ثانية", s.cooldown) },
             if s.suggest_limit == 0 { "بلا حد".to_string() } else { s.suggest_limit.to_string() }
+        )),
+        Screen::Chapters => e.title("📖 مصادر الفصول").description(format!(
+            "إشعارات الفصول الجديدة للمانجا والمانهوا والمانهوا الصينية **المتابَعة فقط** (الموجودة في بروفايل عضو أو تذكيراته) في قناة الإشعارات.\n\n• MangaDex (رسمي، مرتبة الأولوية الأولى): {}\n• MangaUpdates: {}\n• روابط RSS/Atom: {} ({} رابط)\n• لغة MangaDex المفضلة: **{}**\n\nلا يوجد أي سحب لمواقع.",
+            yes_no(s.chapters.mangadex),
+            yes_no(s.chapters.mangaupdates),
+            yes_no(s.chapters.rss),
+            s.feeds.len(),
+            if s.chapters.lang == "ar" { "العربية" } else { "English" }
         )),
         Screen::Reset => e.title("🗑 إعادة الضبط").description(
             "سيتم حذف إعدادات هذا السيرفر: القنوات والإشعارات والصور المخصصة والرتب والنقاط. بروفايلات الأعضاء العامة لا تُحذف.",
@@ -473,6 +544,59 @@ pub fn components_for(
             ),
             nav(vec![]),
         ],
+        Screen::Chapters => {
+            let mut rows = vec![
+                buttons(vec![
+                    toggle(CH_MANGADEX, "MangaDex", s.chapters.mangadex, enabled),
+                    toggle(
+                        CH_MANGAUPDATES,
+                        "MangaUpdates",
+                        s.chapters.mangaupdates,
+                        enabled,
+                    ),
+                    toggle(CH_RSS, "RSS", s.chapters.rss, enabled),
+                    back_button(enabled),
+                    close_button(enabled),
+                ]),
+                menu(
+                    CH_LANG,
+                    "لغة MangaDex",
+                    vec![
+                        (
+                            "العربية".to_string(),
+                            "ar".to_string(),
+                            s.chapters.lang == "ar",
+                        ),
+                        (
+                            "English".to_string(),
+                            "en".to_string(),
+                            s.chapters.lang == "en",
+                        ),
+                    ],
+                    1,
+                    1,
+                    enabled,
+                ),
+                buttons(vec![serenity::CreateButton::new(CH_ADD_FEED)
+                    .label("إضافة رابط RSS")
+                    .emoji('➕')
+                    .style(serenity::ButtonStyle::Secondary)
+                    .disabled(
+                        !enabled || s.feeds.len() as i64 >= cdb::MAX_FEEDS_PER_GUILD,
+                    )]),
+            ];
+            if !s.feeds.is_empty() {
+                rows.push(menu(
+                    CH_REMOVE_FEED,
+                    "احذف رابطًا",
+                    feed_options(&s.feeds),
+                    1,
+                    1,
+                    enabled,
+                ));
+            }
+            rows
+        }
         Screen::Reset => {
             let mut extra = Vec::new();
             if confirming {
@@ -500,6 +624,22 @@ impl View for AdminView {
         true
     }
 
+    fn modal_for(&self, id: &str) -> Option<ModalSpec> {
+        (id == CH_ADD_FEED).then(|| ModalSpec {
+            title: "إضافة رابط RSS".into(),
+            label: "الرابط | عنوان العمل".into(),
+        })
+    }
+
+    async fn on_modal(&mut self, id: &str, input: String) -> Outcome {
+        if id != CH_ADD_FEED {
+            return Outcome::Keep;
+        }
+        self.notice = Some(self.add_feed(&input).await);
+        self.reload().await;
+        Outcome::Update
+    }
+
     fn render(&self, enabled: bool) -> Page {
         let confirming = self.screen == Screen::Reset
             && self.notice.as_deref() == Some(i18n::ADMIN_CONFIRM_RESET);
@@ -523,6 +663,24 @@ impl View for AdminView {
                 T_GAMES => custom::set_games(&pool, g, !self.state.games).await?,
                 N_TOGGLE => feed::set_enabled(&pool, g, !self.state.feed.enabled).await?,
                 N_PING => adb::set_reminder_ping(&pool, g, !self.state.reminder_ping).await?,
+                CH_MANGADEX => {
+                    cdb::set_source(&pool, g, "mangadex", !self.state.chapters.mangadex).await?
+                }
+                CH_MANGAUPDATES => {
+                    cdb::set_source(&pool, g, "mangaupdates", !self.state.chapters.mangaupdates)
+                        .await?
+                }
+                CH_RSS => cdb::set_source(&pool, g, "rss", !self.state.chapters.rss).await?,
+                CH_LANG => {
+                    if let Some(l) = first {
+                        cdb::set_lang(&pool, g, l).await?;
+                    }
+                }
+                CH_REMOVE_FEED => {
+                    if let Some(id) = first.and_then(|v| v.parse::<i64>().ok()) {
+                        cdb::remove_feed(&pool, g, id).await?;
+                    }
+                }
                 L_SUGGEST => {
                     if let Some(n) = first
                         .and_then(|v| v.parse::<i64>().ok())
@@ -674,6 +832,12 @@ mod tests {
             cooldown: 0,
             suggest_limit: 10,
             reminder_ping: false,
+            chapters: cdb::Settings::default(),
+            feeds: vec![cdb::Feed {
+                id: 1,
+                url: "https://a.example/f".into(),
+                title_match: "Solo".into(),
+            }],
             feed: FeedConfig {
                 guild_id: 1,
                 channel_id: Some(20),
@@ -687,7 +851,7 @@ mod tests {
         }
     }
 
-    const SCREENS: [Screen; 8] = [
+    const SCREENS: [Screen; 9] = [
         Screen::Home,
         Screen::Safety,
         Screen::Notifications,
@@ -695,6 +859,7 @@ mod tests {
         Screen::Roles,
         Screen::Channels,
         Screen::Limits,
+        Screen::Chapters,
         Screen::Reset,
     ];
 
@@ -723,7 +888,7 @@ mod tests {
 
     #[test]
     fn home_has_every_section_in_two_rows_of_buttons() {
-        assert_eq!(HOME.len(), 7);
+        assert_eq!(HOME.len(), 8);
         let rows = components_for(Screen::Home, &state(), 1, false, true);
         let json = serde_json::to_string(&rows).expect("json");
         for (id, ..) in HOME {
@@ -769,6 +934,45 @@ mod tests {
             .description
             .unwrap_or_default();
         assert!(text.contains("غير محددة") && !text.contains("<#"));
+    }
+
+    #[test]
+    fn feed_input_needs_a_url_and_a_work_title() {
+        assert_eq!(
+            parse_feed_input("https://a.example/f.xml | Solo Leveling"),
+            Some(("https://a.example/f.xml".into(), "Solo Leveling".into()))
+        );
+        assert_eq!(parse_feed_input("https://a.example/f.xml"), None);
+        assert_eq!(parse_feed_input(" | Solo"), None);
+        assert_eq!(
+            parse_feed_input("https://a.example/f.xml | ab"),
+            None,
+            "titles under 3 characters match everything"
+        );
+    }
+
+    #[test]
+    fn the_chapters_screen_lists_sources_language_and_feeds_within_five_rows() {
+        let s = state();
+        let rows = components_for(Screen::Chapters, &s, 1, false, true);
+        assert!((3..=5).contains(&rows.len()));
+        let json = serde_json::to_string(&rows).expect("json");
+        for id in [
+            "ch:mangadex",
+            "ch:mangaupdates",
+            "ch:rss",
+            "ch:lang",
+            "ch:addfeed",
+            "ch:rmfeed",
+            "\"back\"",
+        ] {
+            assert!(json.contains(id), "{id}");
+        }
+        let text = embed_for(Screen::Chapters, &s, 1)
+            .description
+            .unwrap_or_default();
+        assert!(text.contains("MangaDex") && text.contains("RSS") && text.contains("العربية"));
+        assert_eq!(feed_options(&s.feeds)[0].1, "1");
     }
 
     #[test]

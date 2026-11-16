@@ -353,3 +353,27 @@ pub fn arena_winner(user: u64) -> String {
     format!("🏆 أسرع إجابة صحيحة: <@{user}>")
 }
 pub const ARENA_WEEKLY: &str = "🗓 نقاط هذا الأسبوع (الألعاب الجماعية)";
+pub const CHAPTER_WORD: &str = "الفصل";
+pub const CHAPTER_NEW: &str = "فصل جديد:";
+pub const CHAPTER_NEW_UNNUMBERED: &str = "صدر فصل جديد";
+pub const CHAPTER_LANGUAGE: &str = "اللغة:";
+pub const CHAPTER_SOURCE: &str = "المصدر:";
+pub const BTN_READ: &str = "اقرأ";
+pub const REMINDER_CHAPTER: &str = "🔔 تذكير: صدر فصل جديد من عمل طلبتَ التذكير به.";
+pub const FEED_INPUT_HELP: &str =
+    "اكتب: `رابط RSS | عنوان العمل` مثل `https://site.example/feed.xml | Solo Leveling`.";
+pub const FEED_ADDED: &str = "✅ أُضيف الرابط. سيُربط بالعمل المتابَع الذي يطابق العنوان.";
+pub const FEED_DUPLICATE: &str = "هذا الرابط مضاف بالفعل.";
+pub const FEED_FULL: &str = "وصلتَ إلى الحد الأقصى من الروابط (10).";
+pub fn feed_url_error(code: &str) -> String {
+    let why = match code {
+        "TooLong" => "الرابط طويل جدًا",
+        "NotHttps" => "يجب أن يبدأ بـ https://",
+        "Credentials" => "لا يُسمح بكلمة مرور داخل الرابط",
+        "Port" => "المنفذ غير مسموح",
+        "InternalHost" | "PrivateAddress" => "عنوان داخلي أو خاص غير مسموح",
+        "Unresolvable" => "تعذر الوصول إلى النطاق",
+        _ => "رابط غير صالح",
+    };
+    format!("❌ {why}.")
+}

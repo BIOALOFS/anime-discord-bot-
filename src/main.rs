@@ -3,6 +3,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod anilist;
+mod chapters;
 mod commands;
 mod config;
 mod db;
@@ -45,6 +46,10 @@ async fn main() -> anyhow::Result<()> {
     let dev_guild = config.dev_guild_id;
     let provider_cfg = config.provider_config();
     let (feed_pool, feed_api) = (pool.clone(), anilist.clone());
+    let feed_web = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("anpot-discord-bot/", env!("CARGO_PKG_VERSION")))
+        .build()?;
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -104,6 +109,8 @@ async fn main() -> anyhow::Result<()> {
             pool: feed_pool,
             api: feed_api,
             http: client.http.clone(),
+            chapters: std::sync::Arc::new(chapters::poll::Sources::new(feed_web)),
+            last_chapter_poll: std::sync::atomic::AtomicI64::new(0),
         },
         stop_rx,
     ));
