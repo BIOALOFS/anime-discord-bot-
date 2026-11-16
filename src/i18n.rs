@@ -108,9 +108,6 @@ pub fn privacy_ar(p: &str) -> &'static str {
         _ => "خاص",
     }
 }
-pub fn position_of(pos: i64, total: i64) -> String {
-    format!("{pos} / {total}")
-}
 pub const NOTE_LABEL: &str = "ملاحظتك";
 pub const NICKNAMES: &str = "الأسماء المستعارة";
 pub const BTN_DESCRIPTION: &str = "الوصف";
@@ -222,19 +219,6 @@ pub fn rec_why_together(seed: &str) -> String {
 }
 
 // ---- games ----
-pub const GUESS_CHARACTER_TITLE: &str = "من هذه الشخصية؟";
-pub const GUESS_ANIME_TITLE: &str = "ما هذا الأنمي؟";
-pub fn guess_hint(seconds: u64, level: u8, streak: i64) -> String {
-    format!(
-        "لديك {seconds} ثانية · المستوى {} · سلسلتك: {streak}",
-        level + 1
-    )
-}
-pub fn game_correct(streak: i64) -> String {
-    format!("✅ إجابة صحيحة! السلسلة: {streak}")
-}
-pub const GAME_WRONG: &str = "❌ إجابة خاطئة (أو انتهى الوقت). هذه هي الإجابة:";
-pub const GAME_ALREADY_ACTIVE: &str = "لديك لعبة نشطة في هذه القناة. أنهِها أولًا.";
 pub const GAMES_DISABLED: &str = "الألعاب معطّلة في هذا السيرفر.";
 pub const GAME_PICK_MODE: &str = "اختر نوع اللعبة من الاقتراحات.";
 pub const VERSUS_PROMPT: &str = "أيهما تفضّل؟";
@@ -292,10 +276,8 @@ pub const PAGES_NEXT_GROUP: &str = "مجموعة الصفحات التالية �
 pub const SELECT_PAGE_PLACEHOLDER: &str = "انتقل إلى صفحة…";
 pub const F_PROFILE_CHARACTERS: &str = "الشخصيات";
 pub const F_PROFILE_WORKS: &str = "الأعمال";
-pub const F_PROFILE_PRIVACY: &str = "الخصوصية";
 pub const F_PROFILE_JOINED: &str = "انضم";
 pub const F_PROFILE_SUGGESTIONS: &str = "الاقتراحات";
-pub const F_PROFILE_BADGES: &str = "الأوسمة";
 pub const BANNER_PICKER_TITLE: &str = "🎨 اختر غلافًا جاهزًا";
 pub const BANNER_PICKER_HELP: &str = "اختر من القائمة لترى المعاينة ثم اضغط «تطبيق».\nلرفع صورتك أو GIF: `/edit` ← البروفايل ← الغلاف وأرفق الملف (إن سمح السيرفر بالصور المخصصة). للون: اكتب `#ff8800` في القيمة.";
 pub const BANNER_PICKER_PLACEHOLDER: &str = "الأغلفة الجاهزة…";
@@ -338,4 +320,60 @@ pub fn current_language(label: &str) -> String {
 }
 pub fn current_privacy(label: &str) -> String {
     format!("الخصوصية الحالية: **{label}**. اختر قيمة لتغييرها.")
+}
+pub const BTN_SHOW_WORK: &str = "أظهر العمل";
+pub const SHOW_WORK_UNAVAILABLE: &str = "تعذر عرض العمل الآن.";
+pub const SUGGEST_OPEN_PLACEHOLDER: &str = "افتح بطاقة أحد العملين…";
+pub const ARENA_CHARACTER_IMAGE: &str = "🖼 خمّن الشخصية من الصورة";
+pub const ARENA_WORK_COVER: &str = "📚 خمّن العمل من الغلاف";
+pub const ARENA_CHARACTER_HINTS: &str = "🕵️ خمّن الشخصية من الوصف";
+pub const ARENA_TRUE_FALSE: &str = "✔️ صح أم خطأ";
+pub const ARENA_HIGHER_LOWER: &str = "⚖️ الأعلى";
+pub const ARENA_ORDER_YEARS: &str = "📅 رتّب حسب السنة";
+pub const ARENA_WHO_IS_THIS: &str = "من هذه الشخصية؟";
+pub const ARENA_WHICH_WORK: &str = "ما هذا العمل؟";
+pub const ARENA_FROM: &str = "تظهر في:";
+pub const ARENA_TRUE: &str = "صحيح";
+pub const ARENA_FALSE: &str = "خطأ";
+pub const ARENA_ANSWER_WAS: &str = "الإجابة:";
+pub const ARENA_HIGHER_RATED: &str = "أيهما تقييمه أعلى؟";
+pub const ARENA_MORE_POPULAR: &str = "أيهما أكثر شعبية؟";
+pub const ARENA_ORDER_PROMPT: &str = "رتّب الأعمال من الأقدم إلى الأحدث:";
+pub const ARENA_SKIP: &str = "تخطّي";
+pub const ARENA_END: &str = "إنهاء اللعبة";
+pub const ARENA_SCOREBOARD: &str = "النقاط";
+pub const ARENA_NO_SCORES: &str = "لا نقاط بعد — أول إجابة صحيحة تكسب!";
+pub const ARENA_FINAL: &str = "🏁 انتهت اللعبة! الترتيب النهائي:";
+pub const ARENA_NOBODY: &str = "لم يُجب أحد بشكل صحيح.";
+pub const ARENA_MANAGE_DENIED: &str = "التخطي والإنهاء لمن بدأ اللعبة أو للمشرفين فقط.";
+pub const ARENA_ALREADY_ANSWERED: &str = "أجبتَ في هذه الجولة بالفعل.";
+pub const ARENA_WRONG: &str = "❌ إجابة خاطئة — انتظر الجولة القادمة.";
+pub const ARENA_CHANNEL_BUSY: &str = "توجد لعبة جارية في هذه القناة. انتظر انتهاءها.";
+pub fn arena_winner(user: u64) -> String {
+    format!("🏆 أسرع إجابة صحيحة: <@{user}>")
+}
+pub const ARENA_WEEKLY: &str = "🗓 نقاط هذا الأسبوع (الألعاب الجماعية)";
+pub const CHAPTER_WORD: &str = "الفصل";
+pub const CHAPTER_NEW: &str = "فصل جديد:";
+pub const CHAPTER_NEW_UNNUMBERED: &str = "صدر فصل جديد";
+pub const CHAPTER_LANGUAGE: &str = "اللغة:";
+pub const CHAPTER_SOURCE: &str = "المصدر:";
+pub const BTN_READ: &str = "اقرأ";
+pub const REMINDER_CHAPTER: &str = "🔔 تذكير: صدر فصل جديد من عمل طلبتَ التذكير به.";
+pub const FEED_INPUT_HELP: &str =
+    "اكتب: `رابط RSS | عنوان العمل` مثل `https://site.example/feed.xml | Solo Leveling`.";
+pub const FEED_ADDED: &str = "✅ أُضيف الرابط. سيُربط بالعمل المتابَع الذي يطابق العنوان.";
+pub const FEED_DUPLICATE: &str = "هذا الرابط مضاف بالفعل.";
+pub const FEED_FULL: &str = "وصلتَ إلى الحد الأقصى من الروابط (10).";
+pub fn feed_url_error(code: &str) -> String {
+    let why = match code {
+        "TooLong" => "الرابط طويل جدًا",
+        "NotHttps" => "يجب أن يبدأ بـ https://",
+        "Credentials" => "لا يُسمح بكلمة مرور داخل الرابط",
+        "Port" => "المنفذ غير مسموح",
+        "InternalHost" | "PrivateAddress" => "عنوان داخلي أو خاص غير مسموح",
+        "Unresolvable" => "تعذر الوصول إلى النطاق",
+        _ => "رابط غير صالح",
+    };
+    format!("❌ {why}.")
 }

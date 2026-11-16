@@ -19,6 +19,8 @@ pub struct Suggestion {
     pub second_title: String,
     pub first_url: Option<String>,
     pub second_url: Option<String>,
+    pub first_image: Option<String>,
+    pub second_image: Option<String>,
     pub reason: String,
     pub created_at: i64,
 }
@@ -33,6 +35,8 @@ pub struct NewSuggestion {
     pub second_title: String,
     pub first_url: Option<String>,
     pub second_url: Option<String>,
+    pub first_image: Option<String>,
+    pub second_image: Option<String>,
     pub reason: String,
 }
 
@@ -75,7 +79,7 @@ pub async fn add(pool: &SqlitePool, s: &NewSuggestion, daily_limit: i64) -> Resu
     }
     let r = sqlx::query(
         "INSERT INTO suggestions (guild_id, author_id, first_id, second_id, first_title, second_title, first_url, \
-         second_url, pair_key, reason) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+         second_url, first_image, second_image, pair_key, reason) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
     )
     .bind(s.guild_id)
     .bind(s.author_id)
@@ -85,6 +89,8 @@ pub async fn add(pool: &SqlitePool, s: &NewSuggestion, daily_limit: i64) -> Resu
     .bind(&s.second_title)
     .bind(&s.first_url)
     .bind(&s.second_url)
+    .bind(&s.first_image)
+    .bind(&s.second_image)
     .bind(&key)
     .bind(&s.reason)
     .execute(pool)
@@ -101,7 +107,7 @@ pub async fn count_today(pool: &SqlitePool, guild: i64, author: i64) -> Result<i
         .await
 }
 
-const COLS: &str = "id, guild_id, author_id, first_id, second_id, first_title, second_title, first_url, second_url, reason, created_at";
+const COLS: &str = "id, guild_id, author_id, first_id, second_id, first_title, second_title, first_url, second_url, first_image, second_image, reason, created_at";
 
 /// A random suggestion of this server, optionally only those that involve `work`.
 pub async fn random(
@@ -196,6 +202,8 @@ mod tests {
             second_title: format!("T {b}"),
             first_url: Some(format!("https://anilist.co/anime/{a}")),
             second_url: None,
+            first_image: Some("https://s4.anilist.co/a.png".into()),
+            second_image: None,
             reason: "same mood".into(),
         }
     }

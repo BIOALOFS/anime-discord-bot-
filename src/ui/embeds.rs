@@ -69,10 +69,6 @@ impl Emb {
         self.author = Some(s.into());
         self
     }
-    pub fn author_icon(mut self, s: Option<impl Into<String>>) -> Self {
-        self.author_icon = s.map(Into::into);
-        self
-    }
     pub fn field(
         mut self,
         name: impl Into<String>,

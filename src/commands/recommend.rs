@@ -1,7 +1,7 @@
 //! `/recommend [user]`: suggestions from favourite works and characters' source works, via AniList
 //! recommendations. With `user` it finds what both of you would like.
 
-use super::{buttons, fail, policy, say_ephemeral};
+use super::{buttons, fail, media::MediaView, policy, say_ephemeral};
 use crate::{
     anilist::{kind_of, models::Media, AniError, ContentPolicy, SafeAniList},
     commands::media::media_cache_row,
@@ -19,7 +19,7 @@ use crate::{
 };
 use poise::serenity_prelude as serenity;
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 const PER_PAGE: usize = 5;
 const MAX_SEEDS: usize = 4;
@@ -96,6 +96,10 @@ async fn seeds_of(pool: &SqlitePool, user: i64) -> Result<Vec<i64>, Error> {
 }
 
 struct RecView {
+    api: Arc<SafeAniList>,
+    policy: ContentPolicy,
+    /// The work card opened from the dropdown; Back returns to the list.
+    sub: Option<MediaView>,
     pool: SqlitePool,
     user: i64,
     items: Vec<Candidate>,
@@ -118,10 +122,16 @@ impl RecView {
 
 impl View for RecView {
     fn take_whisper(&mut self) -> Option<Whisper> {
-        self.whisper.take()
+        match self.sub.as_mut() {
+            Some(sub) => sub.take_whisper(),
+            None => self.whisper.take(),
+        }
     }
 
     fn render(&self, enabled: bool) -> Page {
+        if let Some(sub) = &self.sub {
+            return sub.render(enabled);
+        }
         let pages = page_count(self.items.len(), PER_PAGE);
         let slice = page_slice(&self.items, self.page, PER_PAGE);
         let body = slice
@@ -193,10 +203,35 @@ impl View for RecView {
     }
 
     async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
+        if let Some(sub) = self.sub.as_mut() {
+            if sub.wants_to_leave(id) {
+                self.sub = None;
+                return Outcome::Update;
+            }
+            return sub.on_interaction(id, values).await;
+        }
         match id {
             CLOSE => Outcome::Close,
             PICK_ID => {
+                // Choosing a work opens its card (cover, status, count, score, add and remind buttons).
                 self.selected = values.first().and_then(|v| v.parse().ok());
+                let Some(c) = self
+                    .selected
+                    .and_then(|s| self.items.iter().find(|c| c.media.id == s))
+                    .cloned()
+                else {
+                    return Outcome::Keep;
+                };
+                self.sub = Some(
+                    MediaView::child(
+                        self.api.clone(),
+                        self.pool.clone(),
+                        self.user,
+                        self.policy,
+                        c.media,
+                    )
+                    .await,
+                );
                 Outcome::Update
             }
             ADD_ID => {
@@ -356,6 +391,9 @@ pub async fn recommend(
     session::run(
         ctx,
         RecView {
+            api: ctx.data().anilist.clone(),
+            policy: policy(ctx),
+            sub: None,
             pool,
             user: me,
             items,

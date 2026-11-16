@@ -20,7 +20,7 @@ use crate::{
         pagination::{apply_nav, parse_nav, NAV_FIRST, NAV_LAST, NAV_NEXT, NAV_PREV},
         select::{select_row, Choice},
         session::{Outcome, Page, View},
-        styles,
+        styles, v2,
     },
 };
 use poise::serenity_prelude as serenity;
@@ -38,6 +38,8 @@ const PAGE_ID: &str = "page";
 const GROUP_PREV: &str = "grp:prev";
 const GROUP_NEXT: &str = "grp:next";
 const BANNER_NAME: &str = "banner";
+/// Container colour when the member has not chosen one.
+const DEFAULT_ACCENT: u32 = 0x3DB4F2;
 
 /// The banner picture and the file name it is attached under (a GIF keeps its extension so it animates).
 pub struct BannerFile {
@@ -53,7 +55,6 @@ pub struct ProfileView {
     pub viewer: i64,
     pub owner: i64,
     pub owner_name: String,
-    pub owner_avatar: Option<String>,
     pub profile: Profile,
     pub section: Section,
     /// 0-based index of the shown item within the section.
@@ -176,7 +177,6 @@ impl ProfileView {
         profile: Profile,
         owner: i64,
         owner_name: String,
-        owner_avatar: Option<String>,
         section: Section,
     ) -> Self {
         Self {
@@ -187,7 +187,6 @@ impl ProfileView {
             viewer: super::util::uid(ctx),
             owner,
             owner_name,
-            owner_avatar,
             profile,
             section,
             index: 0,
@@ -302,94 +301,150 @@ impl ProfileView {
         })
     }
 
-    fn banner_embed(&self) -> Emb {
-        let mut e = Emb::new();
-        e.footer = None;
-        e.colour = self.accent();
-        e.image = self
-            .banner
-            .as_ref()
-            .map(|b| format!("attachment://{}", b.name));
-        e
+    /// The compact details line: "الشخصيات 4 · الأعمال 1 · عام · انضم 2026-11-15" (+ suggestions).
+    pub fn details_line(&self) -> String {
+        let joined = chrono::DateTime::from_timestamp(self.profile.created_at, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+        let mut parts = vec![
+            format!("{} {}", i18n::F_PROFILE_CHARACTERS, self.counts.0),
+            format!("{} {}", i18n::F_PROFILE_WORKS, self.counts.1),
+            i18n::privacy_ar(&self.profile.privacy).to_string(),
+            format!("{} {joined}", i18n::F_PROFILE_JOINED),
+        ];
+        if self.suggestions > 0 {
+            parts.push(format!(
+                "{} {}",
+                i18n::F_PROFILE_SUGGESTIONS,
+                self.suggestions
+            ));
+        }
+        parts.join(" · ")
     }
 
-    /// Name, bio and details. Kept far below Discord's embed limits.
-    pub fn info_embed(&self) -> Emb {
-        let mut desc = Vec::new();
+    /// Name, bio, quote, details and badges as lines of text.
+    pub fn info_text(&self) -> String {
+        let mut lines = vec![format!(
+            "**{} {}**",
+            i18n::PROFILE_TITLE,
+            fit(&self.shown_name(), 60)
+        )];
         if let Some(b) = &self.profile.bio {
-            desc.push(fit(b, 300));
+            lines.push(fit(b, 300));
         }
         if let Some(q) = &self.profile.quote {
-            desc.push(format!("*« {} »*", fit(q, 200)));
+            lines.push(format!("*« {} »*", fit(q, 200)));
         }
-        let mut e = Emb::new()
-            .title(format!(
-                "{} {}",
-                i18n::PROFILE_TITLE,
-                fit(&self.shown_name(), 60)
-            ))
-            .author(self.owner_name.clone())
-            .author_icon(self.owner_avatar.clone())
-            .colour(self.accent())
-            .field(i18n::F_PROFILE_CHARACTERS, self.counts.0.to_string(), true)
-            .field(i18n::F_PROFILE_WORKS, self.counts.1.to_string(), true)
-            .field(
-                i18n::F_PROFILE_PRIVACY,
-                i18n::privacy_ar(&self.profile.privacy),
-                true,
-            )
-            .field(
-                i18n::F_PROFILE_JOINED,
-                format!("<t:{}:D>", self.profile.created_at),
-                true,
-            );
-        if self.suggestions > 0 {
-            e = e.field(
-                i18n::F_PROFILE_SUGGESTIONS,
-                self.suggestions.to_string(),
-                true,
-            );
-        }
+        lines.push(self.details_line());
         if !self.badges.is_empty() {
-            e = e.field(
-                i18n::F_PROFILE_BADGES,
+            lines.push(
                 self.badges
                     .iter()
                     .map(|b| b.label)
                     .collect::<Vec<_>>()
                     .join(" · "),
-                false,
             );
         }
-        if !desc.is_empty() {
-            e = e.description(desc.join("\n"));
-        }
-        e.footer = None;
-        e
+        lines.join("\n")
     }
 
-    fn item_embed(&self) -> Emb {
-        let footer = format!("{}/{}", self.index + 1, self.total.max(1));
-        let mut e = match self.current() {
-            Some(i) if i.visible => styles::item_card(i, self.total, self.own()),
-            Some(_) => Emb::new().description(i18n::HIDDEN_NOTICE),
-            None => Emb::new().description(i18n::PROFILE_EMPTY),
+    /// The current item as text: name, personal title and description, work, and the counter (shown once).
+    pub fn item_text(&self) -> String {
+        let counter = format!("`{}/{}`", self.index + 1, self.total.max(1));
+        let Some(i) = self.current() else {
+            return format!("{}\n{counter}", i18n::PROFILE_EMPTY);
         };
-        e.colour = self.accent();
+        if !i.visible {
+            return format!("{}\n{counter}", i18n::HIDDEN_NOTICE);
+        }
+        let name = match i.native.as_deref().filter(|n| !n.is_empty()) {
+            Some(n) => format!("{} ({n})", i.name),
+            None => i.name.clone(),
+        };
+        let mut lines = vec![format!("### {name}")];
+        if let Some(t) = i.display_title() {
+            lines.push(format!("✨ **{t}**"));
+        }
+        if let Some(w) = i.subtitle.as_deref().filter(|w| !w.is_empty()) {
+            lines.push(if i.section == Section::Characters {
+                format!("📺 {w}")
+            } else {
+                w.to_string()
+            });
+        }
+        if let Some(d) = &i.custom_description {
+            lines.push(format!("📝 {d}"));
+        }
+        if self.own() {
+            if let Some(n) = i.note.as_deref() {
+                lines.push(format!("🗒️ **{}:** {n}", i18n::NOTE_LABEL));
+            }
+        }
+        if let Some(f) = i.favourites {
+            lines.push(format!("❤ {}", crate::ui::format::thousands(f)));
+        }
+        lines.push(counter);
+        lines.join("\n")
+    }
+
+    /// Where the current item's picture comes from: the personal picture (attached), or AniList's. Pictures of
+    /// other providers are never hotlinked.
+    fn item_image(&self) -> Option<String> {
         if let Some(img) = &self.custom {
-            e.image = Some(format!("attachment://{}", custom_name(img)));
+            return Some(format!("attachment://{}", custom_name(img)));
         }
-        if let Some(d) = self
-            .current()
+        self.current()
             .filter(|i| i.visible)
-            .and_then(|i| i.custom_description.as_deref())
-        {
-            e.description = Some(format!(
-                "{}\n📝 {d}",
-                e.description.take().unwrap_or_default()
-            ));
+            .and_then(|i| i.image_url.clone())
+            .filter(|u| u.starts_with("https://s4.anilist.co/"))
+    }
+
+    fn banner_url(&self) -> Option<String> {
+        self.banner
+            .as_ref()
+            .map(|b| format!("attachment://{}", b.name))
+    }
+
+    /// The whole profile as one Components V2 container: banner, text, item picture, item text, the three rows.
+    pub fn v2_body(&self, enabled: bool) -> Vec<serde_json::Value> {
+        let mut kids = Vec::new();
+        // A V2 message has no `content`: a notice becomes a line of text at the top.
+        if let Some(n) = &self.notice {
+            kids.push(v2::text(n));
         }
-        e.footer(footer)
+        if let Some(b) = self.banner_url() {
+            kids.push(v2::gallery(&[b]));
+        }
+        kids.push(v2::text(&self.info_text()));
+        if let Some(img) = self.item_image() {
+            kids.push(v2::gallery(&[img]));
+        }
+        kids.push(v2::text(&self.item_text()));
+        kids.extend(v2::rows(&self.rows(enabled)));
+        vec![v2::container(
+            kids,
+            Some(self.accent().unwrap_or(DEFAULT_ACCENT)),
+        )]
+    }
+
+    /// The fallback when V2 is refused: two embeds at most. Embed 1 is the banner alone; embed 2 holds the info and
+    /// the item with the item picture at the bottom.
+    pub fn fallback_embeds(&self) -> Vec<serenity::CreateEmbed> {
+        let mut banner = Emb::new();
+        banner.footer = None;
+        banner.colour = self.accent();
+        banner.image = self.banner_url();
+        let mut card =
+            Emb::new().description(format!("{}\n\n{}", self.info_text(), self.item_text()));
+        card.colour = self.accent();
+        card.image = self.item_image();
+        card.footer = None;
+        let mut out = Vec::new();
+        if self.banner.is_some() {
+            out.push(banner.build());
+        }
+        out.push(card.build());
+        out
     }
 
     /// The three rows of the profile (pure given the loaded state).
@@ -436,13 +491,10 @@ impl ProfileView {
     pub fn main_page(&self, enabled: bool) -> Page {
         Page {
             content: self.notice.clone(),
-            embeds: vec![
-                self.banner_embed().build(),
-                self.info_embed().build(),
-                self.item_embed().build(),
-            ],
+            embeds: self.fallback_embeds(),
             components: self.rows(enabled),
             files: self.files(),
+            v2: Some(self.v2_body(enabled)),
         }
     }
 }
@@ -542,6 +594,116 @@ mod tests {
 
     fn row_json(row: &serenity::CreateActionRow) -> serde_json::Value {
         serde_json::to_value(row).expect("json")
+    }
+
+    async fn sample_view() -> ProfileView {
+        ProfileView {
+            api: Arc::new(SafeAniList::with_fixture(|_, _| {
+                Err(crate::anilist::AniError::NotFound)
+            })),
+            pool: crate::db::connect_memory().await,
+            policy: ContentPolicy::SAFE,
+            renderer: Arc::new(Renderer::new(reqwest::Client::new())),
+            viewer: 1,
+            owner: 1,
+            owner_name: "Alice".into(),
+            profile: Profile {
+                user_id: 1,
+                bio: Some("bio text".into()),
+                accent_color: Some(0xFF8800),
+                quote: None,
+                banner: None,
+                privacy: "public".into(),
+                display_title: None,
+                language: "ar".into(),
+                created_at: 1_800_000_000,
+            },
+            section: Section::Characters,
+            index: 0,
+            total: 4,
+            counts: (4, 1),
+            suggestions: 0,
+            badges: Vec::new(),
+            window: vec![item(1, "Rem")],
+            window_start: 0,
+            custom: None,
+            banner: Some(Arc::new(BannerFile {
+                name: "banner.gif".into(),
+                bytes: vec![1],
+            })),
+            notice: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_profile_is_one_container_with_banner_text_picture_text_and_exactly_three_rows() {
+        let v = sample_view().await;
+        let body = v.v2_body(true);
+        assert_eq!(body.len(), 1, "one visual block");
+        assert_eq!(body[0]["type"], 17);
+        assert_eq!(
+            body[0]["accent_color"], 0xFF8800,
+            "the member's colour is the side bar"
+        );
+        let kinds: Vec<i64> = body[0]["components"]
+            .as_array()
+            .expect("kids")
+            .iter()
+            .map(|k| k["type"].as_i64().unwrap_or(0))
+            .collect();
+        // banner gallery, info text, item text (no picture: this item has none), then button row + two selects
+        assert_eq!(kinds, vec![12, 10, 10, 1, 1, 1]);
+        assert!(super::v2::validate(&body).is_ok());
+        assert_eq!(
+            body[0]["components"][0]["items"][0]["media"]["url"],
+            "attachment://banner.gif"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_info_is_compact_and_the_counter_appears_once() {
+        let v = sample_view().await;
+        let details = v.details_line();
+        assert!(
+            details.starts_with("الشخصيات 4 · الأعمال 1 · عام · انضم 2027-01-15"),
+            "{details}"
+        );
+        assert!(!details.contains('\n'), "one line, not one field per line");
+        let page = v.main_page(true);
+        let all: String = v.info_text() + &v.item_text();
+        assert_eq!(
+            all.matches("1/4").count(),
+            1,
+            "the position counter is shown once"
+        );
+        assert!(page.content.is_none(), "no content next to a V2 body");
+    }
+
+    #[tokio::test]
+    async fn the_fallback_is_at_most_two_embeds_banner_alone_then_info_and_item() {
+        let mut v = sample_view().await;
+        let e = v.fallback_embeds();
+        assert_eq!(e.len(), 2);
+        let first = serde_json::to_value(&e[0]).expect("json");
+        assert_eq!(first["image"]["url"], "attachment://banner.gif");
+        assert!(
+            first.get("title").is_none() && first.get("description").is_none(),
+            "embed 1 is the banner only"
+        );
+        v.banner = None;
+        assert_eq!(
+            v.fallback_embeds().len(),
+            1,
+            "without a banner there is one embed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_notice_moves_into_the_container_in_v2() {
+        let mut v = sample_view().await;
+        v.notice = Some("تنبيه".into());
+        let body = v.v2_body(true);
+        assert_eq!(body[0]["components"][0]["content"], "تنبيه");
     }
 
     #[test]

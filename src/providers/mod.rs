@@ -393,7 +393,11 @@ impl Providers {
 
     /// Picture bytes fetched by the bot itself (never a hotlink).
     pub async fn cover(&self, work: &Work) -> Option<Arc<Vec<u8>>> {
-        let url = work.cover_url.as_deref()?;
+        self.image_bytes(work.cover_url.as_deref()?).await
+    }
+
+    /// Same, for a stored picture URL.
+    pub async fn image_bytes(&self, url: &str) -> Option<Arc<Vec<u8>>> {
         if let Some(hit) = self.covers.get(url).await {
             return Some(hit);
         }

@@ -82,6 +82,42 @@ pub fn parse_banner_value(v: &str) -> Option<BannerChoice> {
     parse_color(v).map(|c| BannerChoice::Spec(BannerSpec::Color(c)))
 }
 
+/// Preset side-bar colours of the profile: `(key, Arabic name, 0xRRGGBB)`.
+pub const ACCENT_PRESETS: &[(&str, &str, u32)] = &[
+    ("blue", "أزرق", 0x3DB4F2),
+    ("red", "أحمر", 0xED4245),
+    ("green", "أخضر", 0x57F287),
+    ("orange", "برتقالي", 0xFF8800),
+    ("purple", "بنفسجي", 0x9B59B6),
+    ("pink", "وردي", 0xF78FB3),
+    ("teal", "تركوازي", 0x1ABC9C),
+    ("gold", "ذهبي", 0xF1C40F),
+    ("white", "أبيض", 0xFFFFFF),
+    ("grey", "رمادي", 0x95A5A6),
+];
+
+/// What a colour value means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccentChoice {
+    Reset,
+    Color(u32),
+}
+
+/// `reset`, a preset key or a validated hex colour (`#ff8800`, `ff8800`).
+pub fn parse_accent_value(v: &str) -> Option<AccentChoice> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("reset") || super::actions_clear_word(v) {
+        return Some(AccentChoice::Reset);
+    }
+    if let Some((_, _, c)) = ACCENT_PRESETS
+        .iter()
+        .find(|(k, l, _)| k.eq_ignore_ascii_case(v) || *l == v)
+    {
+        return Some(AccentChoice::Color(*c));
+    }
+    parse_color(v).map(AccentChoice::Color)
+}
+
 /// Validate a text field: not empty, within `max` characters, nothing explicit. Returns the cleaned text.
 pub fn check_text(text: &str, max: usize) -> Result<String, &'static str> {
     let t = text.trim();
@@ -266,13 +302,10 @@ async fn profile_color(ctx: Context<'_>, value: Option<&str>) -> Result<(), Erro
     let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
         return private_reply(ctx, i18n::PROFILE_NEEDS_VALUE).await;
     };
-    let new = if super::actions_clear_word(v) {
-        None
-    } else {
-        match parse_color(v) {
-            Some(c) => Some(c),
-            None => return private_reply(ctx, i18n::COLOR_INVALID).await,
-        }
+    let new = match parse_accent_value(v) {
+        Some(AccentChoice::Reset) => None,
+        Some(AccentChoice::Color(c)) => Some(c),
+        None => return private_reply(ctx, i18n::COLOR_INVALID).await,
     };
     let (pool, user) = (pool(ctx), uid(ctx));
     pdb::set_color(&pool, user, new).await?;
@@ -513,6 +546,16 @@ async fn ac_value(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocomplete
                 .collect(),
             partial,
         ),
+        ("profile", "color") => matching(
+            std::iter::once(("إعادة للافتراضي".to_string(), "reset".to_string()))
+                .chain(
+                    ACCENT_PRESETS
+                        .iter()
+                        .map(|(k, l, _)| ((*l).to_string(), (*k).to_string())),
+                )
+                .collect(),
+            partial,
+        ),
         ("profile", "privacy") => matching(
             crate::commands::settings::PRIVACY_LEVELS
                 .iter()
@@ -646,6 +689,41 @@ mod tests {
             chars,
             vec!["image", "title", "description", "reset", "remove", "move"]
         );
+    }
+
+    #[test]
+    fn accent_values_are_presets_validated_hex_or_reset() {
+        assert_eq!(parse_accent_value("reset"), Some(AccentChoice::Reset));
+        assert_eq!(
+            parse_accent_value("orange"),
+            Some(AccentChoice::Color(0xFF8800))
+        );
+        assert_eq!(
+            parse_accent_value("أخضر"),
+            Some(AccentChoice::Color(0x57F287))
+        );
+        assert_eq!(
+            parse_accent_value("#12abEF"),
+            Some(AccentChoice::Color(0x12abef))
+        );
+        assert_eq!(
+            parse_accent_value("12abef"),
+            Some(AccentChoice::Color(0x12abef))
+        );
+        for bad in [
+            "",
+            "#12",
+            "#gggggg",
+            "#1234567",
+            "not a colour",
+            "javascript:1",
+        ] {
+            assert_eq!(parse_accent_value(bad), None, "{bad}");
+        }
+        let mut seen = std::collections::HashSet::new();
+        assert!(ACCENT_PRESETS
+            .iter()
+            .all(|(k, _, c)| seen.insert(*k) && *c <= 0xFF_FFFF));
     }
 
     #[test]

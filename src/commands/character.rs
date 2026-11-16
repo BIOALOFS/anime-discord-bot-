@@ -177,12 +177,6 @@ impl CharacterView {
         }
     }
 
-    /// Text shown above the card (e.g. the result of a game round).
-    pub fn with_notice(mut self, text: String) -> Self {
-        self.notice = Some(text);
-        self
-    }
-
     /// Mark the view as a child of another view.
     pub fn with_back(mut self) -> Self {
         self.from_parent = true;

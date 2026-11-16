@@ -145,6 +145,10 @@ pub struct Feed {
     pub pool: SqlitePool,
     pub api: Arc<SafeAniList>,
     pub http: Arc<serenity::Http>,
+    /// Chapter sources (MangaDex, MangaUpdates, RSS) with their caches and back-off state.
+    pub chapters: Arc<crate::chapters::poll::Sources>,
+    /// Unix time of the last chapter poll (chapters are checked every 15 minutes).
+    pub last_chapter_poll: std::sync::atomic::AtomicI64,
 }
 
 /// Run until `shutdown` flips to true. Never panics the process: every error is logged and retried.
@@ -185,6 +189,17 @@ async fn tick(f: &Feed) -> anyhow::Result<()> {
             tracing::warn!("reminders failed (will retry): {e:#}");
         }
         feed::set_last_checked(&f.pool, now).await?;
+    }
+    // Chapters of tracked manga: a separate, slower poll that fails on its own.
+    let last = f
+        .last_chapter_poll
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if now - last >= crate::chapters::poll::INTERVAL_SECS {
+        f.last_chapter_poll
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = crate::chapters::poll::poll(f, now).await {
+            tracing::warn!("chapter poll failed (will retry): {e:#}");
+        }
     }
     feed::prune_posted(&f.pool, now - 2 * 86_400).await?;
     Ok(())
@@ -242,6 +257,11 @@ async fn deliver_reminders(f: &Feed, entries: &[AiringEntry], now: i64) -> anyho
 /// DM the member; if their DMs are closed, ping them in a notifications channel only where the server allows it.
 async fn send_reminder(f: &Feed, user: i64, e: &AiringEntry) {
     let embed = episode_embed(&e.media, e.episode, e.airing_at).build();
+    notify_user(f, user, i18n::REMINDER_DM, embed).await;
+}
+
+/// DM the member; when DMs are closed, ping them in a notifications channel only where the server allows it.
+pub async fn notify_user(f: &Feed, user: i64, text: &str, embed: serenity::CreateEmbed) {
     let dm = async {
         let channel = serenity::UserId::new(user as u64)
             .create_dm_channel(&f.http)
@@ -250,7 +270,7 @@ async fn send_reminder(f: &Feed, user: i64, e: &AiringEntry) {
             .send_message(
                 &f.http,
                 serenity::CreateMessage::new()
-                    .content(i18n::REMINDER_DM)
+                    .content(text)
                     .embed(embed.clone()),
             )
             .await
@@ -263,7 +283,7 @@ async fn send_reminder(f: &Feed, user: i64, e: &AiringEntry) {
     };
     for (_, channel) in channels {
         let msg = serenity::CreateMessage::new()
-            .content(format!("<@{user}> {}", i18n::REMINDER_DM))
+            .content(format!("<@{user}> {text}"))
             .embed(embed.clone())
             .allowed_mentions(
                 serenity::CreateAllowedMentions::new()
@@ -306,6 +326,30 @@ async fn serve_guild(
         feed::mark_posted(&f.pool, cfg.guild_id, e.media.id, i64::from(e.episode), now).await?;
     }
     Ok(())
+}
+
+/// Custom id of the "show the work" button (`shownotif:<anilist id>`) and of the menu of grouped messages.
+pub const SHOW_WORK_PREFIX: &str = "shownotif";
+pub const SHOW_WORK_PICK: &str = "shownotif:pick";
+
+pub fn show_work_id(anilist_id: i64) -> String {
+    format!("{SHOW_WORK_PREFIX}:{anilist_id}")
+}
+
+/// The work a "show the work" press asks for: from the button id, or the chosen value of the menu.
+pub fn parse_show_work(custom_id: &str, values: &[String]) -> Option<i64> {
+    if custom_id == SHOW_WORK_PICK {
+        return values.first()?.parse().ok();
+    }
+    custom_id.strip_prefix("shownotif:")?.parse().ok()
+}
+
+/// The button every notification carries.
+pub fn show_work_button(anilist_id: i64) -> serenity::CreateButton {
+    serenity::CreateButton::new(show_work_id(anilist_id))
+        .label(i18n::BTN_SHOW_WORK)
+        .emoji('📖')
+        .style(serenity::ButtonStyle::Primary)
 }
 
 /// Up to this many releases get their own card; more are grouped so a busy night is a few messages, not a flood.
@@ -351,6 +395,20 @@ async fn send_batch<'a>(
                 .description(body)
                 .build(),
         );
+        // One menu with the works of this message: each choice sends the work card as a new message.
+        let choices: Vec<crate::ui::select::Choice> = chunk
+            .iter()
+            .map(|e| crate::ui::select::Choice {
+                label: crate::ui::embeds::fit(e.media.title.main(), 100),
+                description: None,
+                value: e.media.id.to_string(),
+            })
+            .collect();
+        if let Some(menu) =
+            crate::ui::select::select_row(SHOW_WORK_PICK, i18n::BTN_SHOW_WORK, choices, true)
+        {
+            msg = msg.components(vec![menu]);
+        }
         if let Some(role) = cfg.role_id {
             msg = msg.content(format!("<@&{role}>")).allowed_mentions(
                 serenity::CreateAllowedMentions::new()
@@ -372,7 +430,7 @@ async fn send_episode(
     e: &AiringEntry,
 ) -> bool {
     let m = &e.media;
-    let mut links = Vec::new();
+    let mut links = vec![show_work_button(m.id)];
     if let Some(u) = &m.site_url {
         links.push(serenity::CreateButton::new_link(u).label(format!("🔗 {}", i18n::BTN_ANILIST)));
     }

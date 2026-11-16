@@ -285,6 +285,7 @@ impl View for DeleteView {
             embeds: vec![],
             components: vec![row],
             files: vec![],
+            v2: None,
         }
     }
 

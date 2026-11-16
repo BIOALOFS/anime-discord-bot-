@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod airing;
+pub mod arena;
 pub mod channels;
 pub mod character;
 pub mod fallback;
@@ -70,6 +71,60 @@ pub fn buttons(list: Vec<serenity::CreateButton>) -> serenity::CreateActionRow {
 
 #[cfg(test)]
 mod tests {
+    /// Every select menu built with a constant id must be handled in the same file, otherwise choosing an option does
+    /// nothing (this was the `/recommend` bug). Scans the sources.
+    #[test]
+    fn every_select_menu_has_a_handler_for_its_id() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).expect("dir").flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs")
+                    && !p.ends_with("tests.rs")
+                    && !p.ends_with("ui/select.rs")
+                {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut checked = 0;
+        for f in files {
+            let text = std::fs::read_to_string(&f).expect("read");
+            // Only the production part of the file.
+            let prod = text.split("#[cfg(test)]").next().unwrap_or(&text);
+            let mut rest = prod;
+            while let Some(i) = rest.find("select_row(") {
+                rest = &rest[i + "select_row(".len()..];
+                let arg: String = rest
+                    .chars()
+                    .skip_while(|c| c.is_whitespace())
+                    .take_while(|c| c.is_ascii_uppercase() || *c == '_' || c.is_ascii_digit())
+                    .collect();
+                if arg.len() < 3 {
+                    continue;
+                }
+                checked += 1;
+                let handled = prod.contains(&format!("{arg} =>"))
+                    || prod.contains(&format!("{arg} |"))
+                    || prod.contains(&format!("| {arg}"))
+                    || prod.contains(&format!("== {arg}"))
+                    || prod.contains(&format!("{arg}) ="));
+                assert!(
+                    handled,
+                    "{}: select menu id {arg} has no handler",
+                    f.display()
+                );
+            }
+        }
+        assert!(checked >= 15, "the scan found only {checked} select menus");
+    }
+
     use super::*;
 
     #[test]
