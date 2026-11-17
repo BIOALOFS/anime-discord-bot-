@@ -88,6 +88,7 @@ pub fn card_rows(
     link: Option<&str>,
     in_profile: bool,
     show_back: bool,
+    work_key: Option<&str>,
     enabled: bool,
 ) -> Vec<serenity::CreateActionRow> {
     let secondary = serenity::ButtonStyle::Secondary;
@@ -116,6 +117,11 @@ pub fn card_rows(
     if show_back {
         main.push(back_button(enabled));
     }
+    // "أظهر العمل": a new message with the work's card, never an edit of this one.
+    main.extend(crate::components::standard_actions(
+        crate::components::ItemKind::Character,
+        work_key,
+    ));
     let mut extra = vec![
         serenity::CreateButton::new(BTN_DESCRIBE)
             .label(i18n::BTN_DESCRIPTION)
@@ -378,6 +384,12 @@ impl View for CharacterView {
                     c.site_url.as_deref(),
                     self.in_profile,
                     !self.history.is_empty() || self.from_parent,
+                    c.media
+                        .as_ref()
+                        .and_then(|m| m.nodes.first())
+                        .and_then(|r| r.id)
+                        .map(|id| format!("anilist:{id}"))
+                        .as_deref(),
                     enabled,
                 ),
             ),
@@ -676,15 +688,6 @@ impl CharacterView {
 
 // ---- entry points ------------------------------------------------------------------------
 
-/// Where `/character` looks: everything, AniList only, or game/visual-novel providers only.
-pub fn source_choices() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("الكل", "all"),
-        ("أنمي / مانجا", "anime"),
-        ("ألعاب", "games"),
-    ]
-}
-
 fn source_of(key: Option<&str>) -> CharacterSource {
     match key.map(str::trim) {
         Some("anime") => CharacterSource::AnimeManga,
@@ -772,33 +775,24 @@ pub fn provider_label(w: &Work) -> String {
     }
 }
 
-async fn ac_source(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
-    if !crate::guild::autocomplete_allowed(ctx).await {
-        return Vec::new();
-    }
-    let needle = partial.trim().to_lowercase();
-    to_choices(
-        source_choices()
-            .into_iter()
-            .filter(|(l, k)| needle.is_empty() || l.contains(&needle) || k.contains(&needle))
-            .map(|(l, k)| (l.to_string(), k.to_string()))
-            .collect(),
-    )
-}
-
-async fn ac_work(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
-    super::media::any_autocomplete(ctx, partial).await
-}
-
 /// Name suggestions ranked by popularity, with the main work in the label.
 pub(crate) async fn ac_character(
     ctx: Context<'_>,
     partial: &str,
 ) -> Vec<serenity::AutocompleteChoice> {
+    let source = source_of(super::profile::option_str(ctx, "source").as_deref());
+    character_suggestions(ctx, partial, source).await
+}
+
+/// The suggestions of one source (the category commands fix it by their category).
+pub(crate) async fn character_suggestions(
+    ctx: Context<'_>,
+    partial: &str,
+    source: CharacterSource,
+) -> Vec<serenity::AutocompleteChoice> {
     if !crate::guild::autocomplete_allowed(ctx).await || partial.trim().chars().count() < 2 {
         return Vec::new();
     }
-    let source = source_of(super::profile::option_str(ctx, "source").as_deref());
     let (games_on, mature) = super::fallback::game_flags(ctx).await;
     let data = ctx.data();
     let api = data.anilist.clone();
@@ -843,33 +837,6 @@ pub(crate) async fn ac_character(
         })
         .await;
     to_choices(items)
-}
-
-/// Search characters in anime/manga (AniList) and games / visual novels (IGDB, VNDB).
-#[poise::command(
-    slash_command,
-    name_localized("ar", "شخصية"),
-    description_localized("ar", "ابحث عن شخصية من أنمي أو مانجا أو لعبة")
-)]
-pub async fn character(
-    ctx: Context<'_>,
-    #[description = "Character name"]
-    #[description_localized("ar", "اسم الشخصية")]
-    #[name_localized("ar", "الاسم")]
-    #[autocomplete = "ac_character"]
-    name: String,
-    #[description = "Only characters from this work"]
-    #[description_localized("ar", "حصر النتائج في عمل معين")]
-    #[name_localized("ar", "العمل")]
-    #[autocomplete = "ac_work"]
-    work: Option<String>,
-    #[description = "Where to look: all, anime/manga or games"]
-    #[description_localized("ar", "المصدر: الكل أو أنمي/مانجا أو ألعاب")]
-    #[name_localized("ar", "المصدر")]
-    #[autocomplete = "ac_source"]
-    source: Option<String>,
-) -> Result<(), Error> {
-    search_character(ctx, name, work, source).await
 }
 
 /// Resolve the typed or picked value and open the card (or a select menu for several matches).
@@ -1006,7 +973,13 @@ mod tests {
 
     #[test]
     fn every_character_image_has_add_works_link_and_back() {
-        let rows = card_rows(Some("https://anilist.co/character/1"), false, true, true);
+        let rows = card_rows(
+            Some("https://anilist.co/character/1"),
+            false,
+            true,
+            Some("anilist:5"),
+            true,
+        );
         let l = labels(&rows);
         for want in [i18n::BTN_ADD_TO_PROFILE, i18n::BTN_WORKS, i18n::BTN_BACK] {
             assert!(l.iter().any(|x| x == want), "{want} missing in {l:?}");
@@ -1028,7 +1001,7 @@ mod tests {
 
     #[test]
     fn the_add_button_becomes_remove_when_the_character_is_in_my_profile() {
-        let l = labels(&card_rows(None, true, false, true));
+        let l = labels(&card_rows(None, true, false, None, true));
         assert!(l.iter().any(|x| x == i18n::BTN_REMOVE_FROM_PROFILE));
         assert!(!l.iter().any(|x| x == i18n::BTN_ADD_TO_PROFILE));
         assert!(
@@ -1056,7 +1029,6 @@ mod tests {
         assert_eq!(source_of(Some("all")), CharacterSource::All);
         assert_eq!(source_of(Some("anime")), CharacterSource::AnimeManga);
         assert_eq!(source_of(Some(" games ")), CharacterSource::Games);
-        assert_eq!(source_choices().len(), 3);
     }
 
     #[test]

@@ -194,8 +194,27 @@ pub fn card(w: &Work, has_cover: bool, cover_name: &str) -> Emb {
     if let Some(s) = &w.status {
         e = e.field(i18n::F_STATUS, s, true);
     }
-    if let Some(r) = w.rating {
-        e = e.field(i18n::F_SCORE, format!("{r:.1}/10"), true);
+    // The shared rating / popularity lines (`ui::rating`) per source.
+    let on_100 = w.rating.map(|r| f64::from(r) * 10.0);
+    match (w.kind, w.source) {
+        (Kind::Character, _) => {
+            e = e.field(i18n::F_STATS, crate::ui::rating::no_popularity(), false)
+        }
+        (_, crate::providers::Source::Igdb) => {
+            e = e.field(
+                i18n::F_STATS,
+                crate::ui::rating::igdb_game(on_100, None, None),
+                false,
+            )
+        }
+        (_, crate::providers::Source::Vndb) => {
+            e = e.field(i18n::F_STATS, crate::ui::rating::vndb(on_100, None), false)
+        }
+        _ => {
+            if let Some(r) = w.rating {
+                e = e.field(i18n::F_SCORE, format!("{r:.1}/10"), true);
+            }
+        }
     }
     e
 }
@@ -225,6 +244,16 @@ impl View for FallbackView {
                 let w = &self.works[i];
                 let name = self.cover.as_ref().map_or("cover.jpg", |c| cover_name(c));
                 let mut row = vec![add_button(enabled, false)];
+                // Games and visual novels have characters; the written-work fallbacks do not.
+                if matches!(
+                    w.source,
+                    crate::providers::Source::Igdb | crate::providers::Source::Vndb
+                ) {
+                    row.extend(crate::components::standard_actions(
+                        crate::components::ItemKind::Work,
+                        Some(&w.id),
+                    ));
+                }
                 if self.from_list {
                     row.push(back_button(enabled));
                 }

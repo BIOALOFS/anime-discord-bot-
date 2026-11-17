@@ -32,6 +32,11 @@ pub(super) async fn add_work(ctx: Context<'_>, value: &str) -> Result<(), Error>
     if require_own(ctx).await?.is_none() {
         return Ok(());
     }
+    // A key from a suggestion that is not an AniList id: a TMDB show or film, a game or a visual novel.
+    if crate::components::is_work_key(value.trim()) && !value.trim().starts_with("anilist:") {
+        let text = crate::global::add(ctx.data(), value.trim(), uid(ctx)).await;
+        return private_reply(ctx, text).await;
+    }
     let api = ctx.data().anilist.clone();
     match resolve_work(&api, policy(ctx), value).await {
         Err(e) => super::manage::fail_private(ctx, e).await,
@@ -146,11 +151,11 @@ async fn upload_gate(ctx: Context<'_>) -> Result<Option<i64>, Error> {
     Ok(Some(guild))
 }
 
-/// Download an attachment (Discord's CDN only), validate and re-encode it. PNG, JPG, WebP and GIF are accepted.
-pub(super) async fn take_upload(
+/// Download an attachment (Discord's CDN only) and check its size and type. Replies and returns `None` on a problem.
+async fn fetch_upload(
     ctx: Context<'_>,
     att: &serenity::Attachment,
-) -> Result<Option<imaging::Processed>, Error> {
+) -> Result<Option<Vec<u8>>, Error> {
     let user = uid(ctx);
     if att.size as usize > imaging::MAX_BYTES || !discord_cdn(&att.url) {
         private_reply(ctx, i18n::IMAGE_TOO_LARGE).await?;
@@ -173,6 +178,17 @@ pub(super) async fn take_upload(
         private_reply(ctx, i18n::IMAGE_INVALID).await?;
         return Ok(None);
     }
+    Ok(Some(bytes.to_vec()))
+}
+
+/// Download an attachment (Discord's CDN only), validate and re-encode it. PNG, JPG, WebP and GIF are accepted.
+pub(super) async fn take_upload(
+    ctx: Context<'_>,
+    att: &serenity::Attachment,
+) -> Result<Option<imaging::Processed>, Error> {
+    let Some(bytes) = fetch_upload(ctx, att).await? else {
+        return Ok(None);
+    };
     match tokio::task::spawn_blocking(move || imaging::process(&bytes)).await {
         Ok(Ok(p)) => Ok(Some(p)),
         Ok(Err(imaging::ImageError::TooLarge)) => {
@@ -186,7 +202,28 @@ pub(super) async fn take_upload(
     }
 }
 
-fn new_image(p: imaging::Processed) -> custom::NewImage {
+/// Same for a banner: at least 600 px wide; pictures are center-cropped, GIFs need a ratio of 2:1 to 4:1.
+async fn take_banner(
+    ctx: Context<'_>,
+    att: &serenity::Attachment,
+) -> Result<Option<imaging::Processed>, Error> {
+    let Some(bytes) = fetch_upload(ctx, att).await? else {
+        return Ok(None);
+    };
+    let reply = match tokio::task::spawn_blocking(move || imaging::process_banner(&bytes)).await {
+        Ok(Ok(p)) => return Ok(Some(p)),
+        Ok(Err(imaging::BannerError::TooNarrow)) => i18n::BANNER_TOO_NARROW,
+        Ok(Err(imaging::BannerError::BadRatio)) => i18n::BANNER_BAD_RATIO,
+        Ok(Err(imaging::BannerError::Image(imaging::ImageError::TooLarge))) => {
+            i18n::IMAGE_TOO_LARGE
+        }
+        Ok(Err(_)) | Err(_) => i18n::IMAGE_INVALID,
+    };
+    private_reply(ctx, reply).await?;
+    Ok(None)
+}
+
+pub(super) fn new_image(p: imaging::Processed) -> custom::NewImage {
     custom::NewImage {
         hash: p.hash,
         mime: p.mime.to_string(),
@@ -240,9 +277,13 @@ pub(super) async fn banner_image(
     if require_own(ctx).await?.is_none() {
         return Ok(());
     }
-    let Some(processed) = take_upload(ctx, &image).await? else {
+    let Some(processed) = take_banner(ctx, &image).await? else {
         return Ok(());
     };
+    // A static picture was cropped for the banner: show the crop and let the member confirm. A GIF is kept whole.
+    if !processed.animated {
+        return super::banner_picker::confirm(ctx, processed).await;
+    }
     let id = match custom::store_image(
         &pool,
         user,

@@ -349,16 +349,72 @@ async fn ac_difficulty(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocom
     )
 }
 
+/// `(Arabic label, key)` of the event categories.
+pub const CATEGORIES: &[(&str, &str)] = &[
+    ("أنمي", "anime"),
+    ("مانجا", "manga"),
+    ("رواية", "novel"),
+    ("دراما", "drama"),
+    ("مسلسل", "series"),
+    ("فيلم", "movie"),
+];
+
+async fn ac_category(_ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    let n = partial.trim().to_lowercase();
+    to_choices(
+        CATEGORIES
+            .iter()
+            .filter(|(l, k)| n.is_empty() || l.contains(&n) || k.contains(&n))
+            .map(|(l, k)| ((*l).to_string(), (*k).to_string()))
+            .collect(),
+    )
+}
+
+/// The pool of works for a category key (anime by default; unknown keys fall back to it).
+pub async fn pool_for(ctx: Context<'_>, category: Option<&str>) -> super::arena::Pool {
+    use crate::{anilist::MediaKind, tmdb::find::Cat};
+    let key = category.map(str::trim).unwrap_or("anime");
+    let key = CATEGORIES
+        .iter()
+        .find(|(l, k)| *k == key || *l == key)
+        .map_or("anime", |(_, k)| *k);
+    match key {
+        "manga" => {
+            super::arena::Pool::Ani(&[MediaKind::Manga, MediaKind::Manhwa, MediaKind::Manhua])
+        }
+        "novel" => super::arena::Pool::Ani(&[MediaKind::Novel]),
+        "drama" | "series" | "movie" => {
+            let cat = match key {
+                "drama" => Cat::Drama,
+                "series" => Cat::Series,
+                _ => Cat::Movie,
+            };
+            let overrides = match ctx.guild_id() {
+                Some(g) => crate::db::notify::drama_overrides(&ctx.data().db, g.get() as i64)
+                    .await
+                    .unwrap_or_default(),
+                None => Default::default(),
+            };
+            super::arena::Pool::Tmdb(Box::new(super::arena::TmdbPool {
+                tmdb: ctx.data().tmdb.clone(),
+                cat,
+                overrides,
+            }))
+        }
+        _ => super::arena::Pool::default_pool(),
+    }
+}
+
 /// Collective games, versus and the leaderboard.
 #[poise::command(
     slash_command,
-    name_localized("ar", "لعبة"),
+    name_localized("ar", "فعالية"),
     description_localized(
         "ar",
-        "ألعاب جماعية في القناة: خمّن، صح أم خطأ، الأعلى تقييمًا، الترتيب بالسنة، السباق"
+        "الفعاليات الجماعية: خمّن، صح أم خطأ، الأعلى تقييمًا، الترتيب بالسنة، السباق"
     )
 )]
-pub async fn game(
+pub async fn event(
     ctx: Context<'_>,
     #[description = "Game mode"]
     #[description_localized("ar", "نوع اللعبة")]
@@ -370,6 +426,11 @@ pub async fn game(
     #[name_localized("ar", "الصعوبة")]
     #[autocomplete = "ac_difficulty"]
     difficulty: Option<String>,
+    #[description = "Category: anime, manga, novel, drama, series or movie"]
+    #[description_localized("ar", "الفئة: أنمي، مانجا، رواية، دراما، مسلسل أو فيلم")]
+    #[name_localized("ar", "الفئة")]
+    #[autocomplete = "ac_category"]
+    category: Option<String>,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let guild = ctx.guild_id().map(|g| g.get() as i64);
@@ -380,7 +441,8 @@ pub async fn game(
     }
     let level = super::arena::Difficulty::parse(difficulty.as_deref().unwrap_or("normal"));
     if let Some(m) = super::arena::mode_of(&mode) {
-        return super::arena::start(ctx, m, level).await;
+        let pool = pool_for(ctx, category.as_deref()).await;
+        return super::arena::start(ctx, m, level, pool).await;
     }
     match mode.trim() {
         "versus" => start_versus(ctx).await,

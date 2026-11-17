@@ -207,6 +207,10 @@ async fn next_interaction(
         else {
             return Wait::Quiet;
         };
+        // The universal buttons are answered globally (a new message, any member); the session must not touch them.
+        if crate::components::is_global_id(&i.data.custom_id) {
+            continue;
+        }
         if owner.is_none_or(|o| i.user.id == o) {
             return Wait::Press(Box::new(i));
         }

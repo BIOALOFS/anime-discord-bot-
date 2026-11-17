@@ -164,6 +164,115 @@ impl View for Picker {
     }
 }
 
+const CONFIRM: &str = "banner_confirm";
+const CANCEL: &str = "banner_cancel";
+
+/// The crop of an uploaded picture, with Confirm / Cancel. Nothing is stored before the member confirms.
+struct Confirm {
+    pool: SqlitePool,
+    user: i64,
+    image: Option<super::imaging::Processed>,
+    preview: (String, Vec<u8>),
+    done: Option<String>,
+}
+
+impl View for Confirm {
+    fn ephemeral(&self) -> bool {
+        true
+    }
+
+    fn render(&self, enabled: bool) -> Page {
+        let mut e = Emb::new().title(i18n::BANNER_CONFIRM_TITLE).description(
+            self.done
+                .clone()
+                .unwrap_or_else(|| i18n::BANNER_CONFIRM_HELP.to_string()),
+        );
+        e.footer = None;
+        let e = e.image(Some(format!("attachment://{}", self.preview.0)));
+        let live = enabled && self.done.is_none();
+        Page::embed(
+            e.build(),
+            vec![buttons(vec![
+                serenity::CreateButton::new(CONFIRM)
+                    .label(i18n::BANNER_CONFIRM_BTN)
+                    .style(serenity::ButtonStyle::Success)
+                    .disabled(!live),
+                serenity::CreateButton::new(CANCEL)
+                    .label(i18n::BTN_CANCEL)
+                    .style(serenity::ButtonStyle::Secondary)
+                    .disabled(!live),
+            ])],
+        )
+        .with_files(vec![serenity::CreateAttachment::bytes(
+            self.preview.1.clone(),
+            self.preview.0.clone(),
+        )])
+    }
+
+    async fn on_interaction(&mut self, id: &str, _values: &[String]) -> Outcome {
+        match id {
+            CANCEL | CLOSE => {
+                self.done = Some(i18n::BANNER_CANCELLED.to_string());
+                Outcome::Update
+            }
+            CONFIRM => {
+                let Some(image) = self.image.take() else {
+                    return Outcome::Keep;
+                };
+                let result = async {
+                    let stored = crate::db::custom::store_image(
+                        &self.pool,
+                        self.user,
+                        &super::actions::new_image(image),
+                        crate::db::custom::MAX_IMAGES_PER_USER,
+                    )
+                    .await?;
+                    let img = match stored {
+                        crate::db::custom::StoreOutcome::Stored(id)
+                        | crate::db::custom::StoreOutcome::Existing(id) => id,
+                        crate::db::custom::StoreOutcome::LimitReached => {
+                            return Ok::<_, Error>(i18n::IMAGE_LIMIT.to_string())
+                        }
+                    };
+                    pdb::set_banner(
+                        &self.pool,
+                        self.user,
+                        Some(&BannerSpec::Image(img).encode()),
+                    )
+                    .await?;
+                    Ok(i18n::BANNER_SET.to_string())
+                }
+                .await;
+                self.done = Some(result.unwrap_or_else(|e| {
+                    tracing::warn!("banner confirm failed: {e:#}");
+                    i18n::ERR_GENERIC.to_string()
+                }));
+                Outcome::Update
+            }
+            _ => Outcome::Keep,
+        }
+    }
+}
+
+/// Show the cropped banner for confirmation.
+pub(super) async fn confirm(
+    ctx: Context<'_>,
+    processed: super::imaging::Processed,
+) -> Result<(), Error> {
+    let preview = ("banner-preview.png".to_string(), processed.bytes.clone());
+    session::run(
+        ctx,
+        Confirm {
+            pool: ctx.data().db.clone(),
+            user: uid(ctx),
+            image: Some(processed),
+            preview,
+            done: None,
+        },
+    )
+    .await
+}
+
 pub(super) async fn open(ctx: Context<'_>) -> Result<(), Error> {
     begin_private(ctx).await?;
     let Some(p) = require_own(ctx).await? else {
@@ -206,11 +315,11 @@ mod tests {
     }
 
     #[test]
-    fn every_ready_made_banner_renders_a_1200_by_300_strip_and_they_differ() {
+    fn every_ready_made_banner_renders_a_1200_by_400_strip_and_they_differ() {
         let mut hashes = std::collections::HashSet::new();
         for (key, _) in BANNER_PRESETS {
             let out = crate::render::draw_banner_for_tests(key);
-            assert_eq!((out.width, out.height), (1200, 300), "{key}");
+            assert_eq!((out.width, out.height), (1200, 400), "{key}");
             assert!(out.bytes.len() < 2 * 1024 * 1024, "{key} stays small");
             hashes.insert(out.bytes);
         }

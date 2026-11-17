@@ -1,19 +1,23 @@
 pub mod admin;
 pub mod airing;
 pub mod arena;
+pub mod arena_tmdb;
+pub mod category;
 pub mod channels;
 pub mod character;
+pub mod event;
 pub mod fallback;
-pub mod game;
 pub mod help;
 pub mod media;
+pub mod notify_panel;
+pub mod picks;
 pub mod profile;
-pub mod random;
 pub mod recommend;
 pub mod roster;
-pub mod search;
+pub mod schedule;
 pub mod settings;
 pub mod suggest;
+pub mod tmdb_view;
 pub mod top;
 
 use crate::{

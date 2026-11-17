@@ -5,15 +5,20 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod anilist;
 mod chapters;
 mod commands;
+mod components;
 mod config;
 mod db;
 mod error;
 mod events;
 mod feed;
+mod global;
 mod guild;
-mod i18n;
+pub mod texts;
+/// The one module of user-facing text; `i18n` is kept as its short alias across the code.
+pub use texts as i18n;
 mod providers;
 mod render;
+mod tmdb;
 mod ui;
 
 use poise::serenity_prelude as serenity;
@@ -30,6 +35,7 @@ pub struct Data {
     pub renderer: std::sync::Arc<render::Renderer>,
     pub guilds: std::sync::Arc<guild::GuildStore>,
     pub providers: std::sync::Arc<providers::Providers>,
+    pub tmdb: std::sync::Arc<tmdb::Tmdb>,
 }
 
 #[tokio::main]
@@ -45,11 +51,16 @@ async fn main() -> anyhow::Result<()> {
     let token = config.discord_token.expose().to_string();
     let dev_guild = config.dev_guild_id;
     let provider_cfg = config.provider_config();
+    let tmdb_cfg = config.tmdb_config();
     let (feed_pool, feed_api) = (pool.clone(), anilist.clone());
     let feed_web = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent(concat!("anpot-discord-bot/", env!("CARGO_PKG_VERSION")))
         .build()?;
+
+    // One TMDB client for commands and for the background reminders (shared cache and rate limit).
+    let tmdb_shared = std::sync::Arc::new(tmdb::Tmdb::new(feed_web.clone(), tmdb_cfg.clone()));
+    let feed_tmdb = tmdb_shared.clone();
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -85,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
                 Ok(Data {
                     guilds: std::sync::Arc::new(guild::GuildStore::new(pool.clone())),
                     providers: std::sync::Arc::new(providers::Providers::new(http.clone(), provider_cfg.clone())),
+                    tmdb: tmdb_shared.clone(),
                     renderer: std::sync::Arc::new(render::Renderer::new(http.clone())),
                     http,
                     db: pool,
@@ -111,6 +123,8 @@ async fn main() -> anyhow::Result<()> {
             http: client.http.clone(),
             chapters: std::sync::Arc::new(chapters::poll::Sources::new(feed_web)),
             last_chapter_poll: std::sync::atomic::AtomicI64::new(0),
+            tmdb: feed_tmdb,
+            last_tmdb_poll: std::sync::atomic::AtomicI64::new(0),
         },
         stop_rx,
     ));
@@ -158,18 +172,23 @@ fn qualified_names(cmds: &[Command], prefix: &str, out: &mut Vec<String>) {
 
 /// Every command gets the configured per-user cooldown.
 fn commands_with_cooldown(secs: u64) -> Vec<Command> {
-    // The eleven user commands plus the three admin commands; nothing else is ever registered.
+    // The seventeen user commands plus the three admin commands; nothing else is ever registered.
     let mut cmds = vec![
+        commands::category::anime(),
+        commands::category::manga(),
+        commands::category::novel(),
+        commands::category::drama(),
+        commands::category::series(),
+        commands::category::movie(),
+        commands::category::game(),
+        commands::event::event(),
+        commands::top::top(),
+        commands::schedule::schedule(),
         commands::profile::profile(),
         commands::profile::edit(),
-        commands::search::search(),
-        commands::character::character(),
-        commands::airing::airing(),
-        commands::random::random(),
-        commands::top::top(),
-        commands::recommend::recommend(),
         commands::suggest::suggest(),
-        commands::game::game(),
+        commands::recommend::recommend(),
+        commands::airing::airing(),
         commands::settings::settings(),
         commands::help::help(),
         commands::admin::admin(),
@@ -265,19 +284,24 @@ mod tests {
         let mut names = Vec::new();
         walk(&cmds, "", &mut names);
         let want = [
+            "anime",
+            "manga",
+            "novel",
+            "drama",
+            "series",
+            "movie",
+            "game",
+            "event",
+            "top",
+            "schedule",
             "profile",
             "edit",
-            "search",
-            "character",
-            "airing",
-            "random",
-            "top",
-            "recommend",
             "suggest",
             "suggest add",
             "suggest random",
             "suggest mine",
-            "game",
+            "recommend",
+            "airing",
             "settings",
             "help",
             "admin",
@@ -286,7 +310,7 @@ mod tests {
         ];
         assert_eq!(
             names, want,
-            "the eleven user commands plus /admin and the two channel commands, no aliases or leftovers"
+            "the seventeen user commands plus /admin and the two channel commands, no aliases or leftovers, no /search /character /random"
         );
         // Must serialise for Discord without panicking.
         assert!(!poise::builtins::create_application_commands(&cmds).is_empty());
@@ -301,29 +325,111 @@ mod tests {
     }
 
     #[test]
-    fn help_lists_exactly_the_registered_commands() {
-        let help: String = commands::help::CATEGORIES.iter().map(|c| c.body).collect();
+    fn help_explains_exactly_the_registered_commands() {
+        let cmds = commands_with_cooldown(3);
         let registered = top_level_names();
+        let documented: Vec<&str> = commands::help::SECTIONS
+            .iter()
+            .flat_map(|s| s.commands.iter().copied())
+            .collect();
         for name in &registered {
             assert!(
-                help.contains(&format!("/{name}")),
-                "/{name} is registered but not explained in /help"
+                documented.contains(&name.as_str()),
+                "/{name} is registered but not in any /help section"
             );
         }
-        // Every `/word` the help mentions as a command must be registered (options like `/edit` are commands too).
-        let mut rest = help.as_str();
-        while let Some(i) = rest.find("`/") {
-            rest = &rest[i + 2..];
-            let word: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_lowercase() || *c == '-')
-                .collect();
-            if !word.is_empty() {
-                assert!(
-                    registered.contains(&word),
-                    "/help mentions /{word}, which is not a registered command"
-                );
+        for name in &documented {
+            assert!(
+                registered.iter().any(|r| r == name),
+                "/help documents /{name}, which is not registered"
+            );
+        }
+        // The command menu is built from the registry: one entry per command, each with an Arabic description.
+        let infos = commands::help::cmd_infos(&cmds);
+        assert_eq!(infos.len(), registered.len());
+        assert!(infos
+            .iter()
+            .all(|i| !i.description.is_empty() && !commands::help::example(&i.name).is_empty()));
+        assert!(
+            infos.len() <= 25,
+            "the command select menu holds 25 options"
+        );
+        // No removed command is mentioned anywhere in the help texts.
+        let texts: String = commands::help::SECTIONS
+            .iter()
+            .map(|s| s.intro)
+            .chain(commands::help::GUIDES.iter().map(|g| g.2))
+            .collect();
+        for gone in ["/search", "/character", "/random"] {
+            assert!(!texts.contains(gone), "{gone} no longer exists");
+        }
+    }
+
+    /// Every `#[poise::command]` function in the sources must be in the registered list, so a command can never be
+    /// written, forgotten in `commands_with_cooldown` and silently never shipped (or shipped by an old registration).
+    #[test]
+    fn every_command_defined_in_code_is_registered_and_vice_versa() {
+        fn defined(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for e in std::fs::read_dir(dir).expect("dir").flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    defined(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&p).expect("read");
+                    let prod = text.split("#[cfg(test)]").next().unwrap_or(&text);
+                    let mut pending = false;
+                    for line in prod.lines() {
+                        let t = line.trim();
+                        if t.starts_with("#[poise::command(") {
+                            pending = true;
+                        }
+                        if pending {
+                            if let Some(rest) = t
+                                .strip_prefix("pub async fn ")
+                                .or_else(|| t.strip_prefix("async fn "))
+                            {
+                                let name: String = rest
+                                    .chars()
+                                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                    .collect();
+                                out.push((name, p.display().to_string()));
+                                pending = false;
+                            }
+                        }
+                    }
+                }
             }
+        }
+        let mut found = Vec::new();
+        defined(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands"),
+            &mut found,
+        );
+        let mut registered = Vec::new();
+        walk(&commands_with_cooldown(3), "", &mut registered);
+        let registered: Vec<String> = registered
+            .iter()
+            .map(|n| n.rsplit(' ').next().unwrap_or(n).replace('-', "_"))
+            .collect();
+        assert!(
+            found.len() >= 20,
+            "the scan found only {} commands",
+            found.len()
+        );
+        for (name, file) in &found {
+            let n = name.trim_end_matches("_cmd").to_string();
+            assert!(
+                registered.contains(name) || registered.contains(&n),
+                "{name} ({file}) is defined as a command but is not registered: delete it or add it to commands_with_cooldown"
+            );
+        }
+        for r in &registered {
+            assert!(
+                found
+                    .iter()
+                    .any(|(n, _)| n == r || n.trim_end_matches("_cmd") == r),
+                "{r} is registered but no #[poise::command] function with that name exists"
+            );
         }
     }
 

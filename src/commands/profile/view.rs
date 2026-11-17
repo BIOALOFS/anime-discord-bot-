@@ -259,6 +259,15 @@ impl ProfileView {
                 raw.iter().map(Item::from_work).collect()
             }
         };
+        // The watch / read status of each work on this window (shown as a text line on its card).
+        if self.section == Section::Works {
+            for item in &mut self.window {
+                item.status = crate::db::status::get(&self.pool, self.owner, &item.key)
+                    .await
+                    .ok()
+                    .flatten();
+            }
+        }
         self.custom = match self
             .current()
             .filter(|i| i.section == Section::Characters && i.visible)
@@ -301,16 +310,12 @@ impl ProfileView {
         })
     }
 
-    /// The compact details line: "الشخصيات 4 · الأعمال 1 · عام · انضم 2026-11-15" (+ suggestions).
+    /// The compact details line: "الشخصيات 4 · الأعمال 1 · عام" (+ suggestions). No join date.
     pub fn details_line(&self) -> String {
-        let joined = chrono::DateTime::from_timestamp(self.profile.created_at, 0)
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
         let mut parts = vec![
             format!("{} {}", i18n::F_PROFILE_CHARACTERS, self.counts.0),
             format!("{} {}", i18n::F_PROFILE_WORKS, self.counts.1),
             i18n::privacy_ar(&self.profile.privacy).to_string(),
-            format!("{} {joined}", i18n::F_PROFILE_JOINED),
         ];
         if self.suggestions > 0 {
             parts.push(format!(
@@ -374,6 +379,18 @@ impl ProfileView {
         }
         if let Some(d) = &i.custom_description {
             lines.push(format!("📝 {d}"));
+        }
+        if let Some(st) = i
+            .status
+            .as_deref()
+            .filter(|s| crate::db::status::is_valid(s))
+        {
+            let written = matches!(i.subtitle.as_deref(), Some(t) if t.contains("مانجا") || t.contains("مانهوا") || t.contains("رواية"));
+            lines.push(format!(
+                "📌 {}: {}",
+                i18n::F_PROFILE_STATUS,
+                crate::db::status::label(st, written)
+            ));
         }
         if self.own() {
             if let Some(n) = i.note.as_deref() {
@@ -589,6 +606,7 @@ mod tests {
             custom_image_id: None,
             favourites: None,
             visible: true,
+            status: None,
         }
     }
 
@@ -616,7 +634,6 @@ mod tests {
                 privacy: "public".into(),
                 display_title: None,
                 language: "ar".into(),
-                created_at: 1_800_000_000,
             },
             section: Section::Characters,
             index: 0,
@@ -665,8 +682,12 @@ mod tests {
         let v = sample_view().await;
         let details = v.details_line();
         assert!(
-            details.starts_with("الشخصيات 4 · الأعمال 1 · عام · انضم 2027-01-15"),
+            details.starts_with("الشخصيات 4 · الأعمال 1 · عام"),
             "{details}"
+        );
+        assert!(
+            !details.contains("انضم"),
+            "the join date is gone: {details}"
         );
         assert!(!details.contains('\n'), "one line, not one field per line");
         let page = v.main_page(true);

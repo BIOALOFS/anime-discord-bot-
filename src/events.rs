@@ -27,8 +27,19 @@ pub async fn handle(
         serenity::ComponentInteractionDataKind::StringSelect { values } => values.clone(),
         _ => Vec::new(),
     };
-    let Some(work) = parse_show_work(&i.data.custom_id, &values) else {
-        return Ok(());
+    if i.data
+        .custom_id
+        .starts_with(crate::chapters::digest::MORE_PREFIX)
+    {
+        return digest_more(ctx, i).await;
+    }
+    let press = crate::components::parse(&i.data.custom_id, &values);
+    let work = match &press {
+        Some(_) => None,
+        None => match parse_show_work(&i.data.custom_id, &values) {
+            Some(w) => Some(w),
+            None => return Ok(()),
+        },
     };
     let admin = guild::is_admin(i.member.as_ref().and_then(|m| m.permissions));
     let bot_channel = match i.guild_id {
@@ -41,6 +52,10 @@ pub async fn handle(
         None => None,
     };
     let ephemeral = card_is_ephemeral(bot_channel, i.channel_id.get() as i64, admin);
+    if let Some(press) = press {
+        return crate::global::handle(ctx, i, data, press, ephemeral).await;
+    }
+    let Some(work) = work else { return Ok(()) };
     // A new (deferred) message: this is what keeps the notification untouched.
     let defer = serenity::CreateInteractionResponse::Defer(
         serenity::CreateInteractionResponseMessage::new().ephemeral(ephemeral),
@@ -70,14 +85,53 @@ pub async fn handle(
     Ok(())
 }
 
+/// "المزيد" under a chapter digest: the next lines as a new message (the digest itself stays as it is).
+async fn digest_more(
+    ctx: &serenity::Context,
+    i: &serenity::ComponentInteraction,
+) -> Result<(), Error> {
+    use crate::chapters::digest;
+    i.create_response(
+        ctx,
+        serenity::CreateInteractionResponse::Defer(
+            serenity::CreateInteractionResponseMessage::new().ephemeral(true),
+        ),
+    )
+    .await?;
+    let Some(rest) = digest::take_overflow(i.message.id.get()).await else {
+        i.create_followup(
+            ctx,
+            serenity::CreateInteractionResponseFollowup::new()
+                .content(i18n::CHAPTER_DIGEST_EXPIRED)
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    };
+    let (page, remaining) = digest::next_page(&rest);
+    let mut f = serenity::CreateInteractionResponseFollowup::new()
+        .ephemeral(true)
+        .embed(digest::embed(page, page.len()).build());
+    if !remaining.is_empty() {
+        f = f.components(vec![serenity::CreateActionRow::Buttons(vec![
+            digest::more_button(remaining.len()),
+        ])]);
+    }
+    let sent = i.create_followup(ctx, f).await?;
+    if !remaining.is_empty() {
+        digest::keep_overflow(sent.id.get(), remaining.to_vec()).await;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feed::{show_work_id, SHOW_WORK_PICK};
+    use crate::feed::SHOW_WORK_PICK;
 
     #[test]
     fn the_button_and_the_menu_name_the_work() {
-        assert_eq!(parse_show_work(&show_work_id(42), &[]), Some(42));
+        assert_eq!(parse_show_work("shownotif:42", &[]), Some(42));
         assert_eq!(parse_show_work(SHOW_WORK_PICK, &["7".into()]), Some(7));
         assert_eq!(parse_show_work(SHOW_WORK_PICK, &[]), None);
         assert_eq!(parse_show_work("shownotif:abc", &[]), None);
@@ -99,9 +153,13 @@ mod tests {
     }
 
     #[test]
-    fn the_notification_button_carries_the_id_and_the_arabic_label() {
-        let j = serde_json::to_value(crate::feed::show_work_button(9)).expect("json");
-        assert_eq!(j["custom_id"], "shownotif:9");
-        assert_eq!(j["label"], "أظهر العمل");
+    fn notifications_carry_the_universal_buttons() {
+        let j = serde_json::to_string(&crate::feed::notification_buttons(9)).expect("json");
+        assert!(j.contains("showchars:anilist:9") && j.contains("أظهر الشخصيات"));
+        assert!(j.contains("remind:anilist:9") && j.contains("ذكّرني"));
+        assert!(
+            !j.contains("shownotif"),
+            "the old button is gone from new messages"
+        );
     }
 }

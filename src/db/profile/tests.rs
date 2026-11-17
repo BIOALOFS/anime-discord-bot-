@@ -3,6 +3,28 @@
 use super::*;
 use crate::db::connect_memory;
 
+/// Reads a cached character back (only the tests need to).
+async fn cache_get(pool: &SqlitePool, character: i64) -> Result<Option<CacheRow>> {
+    let row = sqlx::query(
+        "SELECT character_id, name_romaji, name_native, image_url, is_safe, main_work, main_work_url, favourites, fetched_at \
+         FROM character_cache WHERE character_id = ?1",
+    )
+    .bind(character)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| CacheRow {
+        character_id: r.get("character_id"),
+        name_romaji: r.get("name_romaji"),
+        name_native: r.get("name_native"),
+        image_url: r.get("image_url"),
+        is_safe: r.get("is_safe"),
+        main_work: r.get("main_work"),
+        main_work_url: r.get("main_work_url"),
+        favourites: r.get("favourites"),
+        fetched_at: r.get("fetched_at"),
+    }))
+}
+
 const U: i64 = 100;
 const V: i64 = 200;
 

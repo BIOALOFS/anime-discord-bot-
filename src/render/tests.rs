@@ -81,7 +81,7 @@ fn banner_specs_parse_and_round_trip() {
 }
 
 #[test]
-fn banner_is_a_1200_by_300_strip_for_every_source() {
+fn banner_is_a_1200_by_400_strip_for_every_source() {
     for spec in [
         BannerSpec::Preset("ocean".into()),
         BannerSpec::Preset("unknown-preset".into()),
@@ -89,7 +89,7 @@ fn banner_is_a_1200_by_300_strip_for_every_source() {
         BannerSpec::Image(1),
     ] {
         let out = draw::banner(None, &spec, "Alice").expect("banner");
-        assert_eq!((out.width, out.height), (1200, 300), "{spec:?}");
+        assert_eq!((out.width, out.height), (1200, 400), "{spec:?}");
         assert_eq!(out.ext, "png");
         assert!(out.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
     }
@@ -102,7 +102,7 @@ fn an_uploaded_picture_is_cropped_to_the_strip_and_names_survive_odd_text() {
         *p = image::Rgba([200, 20, 20, 255]);
     }
     let out = draw::banner(Some(&photo), &BannerSpec::Image(7), "مستخدم 🎌").expect("banner");
-    assert_eq!((out.width, out.height), (1200, 300));
+    assert_eq!((out.width, out.height), (1200, 400));
     // The picture, not the default gradient, fills the strip: the top-left pixel is red.
     let decoded = image::load_from_memory(&out.bytes).expect("png").to_rgba8();
     let px = decoded.get_pixel(600, 20);

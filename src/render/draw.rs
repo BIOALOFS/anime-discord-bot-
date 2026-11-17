@@ -203,7 +203,7 @@ fn draw_text(
 // ---- banner -----------------------------------------------------------------------------
 
 pub const BANNER_W: u32 = 1200;
-pub const BANNER_H: u32 = 300;
+pub const BANNER_H: u32 = 400;
 
 fn lerp3(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     let t = t.clamp(0.0, 1.0);

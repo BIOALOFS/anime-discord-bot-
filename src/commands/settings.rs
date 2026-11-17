@@ -25,9 +25,11 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("language", "اللغة"),
     ("privacy", "الخصوصية"),
     ("reminders", "التذكيرات"),
+    ("notifications", "الإشعارات"),
 ];
 
 pub const REMINDER_VALUES: &[(&str, &str)] = &[("list", "عرض تذكيراتي وحذفها")];
+pub const NOTIFICATION_VALUES: &[(&str, &str)] = &[("panel", "فتح لوحة الإشعارات")];
 
 pub const LANGUAGES: &[(&str, &str)] = &[("ar", "العربية"), ("en", "English")];
 pub const PRIVACY_LEVELS: &[(&str, &str)] = &[
@@ -42,6 +44,7 @@ pub fn values_for(setting: &str) -> &'static [(&'static str, &'static str)] {
         "language" => LANGUAGES,
         "privacy" => PRIVACY_LEVELS,
         "reminders" => REMINDER_VALUES,
+        "notifications" => NOTIFICATION_VALUES,
         _ => &[],
     }
 }
@@ -103,6 +106,10 @@ pub async fn settings(
     ctx.defer_ephemeral().await?;
     let user = ctx.author().id.get() as i64;
     let pool = &ctx.data().db;
+    if setting.trim() == "notifications" {
+        let view = super::notify_panel::NotifyView::open(pool.clone(), user).await?;
+        return session::run(ctx, view).await;
+    }
     if setting.trim() == "reminders" {
         let mut view = RemindersView {
             pool: pool.clone(),
@@ -273,11 +280,12 @@ mod tests {
     }
 
     #[test]
-    fn only_language_privacy_and_reminders_exist() {
+    fn only_personal_settings_exist() {
         assert_eq!(
             SETTINGS.iter().map(|s| s.0).collect::<Vec<_>>(),
-            vec!["language", "privacy", "reminders"]
+            vec!["language", "privacy", "reminders", "notifications"]
         );
+        assert_eq!(values_for("notifications").len(), 1);
         assert_eq!(values_for("reminders").len(), 1);
         assert_eq!(values_for("language").len(), 2);
         assert_eq!(values_for("privacy").len(), 3);
