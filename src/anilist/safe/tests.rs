@@ -181,3 +181,45 @@ fn previous_airing_picks_latest_aired() {
     assert_eq!(previous_airing(&nodes, 250), Some(200));
     assert_eq!(previous_airing(&nodes, 50), None);
 }
+
+#[test]
+fn the_media_filter_matches_format_year_status_and_country() {
+    let m: Media = serde_json::from_value(serde_json::json!({
+        "id": 1, "title": {"romaji": "X"}, "format": "TV", "status": "FINISHED", "countryOfOrigin": "JP",
+        "startDate": {"year": 2011}
+    }))
+    .expect("media");
+    let f = MediaFilter {
+        format: Some("tv".into()),
+        year: Some(2011),
+        status: Some("FINISHED".into()),
+        country: Some("JP".into()),
+    };
+    assert!(
+        f.matches(&m)
+            && MediaFilter::default().matches(&m)
+            && MediaFilter::default().is_empty()
+            && !f.is_empty()
+    );
+    for bad in [
+        MediaFilter {
+            format: Some("MOVIE".into()),
+            ..f.clone()
+        },
+        MediaFilter {
+            year: Some(2012),
+            ..f.clone()
+        },
+        MediaFilter {
+            status: Some("RELEASING".into()),
+            ..f.clone()
+        },
+        MediaFilter {
+            country: Some("KR".into()),
+            ..f.clone()
+        },
+    ] {
+        assert!(!bad.matches(&m), "{bad:?}");
+    }
+    assert_ne!(f.cache_key(), MediaFilter::default().cache_key());
+}

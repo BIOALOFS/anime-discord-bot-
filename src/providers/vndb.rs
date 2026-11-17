@@ -66,6 +66,36 @@ impl Vndb {
         Ok(out)
     }
 
+    /// One page (20) of the most voted visual novels.
+    pub async fn popular_vns(&self, page: u32) -> Result<Vec<Work>, ProviderError> {
+        let doc = self
+            .post("vn", json!({"filters": ["votecount", ">=", 100], "fields": VN_FIELDS, "sort": "votecount", "reverse": true, "results": 20, "page": page.max(1)}))
+            .await?;
+        Ok(parse_vns(&doc))
+    }
+
+    /// The characters of one visual novel (`v17`).
+    pub async fn characters_of(&self, vn: &str) -> Result<Vec<Work>, ProviderError> {
+        let doc = self
+            .post(
+                "character",
+                character_request(json!(["vn", "=", ["id", "=", vn]]), 25),
+            )
+            .await?;
+        self.vet_characters(&doc).await
+    }
+
+    pub async fn popular_characters(&self, page: u32) -> Result<Vec<Work>, ProviderError> {
+        let doc = self
+            .post(
+                "character",
+                character_request(json!(["id", ">=", "c1"]), 12),
+            )
+            .await?;
+        let _ = page;
+        self.vet_characters(&doc).await
+    }
+
     pub async fn vn_by_id(&self, id: &str) -> Result<Option<Work>, ProviderError> {
         let doc = self
             .post(

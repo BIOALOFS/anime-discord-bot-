@@ -3,8 +3,10 @@ pub mod chapters;
 pub mod custom;
 pub mod feed;
 pub mod game;
+pub mod notify;
 pub mod profile;
 pub mod reminders;
+pub mod status;
 pub mod suggest;
 pub mod works;
 
@@ -234,6 +236,95 @@ mod tests {
             .expect("row");
         assert_eq!(n, 1, "the backup holds the existing data");
         drop(copy);
+        drop(pool);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real upgrade path: a database at migration 0015 with member data is migrated to the newest version;
+    /// nothing is lost and the new columns get their defaults (old reminders get their provider key).
+    #[tokio::test]
+    async fn a_database_from_round_six_upgrades_without_losing_data() {
+        let dir = temp_dir("upgrade");
+        let url = format!("sqlite://{}?mode=rwc", dir.join("bot.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("open");
+        let mut old = sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
+            .await
+            .expect("read migrations");
+        let before: Vec<_> = old
+            .migrations
+            .iter()
+            .filter(|m| m.version <= 15)
+            .cloned()
+            .collect();
+        assert!(
+            old.migrations.len() > before.len(),
+            "there is a newer migration than 0015"
+        );
+        old.migrations = std::borrow::Cow::Owned(before);
+        old.run(&pool).await.expect("migrate to 0015");
+        sqlx::query("INSERT INTO profiles (user_id, bio) VALUES (7, 'hello')")
+            .execute(&pool)
+            .await
+            .expect("profile");
+        sqlx::query(
+            "INSERT INTO profile_characters (user_id, character_id, position) VALUES (7, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("character");
+        sqlx::query("INSERT INTO profile_works (user_id, work_id, kind, position) VALUES (7, 'anilist:5', 'anime', 1)").execute(&pool).await.expect("work");
+        sqlx::query(
+            "INSERT INTO reminders (user_id, work_id, title) VALUES (7, 77, 'Old reminder')",
+        )
+        .execute(&pool)
+        .await
+        .expect("reminder");
+        sqlx::query("INSERT INTO guild_settings (guild_id) VALUES (9)")
+            .execute(&pool)
+            .await
+            .expect("guild");
+
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate to the newest");
+
+        let (bio, chars, works): (String, i64, i64) = (
+            sqlx::query_scalar("SELECT bio FROM profiles WHERE user_id = 7")
+                .fetch_one(&pool)
+                .await
+                .expect("bio"),
+            sqlx::query_scalar("SELECT count(*) FROM profile_characters WHERE user_id = 7")
+                .fetch_one(&pool)
+                .await
+                .expect("c"),
+            sqlx::query_scalar("SELECT count(*) FROM profile_works WHERE user_id = 7")
+                .fetch_one(&pool)
+                .await
+                .expect("w"),
+        );
+        assert_eq!((bio.as_str(), chars, works), ("hello", 1, 1));
+        let (key, category, days): (String, String, i64) = sqlx::query_as(
+            "SELECT work_key, category, notify_days FROM reminders WHERE work_id = 77",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("reminder");
+        assert_eq!(
+            (key.as_str(), category.as_str(), days),
+            ("anilist:77", "anime", 1),
+            "old reminders keep working and gain their key"
+        );
+        let (tz, spoiler): (String, i64) =
+            sqlx::query_as("SELECT timezone, spoiler_guard FROM guild_settings WHERE guild_id = 9")
+                .fetch_one(&pool)
+                .await
+                .expect("guild");
+        assert_eq!((tz.as_str(), spoiler), ("Asia/Muscat", 0));
+        // The new tables exist and accept TMDB keys next to AniList ones.
+        sqlx::query("INSERT INTO profile_works (user_id, work_id, kind, position) VALUES (7, 'tmdb-tv:1396', 'tmdb-tv', 2)").execute(&pool).await.expect("tmdb work");
+        sqlx::query("INSERT INTO profile_characters (user_id, character_id, position) VALUES (7, 3000000000001, 2)").execute(&pool).await.expect("tmdb cast id");
+        sqlx::query("INSERT INTO item_status (user_id, work_key, status) VALUES (7, 'tmdb-tv:1396', 'current')").execute(&pool).await.expect("status");
         drop(pool);
         let _ = std::fs::remove_dir_all(&dir);
     }

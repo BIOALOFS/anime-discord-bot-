@@ -131,6 +131,21 @@ pub fn work_card(m: &Media) -> Emb {
             false,
         );
     }
+    e = e.field(
+        i18n::F_STATS,
+        super::rating::anilist_work(m.average_score, m.popularity, None),
+        false,
+    );
+    e
+}
+
+/// The spoiler guard: the synopsis of a work card is hidden behind `||…||` until the reader taps it.
+pub fn spoiler_wrapped(mut e: Emb, on: bool) -> Emb {
+    if on {
+        if let Some(d) = e.description.take().filter(|d| !d.trim().is_empty()) {
+            e.description = Some(format!("||{}||", d.replace("||", "")));
+        }
+    }
     e
 }
 
@@ -288,6 +303,7 @@ pub fn character_card(c: &Character) -> Emb {
         .title(title)
         .url(c.site_url.clone())
         .image(c.image_url().map(str::to_string));
+    lines.push(super::rating::anilist_character(c.favourites));
     if !lines.is_empty() {
         e = e.description(lines.join("\n"));
     }

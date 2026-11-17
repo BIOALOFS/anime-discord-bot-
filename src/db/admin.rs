@@ -210,3 +210,79 @@ mod tests {
         );
     }
 }
+
+/// The server's time zone for schedules and notification hours (default Muscat).
+pub async fn timezone(pool: &SqlitePool, guild: i64) -> Result<String> {
+    Ok(
+        sqlx::query_scalar::<_, String>("SELECT timezone FROM guild_settings WHERE guild_id = ?1")
+            .bind(guild)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or_else(|| "Asia/Muscat".to_string()),
+    )
+}
+
+pub async fn set_timezone(pool: &SqlitePool, guild: i64, tz: &str) -> Result<()> {
+    if tz.parse::<chrono_tz::Tz>().is_err() {
+        return Ok(());
+    }
+    ensure(pool, guild).await?;
+    sqlx::query("UPDATE guild_settings SET timezone = ?2 WHERE guild_id = ?1")
+        .bind(guild)
+        .bind(tz)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The spoiler guard of the whole server (off by default).
+pub async fn spoiler_guard(pool: &SqlitePool, guild: i64) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT spoiler_guard FROM guild_settings WHERE guild_id = ?1",
+    )
+    .bind(guild)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false))
+}
+
+pub async fn set_spoiler_guard(pool: &SqlitePool, guild: i64, on: bool) -> Result<()> {
+    ensure(pool, guild).await?;
+    sqlx::query("UPDATE guild_settings SET spoiler_guard = ?2 WHERE guild_id = ?1")
+        .bind(guild)
+        .bind(on)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod round7_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn timezone_and_spoiler_defaults_round_trip_and_reject_nonsense() {
+        let p = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("db");
+        sqlx::migrate!("./migrations")
+            .run(&p)
+            .await
+            .expect("migrate");
+        assert_eq!(timezone(&p, 1).await.expect("tz"), "Asia/Muscat");
+        assert!(!spoiler_guard(&p, 1).await.expect("sp"));
+        set_timezone(&p, 1, "Asia/Riyadh").await.expect("set");
+        set_timezone(&p, 1, "Not/AZone").await.expect("ignored");
+        set_spoiler_guard(&p, 1, true).await.expect("set");
+        assert_eq!(timezone(&p, 1).await.expect("tz"), "Asia/Riyadh");
+        assert!(spoiler_guard(&p, 1).await.expect("sp"));
+        assert!(
+            crate::db::notify::spoiler_guard(&p, Some(1), 5).await,
+            "the server setting applies to its members"
+        );
+        assert!(!crate::db::notify::spoiler_guard(&p, Some(2), 5).await);
+    }
+}

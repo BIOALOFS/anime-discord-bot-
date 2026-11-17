@@ -9,6 +9,7 @@ const ALLOWED_HOSTS: &[&str] = &[
     "cdn.discordapp.com",
     "media.discordapp.net",
     "images.igdb.com",
+    "image.tmdb.org",
     "t.vndb.org",
 ];
 const MAX_DOWNLOAD: usize = 6 * 1024 * 1024;

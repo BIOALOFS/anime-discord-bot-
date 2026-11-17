@@ -65,10 +65,10 @@ pub const RELATIONS: &str = with_media_fragment!(
 );
 
 pub const RANDOM_MEDIA: &str = with_media_fragment!(
-    "query($page: Int, $type: MediaType, $country: CountryCode, $formatIn: [MediaFormat], $genre: String, $minScore: Int, $isAdult: Boolean, $genreNotIn: [String]) { \
+    "query($page: Int, $type: MediaType, $country: CountryCode, $formatIn: [MediaFormat], $genre: String, $minScore: Int, $isAdult: Boolean, $genreNotIn: [String], $seasonYear: Int, $status: MediaStatus) { \
      Page(page: $page, perPage: 20) { pageInfo { lastPage hasNextPage } \
      media(type: $type, countryOfOrigin: $country, format_in: $formatIn, genre: $genre, averageScore_greater: $minScore, isAdult: $isAdult, genre_not_in: $genreNotIn, \
-     sort: [POPULARITY_DESC]) { ...M } } }"
+     seasonYear: $seasonYear, status: $status, sort: [POPULARITY_DESC]) { ...M } } }"
 );
 
 pub const SEARCH_CHARACTER: &str = concat!(
