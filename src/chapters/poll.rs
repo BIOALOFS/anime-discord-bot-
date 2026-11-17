@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     db::{chapters as cdb, feed as fdb, reminders},
-    feed::{notify_user, show_work_button, Feed},
+    feed::{notify_user, Feed},
     i18n,
     ui::embeds::{fit, Emb},
 };
@@ -199,14 +199,6 @@ pub fn chapter_embed(work_title: &str, c: &Chapter) -> Emb {
     e
 }
 
-fn components(c: &Chapter) -> Vec<serenity::CreateActionRow> {
-    let mut row = vec![show_work_button(c.work_id)];
-    if c.url.starts_with("https://") {
-        row.push(serenity::CreateButton::new_link(&c.url).label(format!("📖 {}", i18n::BTN_READ)));
-    }
-    vec![serenity::CreateActionRow::Buttons(row)]
-}
-
 pub async fn poll(f: &Feed, now: i64) -> anyhow::Result<()> {
     let guilds = cdb::enabled_guilds(&f.pool).await?;
     let mut announced: HashMap<(i64, String), (Chapter, String)> = HashMap::new();
@@ -235,6 +227,10 @@ async fn poll_guild(
         return Ok(());
     };
     let channel = serenity::ChannelId::new(channel as u64);
+    // One digest every few hours (2 by default): between digests nothing is marked as posted, so chapters wait.
+    if !cdb::digest_due(&f.pool, guild, now).await? {
+        return Ok(());
+    }
     let mut works = cdb::tracked_works(&f.pool, guild, 1_000).await?;
     if works.len() > MAX_WORKS_PER_POLL {
         // Rotate through the list so every work is checked over a few polls.
@@ -251,6 +247,7 @@ async fn poll_guild(
     } else {
         Vec::new()
     };
+    let mut pending: Vec<(i64, Chapter, String)> = Vec::new();
     for work in works {
         let mut all: Vec<Chapter> = Vec::new();
         // Priority order: MangaDex, MangaUpdates, then the admin's feeds.
@@ -286,23 +283,71 @@ async fn poll_guild(
         }
         let title = work.titles.first().cloned().unwrap_or_default();
         for c in p.announce.into_iter().rev().take(MAX_PER_WORK).rev() {
-            let mut msg = serenity::CreateMessage::new()
-                .embed(chapter_embed(&title, &c).build())
-                .components(components(&c));
-            if let Some(role) = cfg.role_id {
-                msg = msg.content(format!("<@&{role}>")).allowed_mentions(
-                    serenity::CreateAllowedMentions::new()
-                        .roles(vec![serenity::RoleId::new(role as u64)]),
-                );
-            }
-            if channel.send_message(&f.http, msg).await.is_ok() {
-                cdb::mark_posted(&f.pool, guild, work.work_id, &c.key, now).await?;
-                announced
-                    .entry((c.work_id, c.key.clone()))
-                    .or_insert((c, title.clone()));
-            }
+            pending.push((work.work_id, c, title.clone()));
         }
     }
+    send_digest(f, guild, channel, cfg.role_id, &pending, now, announced).await?;
+    Ok(())
+}
+
+/// One message with the new chapters (up to 15 lines, the rest behind a button). Every chapter is marked as posted
+/// once the message is out, and member reminders are fed with all of them.
+async fn send_digest(
+    f: &Feed,
+    guild: i64,
+    channel: serenity::ChannelId,
+    role: Option<i64>,
+    pending: &[(i64, Chapter, String)],
+    now: i64,
+    announced: &mut HashMap<(i64, String), (Chapter, String)>,
+) -> anyhow::Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<crate::chapters::digest::Line> = pending
+        .iter()
+        .map(|(_, c, title)| crate::chapters::digest::Line {
+            work: title.clone(),
+            chapter: c.number.as_deref().map_or_else(
+                || i18n::CHAPTER_NEW.to_string(),
+                |n| format!("{} {n}", i18n::BTN_CHAPTER),
+            ),
+            url: c.url.clone(),
+        })
+        .collect();
+    let mut msg = serenity::CreateMessage::new()
+        .embed(crate::chapters::digest::embed(&lines, lines.len()).build());
+    let overflow = lines
+        .len()
+        .saturating_sub(crate::chapters::digest::PER_DIGEST);
+    if overflow > 0 {
+        msg = msg.components(vec![serenity::CreateActionRow::Buttons(vec![
+            crate::chapters::digest::more_button(overflow),
+        ])]);
+    }
+    if let Some(role) = role {
+        msg = msg.content(format!("<@&{role}>")).allowed_mentions(
+            serenity::CreateAllowedMentions::new().roles(vec![serenity::RoleId::new(role as u64)]),
+        );
+    }
+    let Ok(sent) = channel.send_message(&f.http, msg).await else {
+        // Nothing is marked: the same chapters are tried again at the next poll.
+        return Ok(());
+    };
+    if overflow > 0 {
+        crate::chapters::digest::keep_overflow(
+            sent.id.get(),
+            lines[crate::chapters::digest::PER_DIGEST..].to_vec(),
+        )
+        .await;
+    }
+    for (work, c, title) in pending {
+        cdb::mark_posted(&f.pool, guild, *work, &c.key, now).await?;
+        announced
+            .entry((*work, c.key.clone()))
+            .or_insert((c.clone(), title.clone()));
+    }
+    cdb::mark_digest(&f.pool, guild, now).await?;
     Ok(())
 }
 
@@ -323,6 +368,13 @@ async fn remind(f: &Feed, announced: HashMap<(i64, String), (Chapter, String)>) 
             if reminders::mark(&f.pool, r.user_id, work, ord)
                 .await
                 .is_err()
+            {
+                continue;
+            }
+            let key = format!("anilist:{work}");
+            if !crate::db::notify::allows(&f.pool, r.user_id, &key, "manga", None, &[])
+                .await
+                .unwrap_or(true)
             {
                 continue;
             }
@@ -365,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notification_credits_the_source_and_has_show_work_and_read_buttons() {
+    fn the_notification_credits_the_source_and_links_only_to_https() {
         let c = Chapter {
             source: SourceKind::MangaDex,
             work_id: 100,
@@ -380,21 +432,21 @@ mod tests {
         assert!(e.footer.as_deref().unwrap_or("").contains("MangaDex"));
         let d = e.description.as_deref().unwrap_or("");
         assert!(d.contains("12") && d.contains("Return") && d.contains("العربية"));
-        let json = serde_json::to_string(&components(&c)).expect("json");
-        assert!(
-            json.contains("shownotif:100")
-                && json.contains("https://mangadex.org/chapter/c3")
-                && json.contains("أظهر العمل")
-        );
-        let insecure = Chapter {
+        // The digest line carries the "اقرأ" link only for https URLs.
+        let line = crate::chapters::digest::line_text(&crate::chapters::digest::Line {
+            work: "W".into(),
+            chapter: "12".into(),
+            url: c.url.clone(),
+        });
+        assert!(line.contains("https://mangadex.org/chapter/c3"));
+        let insecure = crate::chapters::digest::line_text(&crate::chapters::digest::Line {
+            work: "W".into(),
+            chapter: "12".into(),
             url: "http://x".into(),
-            ..c
-        };
+        });
         assert!(
-            !serde_json::to_string(&components(&insecure))
-                .expect("json")
-                .contains("http://x"),
-            "only https links become buttons"
+            !insecure.contains("http://x"),
+            "only https links become links"
         );
     }
 }
