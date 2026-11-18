@@ -68,3 +68,15 @@ What was removed and what was merged. Nothing here is reachable from a command a
   partial provider results and the random-pick offsets. `.env.example` is now the tracked `.env` template (as on `main`); `OWNER_ID` was added to it.
 - **Migration 0017:** `mature_games` renamed to `mature_themes`. **Migration 0018 (additive):** `bot_state`, `guild_features`, `daily_posts`, `polls`, `poll_votes`,
   `badges`, `role_permissions`, `watch_nights`, `watch_night_rsvps`, `usage_stats`.
+
+## Round 9
+- **Removed (banners):** the 2:1–4:1 ratio rule, the 600 px minimum, the 1200×400 recommendation, the centre crop (`imaging::crop_banner`, `banner_ratio_ok`,
+  `BannerError`), the preview / confirm step (`banner_picker::Confirm`, `confirm`), the `BANNER_TOO_NARROW`, `BANNER_BAD_RATIO` and `BANNER_CONFIRM_*` /
+  `BANNER_CANCELLED` strings, their tests, and every mention in `/help` and the README. A banner is accepted as it is (8 MB, pixel guard, re-encoded when still).
+- **Added:** `src/people/` (people parsers per source, fetch, messages), `src/search.rs` and `commands/search.rs` (the general search), `anilist/safe/people.rs`
+  (staff requests), cached raw documents for VNDB staff and IGDB companies in `Providers`, the `AUTOCOMPLETE` task-local budget of the AniList client.
+- **Replaced:** the autocomplete helper (`ui/autocomplete.rs`): one deadline of 2.3 s, a background lookup that warms a cache, prefix fallback, one sanitizer.
+- **Data safety:** a migration runs only after a verified backup; row counts of every user-data table are compared afterwards and the backup is restored
+  automatically if any count drops; a test rejects `DROP` / `DELETE` / `TRUNCATE` in migrations 0013 and later. No migration was added in this round.
+- **Guards:** a navigation-matrix test for the profile (every control after a picture edit, missing / empty / oversized pictures), tests for the shared search
+  cache between autocomplete and submit, the person / work / character button rules and the overflow menu.
