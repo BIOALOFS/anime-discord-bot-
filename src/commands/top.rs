@@ -110,6 +110,9 @@ pub fn hero_image_ok(url: &str) -> bool {
 
 /// The menu value that opens a stored character id as a new message.
 pub fn character_key(id: i64) -> String {
+    if let Some(key) = crate::people::decode_person_id(id) {
+        return key;
+    }
     if let Some((kind, work, person)) = tm::decode_cast_id(id) {
         return format!(
             "tmdb-cast:{}:{work}:{person}",
@@ -790,6 +793,34 @@ mod tests {
             ]
         );
         assert_eq!(RANGES.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn people_in_profiles_count_as_characters_in_the_top_and_open_by_their_person_key() {
+        let p = pool().await;
+        for u in [1, 2] {
+            member(&p, 77, u).await;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let id = crate::people::encode_person_id("tmdb-person:17419").expect("id");
+        sqlx::query("INSERT INTO character_cache (character_id, name_romaji, main_work, is_safe, fetched_at) VALUES (?1, 'Bryan Cranston', 'شخص حقيقي · ممثل', 1, 0)")
+            .bind(id).execute(&p).await.expect("cache");
+        for u in [1, 2] {
+            sqlx::query("INSERT INTO profile_characters (user_id, character_id, position, added_at) VALUES (?1, ?2, 1, ?3)")
+                .bind(u).bind(id).bind(now).execute(&p).await.expect("person");
+        }
+        let chars = rows_for(&p, 77, Section::Characters, Range::All)
+            .await
+            .expect("rows");
+        assert_eq!(chars.len(), 1);
+        assert_eq!(
+            (chars[0].label.as_str(), chars[0].count),
+            ("Bryan Cranston", 2)
+        );
+        assert_eq!(
+            chars[0].key, "tmdb-person:17419",
+            "the menu opens the person card"
+        );
     }
 
     #[tokio::test]

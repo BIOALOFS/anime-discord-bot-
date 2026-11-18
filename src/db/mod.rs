@@ -153,14 +153,27 @@ pub fn compare_counts(
     }
 }
 
-/// Put a backup back in place of the database (the pool must be closed first).
+/// Put a backup back in place of the database (the pool must be closed first). The copy is written next to the database
+/// and renamed over it, so the database file becomes a new file in one step: nothing that still holds the old one open
+/// can write into the restored data, and a crash leaves either the old or the complete new file.
 pub fn restore_backup(backup: &std::path::Path, db: &std::path::Path) -> anyhow::Result<()> {
+    let mut staged = db.as_os_str().to_owned();
+    staged.push(".restoring");
+    let staged = std::path::PathBuf::from(staged);
+    std::fs::copy(backup, &staged).map_err(|e| {
+        anyhow::anyhow!(
+            "could not copy {} next to {}: {e}",
+            backup.display(),
+            db.display()
+        )
+    })?;
+    // Leftover write-ahead files belong to the data that is being replaced.
     for suffix in ["-wal", "-shm"] {
         let mut side = db.as_os_str().to_owned();
         side.push(suffix);
         let _ = std::fs::remove_file(std::path::PathBuf::from(side));
     }
-    std::fs::copy(backup, db).map_err(|e| {
+    std::fs::rename(&staged, db).map_err(|e| {
         anyhow::anyhow!(
             "could not restore {} over {}: {e}",
             backup.display(),
@@ -660,6 +673,103 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    /// The round 10 upgrade (0018 -> 0019) on a database with realistic member data, through the real startup path:
+    /// verified backup first, migration, row-count check. Nothing existing changes and the new table is there.
+    #[tokio::test]
+    async fn the_round_ten_upgrade_keeps_every_row_and_file_reference() {
+        let dir = temp_dir("round10");
+        let path = dir.join("bot.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("open");
+        let mut old = sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
+            .await
+            .expect("read migrations");
+        let before: Vec<_> = old
+            .migrations
+            .iter()
+            .filter(|m| m.version <= 18)
+            .cloned()
+            .collect();
+        assert!(
+            old.migrations.len() > before.len(),
+            "0019 is the migration under test"
+        );
+        old.migrations = std::borrow::Cow::Owned(before);
+        old.run(&pool).await.expect("migrate to 0018");
+        let person = crate::people::encode_person_id("tmdb-person:17419").expect("person id");
+        for sql in [
+            "INSERT INTO users (discord_id) VALUES (7), (8)",
+            "INSERT INTO profiles (user_id, bio, banner) VALUES (7, 'hello', 'img:1'), (8, 'other', NULL)",
+            "INSERT INTO custom_images (user_id, hash, mime, bytes, width, height, animated) VALUES (7, 'abc', 'image/gif', x'47494638', 10, 10, 1)",
+            "INSERT INTO profile_characters (user_id, character_id, position, custom_image_id, custom_title) VALUES (7, 1, 1, 1, 'Nick'), (8, 2, 1, NULL, NULL)",
+            "INSERT INTO character_cache (character_id, name_romaji, is_safe, fetched_at) VALUES (1, 'Rem', 1, 0)",
+            "INSERT INTO profile_works (user_id, work_id, kind, position) VALUES (7, 'anilist:5', 'anime', 1)",
+            "INSERT INTO reminders (user_id, work_id, title) VALUES (7, 77, 'Reminder')",
+            "INSERT INTO suggestions (guild_id, author_id, first_id, second_id, first_title, second_title, pair_key, reason) VALUES (9, 7, 'anilist:1', 'anilist:2', 'A', 'B', 'anilist:1|anilist:2', 'because')",
+            "INSERT INTO guild_settings (guild_id) VALUES (9)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.expect(sql);
+        }
+        sqlx::query(
+            "INSERT INTO profile_characters (user_id, character_id, position) VALUES (7, ?1, 2)",
+        )
+        .bind(person)
+        .execute(&pool)
+        .await
+        .expect("a person item");
+        let counts_before = super::user_data_counts(&pool).await.expect("counts");
+        pool.close().await;
+
+        // the real startup path: backup, verify, migrate, compare
+        let pool = super::connect(&url).await.expect("the upgrade runs");
+        let counts_after = super::user_data_counts(&pool).await.expect("counts");
+        for (table, n) in &counts_before {
+            assert_eq!(counts_after.get(table), Some(n), "{table} keeps its rows");
+        }
+        assert!(
+            counts_after.contains_key("message_sessions"),
+            "the new table exists"
+        );
+        assert_eq!(counts_after["message_sessions"], 0);
+        let (bytes, animated): (Vec<u8>, bool) =
+            sqlx::query_as("SELECT bytes, animated FROM custom_images WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("image");
+        assert_eq!(
+            (bytes, animated),
+            (vec![0x47, 0x49, 0x46, 0x38], true),
+            "the custom picture is untouched"
+        );
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT character_id FROM profile_characters WHERE user_id = 7 ORDER BY position",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("ids");
+        assert_eq!(
+            ids,
+            vec![1, person],
+            "the person item and its position are unchanged"
+        );
+        let nick: String = sqlx::query_scalar(
+            "SELECT custom_title FROM profile_characters WHERE user_id = 7 AND character_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("title");
+        assert_eq!(nick, "Nick");
+        // the backup was written before the migration and verifies
+        let backups: Vec<_> = std::fs::read_dir(dir.join("backups"))
+            .expect("backups")
+            .flatten()
+            .collect();
+        assert_eq!(backups.len(), 1);
+        super::verify_backup(&backups[0].path())
+            .await
+            .expect("the backup is good");
     }
 
     #[test]

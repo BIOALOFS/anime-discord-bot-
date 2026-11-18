@@ -262,7 +262,9 @@ async fn drop_if_unused(pool: &SqlitePool, image_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// The image the owner set for this character (never another user's).
+/// The image the owner set for this character (never another user's). Kept for the tests of the ownership join; the
+/// profile reads pictures by id through `imgcache`.
+#[cfg(test)]
 pub async fn image_of_character(
     pool: &SqlitePool,
     user: i64,

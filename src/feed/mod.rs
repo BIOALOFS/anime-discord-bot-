@@ -331,7 +331,8 @@ pub async fn notify_user_with(
         }
         channel.send_message(&f.http, msg).await
     };
-    if dm.await.is_ok() {
+    if let Ok(sent) = dm.await {
+        crate::nav::register_notification(&f.pool, &sent).await;
         return;
     }
     let Ok(channels) = feed::reminder_fallback_channels(&f.pool, user).await else {
@@ -347,11 +348,11 @@ pub async fn notify_user_with(
         let msg = msg.allowed_mentions(
             serenity::CreateAllowedMentions::new().users(vec![serenity::UserId::new(user as u64)]),
         );
-        if serenity::ChannelId::new(channel as u64)
+        if let Ok(sent) = serenity::ChannelId::new(channel as u64)
             .send_message(&f.http, msg)
             .await
-            .is_ok()
         {
+            crate::nav::register_notification(&f.pool, &sent).await;
             return;
         }
     }
@@ -469,7 +470,10 @@ async fn send_batch<'a>(
             );
         }
         match channel.send_message(&f.http, msg).await {
-            Ok(_) => done.extend(chunk.iter().copied()),
+            Ok(sent) => {
+                crate::nav::register_notification(&f.pool, &sent).await;
+                done.extend(chunk.iter().copied())
+            }
             Err(e) => tracing::debug!("could not post a grouped release message: {e}"),
         }
     }

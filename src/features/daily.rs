@@ -135,11 +135,12 @@ async fn send(
     if !rows.is_empty() {
         msg = msg.components(rows);
     }
-    if let Err(e) = serenity::ChannelId::new(channel as u64)
+    match serenity::ChannelId::new(channel as u64)
         .send_message(&f.http, msg)
         .await
     {
-        tracing::debug!("could not post a daily message: {e}");
+        Ok(sent) => crate::nav::register_notification(&f.pool, &sent).await,
+        Err(e) => tracing::debug!("could not post a daily message: {e}"),
     }
 }
 

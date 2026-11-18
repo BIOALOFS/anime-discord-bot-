@@ -38,6 +38,20 @@ pub struct Config {
     pub cache_ttl_negative_secs: u64,
     #[serde(default = "d_cooldown")]
     pub command_cooldown_secs: u64,
+    /// How long the buttons and menus of a message stay active (see `nav::Lifetimes`). Blank means the default.
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_default_secs: Option<u64>,
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_profile_secs: Option<u64>,
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_notification_secs: Option<u64>,
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_max_secs: Option<u64>,
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_profile_max_secs: Option<u64>,
+    /// Size of the in-memory cache of processed custom pictures and banners (megabytes).
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub image_cache_mb: Option<u64>,
     /// MangaDex / MangaUpdates fallback for works AniList lacks. Off unless explicitly enabled.
     #[serde(default, deserialize_with = "opt_bool")]
     pub enable_fallback_providers: bool,
@@ -93,7 +107,7 @@ fn d_details() -> u64 {
     21_600
 }
 fn d_profile() -> u64 {
-    900
+    30
 }
 fn d_airing() -> u64 {
     300
@@ -238,10 +252,16 @@ impl Config {
             anilist_rate_limit_per_min: 6000,
             cache_ttl_search_secs: 60,
             cache_ttl_details_secs: 60,
-            cache_ttl_profile_secs: 60,
+            cache_ttl_profile_secs: 30,
             cache_ttl_airing_secs: 60,
             cache_ttl_negative_secs: 60,
             command_cooldown_secs: 0,
+            view_timeout_default_secs: None,
+            view_timeout_profile_secs: None,
+            view_timeout_notification_secs: None,
+            view_timeout_max_secs: None,
+            view_timeout_profile_max_secs: None,
+            image_cache_mb: None,
             enable_fallback_providers: false,
             igdb_client_id: None,
             igdb_client_secret: None,
@@ -312,6 +332,43 @@ mod tests {
 #[cfg(test)]
 mod owner_tests {
     use super::*;
+
+    #[test]
+    fn the_view_timeouts_read_from_the_environment_and_blank_means_the_default() {
+        let load = |pairs: &[(&str, &str)]| {
+            envy::from_iter::<_, Config>(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+                .expect("config")
+        };
+        let blank = load(&[
+            ("DISCORD_TOKEN", "t"),
+            ("VIEW_TIMEOUT_DEFAULT_SECS", ""),
+            ("VIEW_TIMEOUT_NOTIFICATION_SECS", " "),
+            ("IMAGE_CACHE_MB", ""),
+        ]);
+        assert_eq!(
+            crate::nav::Lifetimes::from_config(&blank),
+            crate::nav::Lifetimes::default()
+        );
+        let set = load(&[
+            ("DISCORD_TOKEN", "t"),
+            ("VIEW_TIMEOUT_DEFAULT_SECS", "20"),
+            ("VIEW_TIMEOUT_MAX_SECS", "100"),
+            ("VIEW_TIMEOUT_PROFILE_SECS", "90"),
+            ("VIEW_TIMEOUT_PROFILE_MAX_SECS", "400"),
+            ("VIEW_TIMEOUT_NOTIFICATION_SECS", "1800"),
+            ("IMAGE_CACHE_MB", "16"),
+        ]);
+        let l = crate::nav::Lifetimes::from_config(&set);
+        assert_eq!(l.of(crate::nav::Class::Default), (20, 100));
+        assert_eq!(l.of(crate::nav::Class::Profile), (90, 400));
+        assert_eq!(l.of(crate::nav::Class::Notification), (1800, 1800));
+        assert_eq!(set.image_cache_mb, Some(16));
+        assert_eq!(
+            load(&[("DISCORD_TOKEN", "t")]).cache_ttl_profile_secs,
+            30,
+            "the profile data cache is 30 seconds"
+        );
+    }
 
     #[test]
     fn a_blank_or_missing_owner_id_means_unset_and_a_number_is_read() {

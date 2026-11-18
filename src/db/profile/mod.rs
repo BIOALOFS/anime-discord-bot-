@@ -462,6 +462,37 @@ pub async fn search_own(
         .collect())
 }
 
+/// Like `search_own`, with the line under the name (the main work, or "شخص حقيقي · ممثل" for a person).
+pub async fn search_own_labelled(
+    pool: &SqlitePool,
+    user: i64,
+    partial: &str,
+    limit: i64,
+) -> Result<Vec<(i64, String, Option<String>)>> {
+    let escaped = partial
+        .trim()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let like = format!("%{escaped}%");
+    let rows = sqlx::query(
+        "SELECT pc.character_id AS id, cc.name_romaji AS name, cc.main_work AS sub FROM profile_characters pc \
+         JOIN character_cache cc ON cc.character_id = pc.character_id \
+         WHERE pc.user_id = ?1 AND cc.is_safe = 1 \
+         AND (cc.name_romaji LIKE ?2 ESCAPE '\\' OR cc.name_native LIKE ?2 ESCAPE '\\') \
+         ORDER BY pc.position LIMIT ?3",
+    )
+    .bind(user)
+    .bind(like)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.get("id"), r.get("name"), r.get("sub")))
+        .collect())
+}
+
 pub async fn set_tier(
     pool: &SqlitePool,
     user: i64,

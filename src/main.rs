@@ -16,6 +16,7 @@ mod feed;
 mod global;
 mod guild;
 mod http_log;
+mod nav;
 mod ops;
 mod people;
 pub mod texts;
@@ -30,19 +31,56 @@ mod ui;
 use poise::serenity_prelude as serenity;
 use sqlx::SqlitePool;
 
+#[derive(Clone)]
 pub struct Data {
     #[allow(dead_code)] // used from milestone 4 on
     pub db: SqlitePool,
     #[allow(dead_code)] // used from milestone 8 on
     pub config: config::Config,
     pub anilist: std::sync::Arc<anilist::SafeAniList>,
-    pub auto: ui::autocomplete::AutoState,
+    pub auto: std::sync::Arc<ui::autocomplete::AutoState>,
+    /// Ephemeral messages that are still active (their components are greyed out at the end of their lifetime).
+    pub ephemerals: nav::sweeper::Ephemerals,
+    /// Processed pictures of the profile (custom pictures, GIFs, banners) kept in memory.
+    pub images: commands::profile::imgcache::ImageCache,
     pub http: reqwest::Client,
     pub renderer: std::sync::Arc<render::Renderer>,
     pub guilds: std::sync::Arc<guild::GuildStore>,
     pub providers: std::sync::Arc<providers::Providers>,
     pub tmdb: std::sync::Arc<tmdb::Tmdb>,
     pub ops: std::sync::Arc<ops::Ops>,
+}
+
+#[cfg(test)]
+impl Data {
+    /// A complete `Data` over an in-memory database and fixtures: no network, every provider off. `fetch` answers
+    /// the AniList requests.
+    pub async fn for_tests(
+        fetch: impl Fn(&str, &serde_json::Value) -> Result<serde_json::Value, anilist::AniError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        let pool = db::connect_memory().await;
+        let http = reqwest::Client::new();
+        Self {
+            guilds: std::sync::Arc::new(guild::GuildStore::new(pool.clone())),
+            providers: std::sync::Arc::new(providers::Providers::new(
+                http.clone(),
+                Default::default(),
+            )),
+            tmdb: std::sync::Arc::new(tmdb::Tmdb::new(http.clone(), Default::default())),
+            ops: ops::Ops::load(pool.clone(), None, std::path::PathBuf::from("test.db")).await,
+            renderer: std::sync::Arc::new(render::Renderer::new(http.clone())),
+            http,
+            db: pool,
+            config: config::Config::for_tests(),
+            anilist: std::sync::Arc::new(anilist::SafeAniList::with_fixture(fetch)),
+            auto: Default::default(),
+            ephemerals: Default::default(),
+            images: commands::profile::imgcache::ImageCache::new(8),
+        }
+    }
 }
 
 #[tokio::main]
@@ -76,6 +114,13 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| std::path::PathBuf::from("bot.db"));
     let ops_state = ops::Ops::load(pool.clone(), config.owner_id, db_path).await;
     let setup_ops = ops_state.clone();
+    // How long buttons stay active, and the list of ephemeral messages the sweeper looks after.
+    nav::init(nav::Lifetimes::from_config(&config));
+    let setup_ephemerals = nav::sweeper::Ephemerals::default();
+    let image_cache_mb = config
+        .image_cache_mb
+        .filter(|n| *n > 0)
+        .unwrap_or(commands::profile::imgcache::DEFAULT_MB);
     let feed_ops = ops_state.clone();
 
     let framework = poise::Framework::builder()
@@ -98,6 +143,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Err(e) => tracing::warn!("could not read the application info (owner tools need OWNER_ID): {e}"),
                 }
+                // Greys out the controls of every message whose time is up (also those left from before a restart).
+                nav::sweeper::spawn(ctx.http.clone(), pool.clone(), setup_ephemerals.clone());
                 let cmds = &framework.options().commands;
                 // Registration overwrites the whole list in its scope, so removed commands disappear.
                 match dev_guild {
@@ -130,6 +177,10 @@ async fn main() -> anyhow::Result<()> {
                     config,
                     anilist,
                     auto: Default::default(),
+                    ephemerals: setup_ephemerals,
+                    images: commands::profile::imgcache::ImageCache::new(
+                        image_cache_mb,
+                    ),
                 })
             })
         })

@@ -17,7 +17,7 @@ use crate::{
 use poise::serenity_prelude as serenity;
 
 /// What a press answers with.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Msg {
     pub text: Option<String>,
     pub embed: Option<serenity::CreateEmbed>,
@@ -392,6 +392,10 @@ async fn has_performers(data: &Data, key: &str, mature: bool) -> bool {
 
 /// The card of a character of any source. `value` is an AniList character id, a `tmdb-cast:` key or a provider key.
 pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
+    // A person added to a profile is listed with the characters: its stored id opens the person card.
+    if crate::people::parse_key(value).is_some() {
+        return crate::people::msgs::person_msg(data, value, mature).await;
+    }
     if let Ok(id) = value.parse::<i64>() {
         return match data.anilist.character_by_id(id, ContentPolicy::SAFE).await {
             Ok(CharacterLookup::Found(c)) => {
@@ -589,6 +593,24 @@ async fn add_inner(data: &Data, key: &str, user: i64, mature: bool) -> Result<St
             c.display_name(),
         ));
     }
+    if crate::people::parse_key(key).is_some() {
+        // A person is added as a character (companies cannot be).
+        if !crate::people::addable(key) {
+            return Ok(i18n::PERSON_NOT_ADDABLE.to_string());
+        }
+        let crate::people::fetch::Card::Found(p) =
+            crate::people::fetch::person(&crate::people::fetch::Sources::of(data), key, mature)
+                .await
+        else {
+            return Ok(i18n::SHOW_WORK_UNAVAILABLE.to_string());
+        };
+        return Ok(
+            match crate::people::profile::add(pool, user, &p, now).await? {
+                Some(outcome) => added_text(outcome, &p.name),
+                None => i18n::PERSON_NOT_ADDABLE.to_string(),
+            },
+        );
+    }
     if key.starts_with("igdb:c") || key.starts_with("vndb:c") {
         return match data.providers.character_by_key(key, mature).await {
             Some(w) => Ok(crate::commands::fallback::add_to_profile(pool, user, &w)
@@ -687,110 +709,52 @@ pub async fn set_status(data: &Data, key: &str, value: &str, user: i64) -> Strin
     }
 }
 
-/// Send a message built here as the reply of a slash command.
+/// Send a message built here as the reply of a slash command. It is an interactive message like any other: it gets the
+/// same navigation (edit in place with Back for the owner, private views for others) and lifetime.
 pub async fn reply(ctx: crate::error::Context<'_>, m: Msg) -> Result<(), Error> {
-    let mut reply = poise::CreateReply::default();
-    if let Some(t) = m.text {
-        reply = reply.content(t);
-    }
-    if let Some(e) = m.embed {
-        reply = reply.embed(e);
-    }
-    for f in m.files {
-        reply = reply.attachment(f);
-    }
-    if !m.rows.is_empty() {
-        reply = reply.components(m.rows);
-    }
-    ctx.send(reply).await?;
-    Ok(())
+    crate::ui::session::run(ctx, crate::nav::overlay::MsgView(m)).await
 }
 
-fn followup(m: Msg, ephemeral: bool) -> serenity::CreateInteractionResponseFollowup {
-    let mut f = serenity::CreateInteractionResponseFollowup::new().ephemeral(ephemeral);
-    if let Some(t) = m.text {
-        f = f.content(t);
-    }
-    if let Some(e) = m.embed {
-        f = f.embed(e);
-    }
-    for file in m.files {
-        f = f.add_file(file);
-    }
-    if !m.rows.is_empty() {
-        f = f.components(m.rows);
-    }
-    f
+/// Is this press a page button of a list that is already open (it replaces the view on screen instead of opening a
+/// new one)?
+pub fn replaces_view(p: &Press) -> bool {
+    matches!(
+        p,
+        Press::ShowChars(_, Some(_))
+            | Press::ShowWorks(_, Some(_))
+            | Press::ShowCrew(_, Some(_))
+            | Press::SearchPage(..)
+    )
 }
 
-/// Handle one press. Everything but a roster page is answered with a new message.
-pub async fn handle(
-    ctx: &serenity::Context,
-    i: &serenity::ComponentInteraction,
-    data: &Data,
-    press: Press,
-    ephemeral: bool,
-) -> Result<(), Error> {
-    let user = i.user.id.get() as i64;
-    let guild = i.guild_id.map(|g| g.get() as i64);
+/// The view a navigation press asks for (`None` for presses that act instead: reminders, add, status, Back).
+pub async fn view_msg(data: &Data, press: &Press, user: i64, guild: Option<i64>) -> Option<Msg> {
     let mature = mature_for(data, guild).await;
-    // Page buttons of a roster, works or crew message edit that (new) message.
-    let page_edit = match &press {
-        Press::ShowChars(key, Some(page)) => Some(roster_msg(data, key, *page, mature).await),
-        Press::ShowWorks(key, Some(page)) => {
-            Some(crate::people::msgs::works_msg(data, key, *page, mature).await)
+    Some(match press {
+        Press::ShowWork(k) | Press::PickWork(k) => work_msg(data, k, user, mature).await,
+        Press::ShowChars(k, page) => roster_msg(data, k, page.unwrap_or(0), mature).await,
+        Press::PickAny(k) => open_any(data, k, user, mature).await,
+        Press::SearchPage(cat, ty, page, q) => search_msg(data, guild, *cat, *ty, q, *page).await,
+        Press::PickPerson(k) => crate::people::msgs::person_msg(data, k, mature).await,
+        Press::ShowWorks(k, page) => {
+            crate::people::msgs::works_msg(data, k, page.unwrap_or(0), mature).await
         }
-        Press::ShowCrew(key, Some(page)) => {
-            Some(crate::people::msgs::crew_msg(data, key, *page, mature).await)
+        Press::ShowCrew(k, page) => {
+            crate::people::msgs::crew_msg(data, k, page.unwrap_or(0), mature).await
         }
-        Press::SearchPage(cat, ty, page, q) => {
-            Some(search_msg(data, guild, *cat, *ty, q, *page).await)
-        }
-        _ => None,
-    };
-    if let Some(m) = page_edit {
-        let mut r = serenity::CreateInteractionResponseMessage::new().components(m.rows);
-        r = match (m.embed, m.text) {
-            (Some(e), _) => r.embed(e),
-            (None, Some(t)) => r.content(t),
-            _ => r,
-        };
-        return Ok(i
-            .create_response(ctx, serenity::CreateInteractionResponse::UpdateMessage(r))
-            .await?);
-    }
-    let defer = serenity::CreateInteractionResponse::Defer(
-        serenity::CreateInteractionResponseMessage::new().ephemeral(ephemeral),
-    );
-    i.create_response(ctx, defer).await?;
-    let (msg, private) = match press {
-        Press::ShowWork(k) | Press::PickWork(k) => {
-            (work_msg(data, &k, user, mature).await, ephemeral)
-        }
-        Press::ShowChars(k, _) => (roster_msg(data, &k, 0, mature).await, ephemeral),
-        Press::PickAny(k) => (open_any(data, &k, user, mature).await, ephemeral),
-        Press::SearchPage(..) => return Ok(()),
-        Press::PickPerson(k) => (
-            crate::people::msgs::person_msg(data, &k, mature).await,
-            ephemeral,
-        ),
-        Press::ShowWorks(k, _) => (
-            crate::people::msgs::works_msg(data, &k, 0, mature).await,
-            ephemeral,
-        ),
-        Press::ShowCrew(k, _) => (
-            crate::people::msgs::crew_msg(data, &k, 0, mature).await,
-            ephemeral,
-        ),
-        Press::ShowPerformer(k) => (
-            crate::people::msgs::performers_msg(data, &k, mature).await,
-            ephemeral,
-        ),
-        Press::PickChar(v) => (character_msg(data, &v, mature).await, ephemeral),
-        Press::Remind(k) => (Msg::text(remind(data, &k, user, guild).await), true),
-        Press::Add(k) => (Msg::text(add(data, &k, user, mature).await), true),
-        Press::Status(k, v) => (Msg::text(set_status(data, &k, &v, user).await), true),
-    };
-    i.create_followup(ctx, followup(msg, private)).await?;
-    Ok(())
+        Press::ShowPerformer(k) => crate::people::msgs::performers_msg(data, k, mature).await,
+        Press::PickChar(v) => character_msg(data, v, mature).await,
+        Press::Remind(_) | Press::Add(_) | Press::Status(..) | Press::Back => return None,
+    })
+}
+
+/// The text answer of a press that acts for the presser (reminder, add to profile, status).
+pub async fn act_text(data: &Data, press: &Press, user: i64, guild: Option<i64>) -> Option<String> {
+    let mature = mature_for(data, guild).await;
+    Some(match press {
+        Press::Remind(k) => remind(data, k, user, guild).await,
+        Press::Add(k) => add(data, k, user, mature).await,
+        Press::Status(k, v) => set_status(data, k, v, user).await,
+        _ => return None,
+    })
 }

@@ -8,7 +8,7 @@ use crate::{
     anilist::{ContentPolicy, SafeAniList},
     commands::buttons,
     db::{
-        custom::{self, StoredImage},
+        custom::StoredImage,
         profile::{self as pdb, Profile},
         suggest, works,
     },
@@ -68,9 +68,15 @@ pub struct ProfileView {
     /// The page (window of 25) that contains `index`.
     pub window: Vec<Item>,
     pub window_start: usize,
-    pub custom: Option<StoredImage>,
+    pub custom: Option<Arc<StoredImage>>,
     pub banner: Option<Arc<BannerFile>>,
     pub notice: Option<String>,
+    /// For looking up the notable works of a person in the list (people are characters in a profile).
+    pub sources: Option<crate::people::fetch::Sources>,
+    /// Processed pictures kept in memory, shared by every profile view.
+    pub images: super::imgcache::ImageCache,
+    /// Up to three notable works of the shown person (empty for anything else).
+    pub person_works: Vec<String>,
 }
 
 /// First index of the window that contains `index`.
@@ -201,6 +207,9 @@ impl ProfileView {
             custom: None,
             banner: None,
             notice: None,
+            sources: Some(crate::people::fetch::Sources::of(ctx.data())),
+            images: ctx.data().images.clone(),
+            person_works: Vec::new(),
         }
     }
 
@@ -267,34 +276,25 @@ impl ProfileView {
             }
         }
         self.custom = self.load_custom_image().await;
+        self.person_works = self.load_person_works().await;
         if self.banner.is_none() {
             self.banner = self.prepare_banner().await.map(Arc::new);
         }
+        self.prefetch();
         Ok(())
     }
 
     /// The current character's own picture. A missing row, an unreadable one or one too big for a message all fall
     /// back to the provider picture, with a warning in the log, so that the page itself always renders.
-    async fn load_custom_image(&self) -> Option<StoredImage> {
+    async fn load_custom_image(&self) -> Option<Arc<StoredImage>> {
         let item = self
             .current()
             .filter(|i| i.section == Section::Characters && i.visible)?;
         let id = item.character_id()?;
-        item.custom_image_id?;
-        let img = match custom::image_of_character(&self.pool, self.owner, id).await {
-            Ok(Some(img)) => img,
-            Ok(None) => {
-                tracing::warn!(
-                    "custom image of character {id} is missing; using the provider image"
-                );
-                return None;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "custom image of character {id} is unreadable ({e}); using the provider image"
-                );
-                return None;
-            }
+        let image_id = item.custom_image_id?;
+        let Some(img) = self.images.get(&self.pool, image_id).await else {
+            tracing::warn!("custom image of character {id} is missing; using the provider image");
+            return None;
         };
         if img.bytes.is_empty() || img.bytes.len() > MAX_ATTACH_BYTES {
             tracing::warn!(
@@ -305,6 +305,60 @@ impl ProfileView {
             return None;
         }
         Some(img)
+    }
+
+    /// Warm what the neighbours of the shown item need (their pictures, and the card of a person) in the background,
+    /// so the next click on ◀ or ▶ finds it in memory.
+    pub fn prefetch(&self) {
+        let neighbours: Vec<&Item> = [self.index.checked_sub(1), Some(self.index + 1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|i| self.window.get(i.checked_sub(self.window_start)?))
+            .filter(|i| i.visible && i.section == Section::Characters)
+            .collect();
+        let images: Vec<i64> = neighbours
+            .iter()
+            .filter_map(|i| i.custom_image_id)
+            .collect();
+        let people: Vec<String> = neighbours
+            .iter()
+            .filter_map(|i| i.character_id().and_then(crate::people::decode_person_id))
+            .collect();
+        if images.is_empty() && people.is_empty() {
+            return;
+        }
+        let (cache, pool, sources) = (self.images.clone(), self.pool.clone(), self.sources.clone());
+        tokio::spawn(async move {
+            for id in images {
+                let _ = cache.get(&pool, id).await;
+            }
+            if let Some(s) = sources {
+                for key in people {
+                    let _ = crate::people::fetch::person(&s, &key, false).await;
+                }
+            }
+        });
+    }
+
+    /// A person in the list: their three best known works (safety filtered when the card was parsed; cached by the
+    /// sources, so this is cheap after the first time).
+    async fn load_person_works(&self) -> Vec<String> {
+        let (Some(sources), Some(item)) = (&self.sources, self.current()) else {
+            return Vec::new();
+        };
+        let Some(key) = item
+            .character_id()
+            .and_then(crate::people::decode_person_id)
+            .filter(|_| item.visible)
+        else {
+            return Vec::new();
+        };
+        match crate::people::fetch::person(sources, &key, false).await {
+            crate::people::fetch::Card::Found(p) => {
+                p.credits.iter().take(3).map(|c| c.line()).collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// The banner is dropped from a page only when it and the character picture together would not fit one message.
@@ -320,11 +374,11 @@ impl ProfileView {
     pub async fn prepare_banner(&self) -> Option<BannerFile> {
         let spec = BannerSpec::parse(self.profile.banner.as_deref());
         if let BannerSpec::Image(id) = &spec {
-            if let Ok(Some(img)) = custom::get_image(&self.pool, *id).await {
+            if let Some(img) = self.images.get(&self.pool, *id).await {
                 let ext = if img.animated { "gif" } else { "png" };
                 return Some(BannerFile {
                     name: format!("{BANNER_NAME}.{ext}"),
-                    bytes: img.bytes,
+                    bytes: img.bytes.clone(),
                 });
             }
         }
@@ -393,12 +447,21 @@ impl ProfileView {
         if let Some(t) = i.display_title() {
             lines.push(format!("✨ **{t}**"));
         }
+        let is_person = i
+            .character_id()
+            .is_some_and(|id| id >= crate::people::PERSON_ID_BASE);
         if let Some(w) = i.subtitle.as_deref().filter(|w| !w.is_empty()) {
-            lines.push(if i.section == Section::Characters {
+            lines.push(if is_person {
+                // "شخص حقيقي · ممثل": a real person among the characters.
+                format!("🎙️ {w}")
+            } else if i.section == Section::Characters {
                 format!("📺 {w}")
             } else {
                 w.to_string()
             });
+        }
+        if is_person && !self.person_works.is_empty() {
+            lines.push(format!("🎞️ {}", self.person_works.join(" · ")));
         }
         if let Some(d) = &i.custom_description {
             lines.push(format!("📝 {d}"));
@@ -436,7 +499,7 @@ impl ProfileView {
         self.current()
             .filter(|i| i.visible)
             .and_then(|i| i.image_url.clone())
-            .filter(|u| u.starts_with("https://s4.anilist.co/"))
+            .filter(|u| crate::people::profile::image_ok(u))
     }
 
     fn banner_url(&self) -> Option<String> {
@@ -549,6 +612,10 @@ fn custom_name(img: &StoredImage) -> String {
 }
 
 impl View for ProfileView {
+    fn class(&self) -> crate::nav::Class {
+        crate::nav::Class::Profile
+    }
+
     fn render(&self, enabled: bool) -> Page {
         self.main_page(enabled)
     }
@@ -612,6 +679,7 @@ impl View for ProfileView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::custom;
 
     fn item(n: usize, name: &str) -> Item {
         Item {
@@ -673,6 +741,9 @@ mod tests {
                 bytes: vec![1],
             })),
             notice: None,
+            sources: None,
+            images: crate::commands::profile::imgcache::ImageCache::new(8),
+            person_works: Vec::new(),
         }
     }
 
@@ -1067,6 +1138,154 @@ mod tests {
             assert!(c.label.chars().count() <= 100 && c.value.chars().count() <= 100);
             assert!(seen.insert(c.value.clone()), "unique");
         }
+    }
+
+    #[tokio::test]
+    async fn people_show_in_the_characters_list_with_a_role_line_and_never_in_a_third_mode() {
+        let mut v = fixture(2).await;
+        let p = crate::people::Person {
+            key: "tmdb-person:17419".into(),
+            name: "Bryan Cranston".into(),
+            roles: vec!["ممثل".into()],
+            image: Some("https://image.tmdb.org/t/p/w500/a.jpg".into()),
+            popularity: Some(4250),
+            ..crate::people::Person::default()
+        };
+        crate::people::profile::add(&v.pool, 1, &p, 10)
+            .await
+            .expect("add");
+        v.load().await.expect("load");
+        assert_eq!(v.counts.0, 3, "the characters count includes the person");
+        assert_eq!(v.total, 3);
+        v.index = 2;
+        v.load().await.expect("load");
+        let text = v.item_text();
+        assert!(
+            text.contains("Bryan Cranston") && text.contains("🎙️ شخص حقيقي · ممثل"),
+            "{text}"
+        );
+        assert!(
+            text.contains("4,250") || text.contains("4250") || text.contains("٤"),
+            "the popularity line: {text}"
+        );
+        assert_eq!(
+            v.item_image().as_deref(),
+            Some("https://image.tmdb.org/t/p/w500/a.jpg")
+        );
+        // the toggle stays two-way: characters <-> works
+        assert_eq!(Section::Characters.other(), Section::Works);
+        assert_eq!(Section::Works.other(), Section::Characters);
+        // the jump menu lists it among the characters, by its stable id
+        let choices = window_choices(&v.window, v.window_start);
+        assert!(choices.iter().any(|c| c.value
+            == crate::people::encode_person_id("tmdb-person:17419")
+                .expect("id")
+                .to_string()));
+        // a person is navigable like any character
+        v.index = 0;
+        v.load().await.expect("load");
+        let again = crate::ui::pagination::apply_nav(
+            crate::ui::pagination::Nav::Last,
+            v.index,
+            v.total as usize,
+        );
+        assert_eq!(again, 2);
+    }
+
+    #[tokio::test]
+    async fn a_tmdb_cast_entry_goes_from_the_button_to_the_profile_and_can_be_edited() {
+        let mut v = fixture(1).await;
+        let cid = crate::tmdb::model::encode_cast_id(crate::tmdb::model::Kind::Tv, 1396, 17419)
+            .expect("cast id");
+        crate::db::profile::upsert_cache(
+            &v.pool,
+            &crate::db::profile::CacheRow {
+                character_id: cid,
+                name_romaji: "Walter White".into(),
+                name_native: None,
+                image_url: Some("https://image.tmdb.org/t/p/w500/w.jpg".into()),
+                is_safe: true,
+                main_work: Some("Breaking Bad".into()),
+                main_work_url: None,
+                favourites: None,
+                fetched_at: 5,
+            },
+        )
+        .await
+        .expect("cache");
+        assert_eq!(
+            crate::db::profile::add_character(&v.pool, 1, cid)
+                .await
+                .expect("add"),
+            crate::db::profile::AddOutcome::Added(2)
+        );
+        v.load().await.expect("load");
+        v.index = 1;
+        v.load().await.expect("load");
+        let text = v.item_text();
+        assert!(
+            text.contains("Walter White") && text.contains("📺 Breaking Bad"),
+            "{text}"
+        );
+        assert_eq!(
+            v.item_image().as_deref(),
+            Some("https://image.tmdb.org/t/p/w500/w.jpg")
+        );
+        // editable: a nickname and a custom picture work like on any character
+        crate::db::custom::set_title(&v.pool, 1, cid, Some("Heisenberg"))
+            .await
+            .expect("title");
+        set_image(&v, cid, 1, true, 50).await;
+        v.load().await.expect("load");
+        assert!(v.item_text().contains("Heisenberg"));
+        assert!(v.custom.is_some(), "the custom picture (a GIF) is used");
+        // it opens from lists by its cast key
+        assert_eq!(
+            crate::commands::top::character_key(cid),
+            "tmdb-cast:tv:1396:17419"
+        );
+        assert_eq!(
+            crate::commands::top::character_key(
+                crate::people::encode_person_id("anilist-staff:95").expect("id")
+            ),
+            "anilist-staff:95",
+            "a person opens by its person key"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_neighbours_pictures_are_warmed_in_the_background() {
+        let mut v = fixture(6).await;
+        set_image(&v, 2, 1, false, 100).await;
+        set_image(&v, 4, 2, true, 100).await;
+        set_image(&v, 6, 3, false, 100).await;
+        v.index = 2; // item 3 on screen: its neighbours are items 2 and 4
+        v.load().await.expect("load");
+        let image_of = |c: i64| {
+            let pool = v.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT custom_image_id FROM profile_characters WHERE user_id = 1 AND character_id = ?1")
+                    .bind(c)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("image id")
+            }
+        };
+        let (i2, i4, i6) = (image_of(2).await, image_of(4).await, image_of(6).await);
+        let mut warm = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            v.images.settle().await;
+            if v.images.contains(i2).await && v.images.contains(i4).await {
+                warm = true;
+                break;
+            }
+        }
+        assert!(warm, "both neighbours are in memory");
+        assert!(
+            !v.images.contains(i6).await,
+            "an item further away is not prefetched"
+        );
     }
 
     fn group_first(group: usize) -> String {

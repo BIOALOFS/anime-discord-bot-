@@ -80,3 +80,13 @@ What was removed and what was merged. Nothing here is reachable from a command a
   automatically if any count drops; a test rejects `DROP` / `DELETE` / `TRUNCATE` in migrations 0013 and later. No migration was added in this round.
 - **Guards:** a navigation-matrix test for the profile (every control after a picture edit, missing / empty / oversized pictures), tests for the shared search
   cache between autocomplete and submit, the person / work / character button rules and the overflow menu.
+
+## Round 10
+- **Removed:** the 180-second collector timeout (`session::TIMEOUT`), the "send a NEW message" navigation of the universal buttons (`global::handle`, `followup`),
+  `card_is_ephemeral`, and `image_of_character` outside tests (pictures are read by id through the cache).
+- **Added:** `src/nav/` (lifetimes, the Back trail, the session store, the sweeper, the live-message registry, edit-in-place overlays, private views),
+  `commands/profile/imgcache.rs` (image LRU), `people/profile.rs` (people as characters), attachment reuse for Components V2 edits.
+- **Migration 0019 (additive):** `message_sessions`. No existing table or column was touched; people use ids above 10^15 in the existing character tables, so no
+  column was added.
+- **Not changed on purpose:** the five-minute cache of the `/top` rankings (it is data, not button state).
+

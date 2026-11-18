@@ -7,6 +7,7 @@ mod compare;
 mod edit;
 pub use edit::edit;
 mod imaging;
+pub mod imgcache;
 pub(crate) mod items;
 mod manage;
 mod social;

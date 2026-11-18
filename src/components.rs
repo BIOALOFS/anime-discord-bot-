@@ -24,6 +24,9 @@ pub const PICK_MORE: &str = "pickmore";
 /// The general search: its result menu (any kind of item) and its page buttons.
 pub const PICK_ANY: &str = "pickany";
 pub const SEARCH_PAGE: &str = "searchpage";
+/// "رجوع": back to the previous view of the same message.
+pub const BACK: &str = "navback";
+pub const LABEL_BACK: &str = "رجوع";
 pub const REMIND: &str = "remind";
 pub const ADD_PROFILE: &str = "addprofile";
 /// The watch / read status menu of a work card: `setstatus:<work key>` (the chosen status is the menu value).
@@ -53,6 +56,7 @@ pub fn is_global_id(id: &str) -> bool {
         || id == PICK_PERSON
         || id == PICK_MORE
         || id == PICK_ANY
+        || id == BACK
         || [
             SEARCH_PAGE,
             SHOW_WORK,
@@ -133,6 +137,8 @@ pub enum Press {
     PickWork(String),
     PickChar(String),
     PickPerson(String),
+    /// Back to the previous view of this message.
+    Back,
     /// Any item of the general search, by key: opens a work, character or person card.
     PickAny(String),
     /// A page button of a general-search result: category, type, page, text.
@@ -162,6 +168,9 @@ pub fn parse(id: &str, values: &[String]) -> Option<Press> {
             .first()
             .filter(|v| is_person_key(v))
             .map(|v| Press::PickPerson(v.clone()));
+    }
+    if id == BACK {
+        return Some(Press::Back);
     }
     if id == PICK_ANY {
         return values
@@ -329,6 +338,33 @@ pub fn card_rows(
     (rows, links)
 }
 
+/// "رجوع": every view but the first of a message carries it.
+pub fn back_button() -> serenity::CreateButton {
+    serenity::CreateButton::new(BACK)
+        .label(LABEL_BACK)
+        .emoji('↩')
+        .style(serenity::ButtonStyle::Secondary)
+}
+
+/// Add the Back button to a view's rows. It joins the first row of buttons that has room; otherwise it gets a row of
+/// its own. It is never dropped (the builders keep their rows within four so that this always fits).
+pub fn with_back(mut rows: Vec<serenity::CreateActionRow>) -> Vec<serenity::CreateActionRow> {
+    let json = |r: &serenity::CreateActionRow| serde_json::to_value(r).unwrap_or_default();
+    let room = rows.iter().position(|r| {
+        let j = json(r);
+        j["components"][0]["type"] == 2 && j["components"].as_array().is_some_and(|c| c.len() < 5)
+    });
+    match room {
+        Some(i) => {
+            if let serenity::CreateActionRow::Buttons(b) = &mut rows[i] {
+                b.push(back_button());
+            }
+        }
+        None => rows.push(serenity::CreateActionRow::Buttons(vec![back_button()])),
+    }
+    rows
+}
+
 /// "ذكّرني" for a work.
 pub fn remind_button(work_key: &str) -> serenity::CreateButton {
     serenity::CreateButton::new(remind_id(work_key))
@@ -442,6 +478,8 @@ pub const VIEW_KINDS: &[(&str, ViewKind)] = &[
     ("Arena", ViewKind::Event),
     ("Versus", ViewKind::Event),
     ("PickAddView", ViewKind::List),
+    // A built view (person card, search results…) sent as the reply of a command: it carries its own buttons.
+    ("MsgView", ViewKind::None),
 ];
 
 #[cfg(test)]
