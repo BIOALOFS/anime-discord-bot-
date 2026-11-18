@@ -334,6 +334,43 @@ mod owner_tests {
     use super::*;
 
     #[test]
+    fn the_view_timeouts_read_from_the_environment_and_blank_means_the_default() {
+        let load = |pairs: &[(&str, &str)]| {
+            envy::from_iter::<_, Config>(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+                .expect("config")
+        };
+        let blank = load(&[
+            ("DISCORD_TOKEN", "t"),
+            ("VIEW_TIMEOUT_DEFAULT_SECS", ""),
+            ("VIEW_TIMEOUT_NOTIFICATION_SECS", " "),
+            ("IMAGE_CACHE_MB", ""),
+        ]);
+        assert_eq!(
+            crate::nav::Lifetimes::from_config(&blank),
+            crate::nav::Lifetimes::default()
+        );
+        let set = load(&[
+            ("DISCORD_TOKEN", "t"),
+            ("VIEW_TIMEOUT_DEFAULT_SECS", "20"),
+            ("VIEW_TIMEOUT_MAX_SECS", "100"),
+            ("VIEW_TIMEOUT_PROFILE_SECS", "90"),
+            ("VIEW_TIMEOUT_PROFILE_MAX_SECS", "400"),
+            ("VIEW_TIMEOUT_NOTIFICATION_SECS", "1800"),
+            ("IMAGE_CACHE_MB", "16"),
+        ]);
+        let l = crate::nav::Lifetimes::from_config(&set);
+        assert_eq!(l.of(crate::nav::Class::Default), (20, 100));
+        assert_eq!(l.of(crate::nav::Class::Profile), (90, 400));
+        assert_eq!(l.of(crate::nav::Class::Notification), (1800, 1800));
+        assert_eq!(set.image_cache_mb, Some(16));
+        assert_eq!(
+            load(&[("DISCORD_TOKEN", "t")]).cache_ttl_profile_secs,
+            30,
+            "the profile data cache is 30 seconds"
+        );
+    }
+
+    #[test]
     fn a_blank_or_missing_owner_id_means_unset_and_a_number_is_read() {
         let load = |pairs: &[(&str, &str)]| {
             envy::from_iter::<_, Config>(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
