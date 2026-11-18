@@ -842,6 +842,50 @@ mod tests {
             .expect("the backup is good");
     }
 
+    /// The round 11.1 upgrade (0020 -> 0021, wiki snapshots) on a database that already holds wiki data and member
+    /// items: backup verified, row counts equal, the snapshot table starts empty.
+    #[tokio::test]
+    async fn the_snapshot_migration_is_additive_and_keeps_member_data() {
+        let dir = temp_dir("round111");
+        let path = dir.join("bot.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("open");
+        let mut old = sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
+            .await
+            .expect("read migrations");
+        let before: Vec<_> = old
+            .migrations
+            .iter()
+            .filter(|m| m.version <= 20)
+            .cloned()
+            .collect();
+        assert!(old.migrations.len() > before.len(), "0021 is under test");
+        old.migrations = std::borrow::Cow::Owned(before);
+        old.run(&pool).await.expect("migrate to 0020");
+        for sql in [
+            "INSERT INTO users (discord_id) VALUES (7)",
+            "INSERT INTO profiles (user_id, bio) VALUES (7, 'hello')",
+            "INSERT INTO profile_characters (user_id, character_id, position) VALUES (7, 1, 1)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.expect(sql);
+        }
+        let counts_before = super::user_data_counts(&pool).await.expect("counts");
+        pool.close().await;
+        let pool = super::connect(&url).await.expect("the upgrade runs");
+        let counts_after = super::user_data_counts(&pool).await.expect("counts");
+        for (table, n) in &counts_before {
+            assert_eq!(counts_after.get(table), Some(n), "{table} keeps its rows");
+        }
+        let backups: Vec<_> = std::fs::read_dir(dir.join("backups"))
+            .expect("backups")
+            .flatten()
+            .collect();
+        assert_eq!(backups.len(), 1);
+        super::verify_backup(&backups[0].path())
+            .await
+            .expect("the backup is good");
+    }
+
     #[test]
     fn only_the_newest_seven_backups_are_kept() {
         let dir = temp_dir("prune");
