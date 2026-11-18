@@ -267,10 +267,53 @@ async fn send_page(
     use_v2: bool,
     known: &mut super::v2::Known,
 ) -> bool {
-    if use_v2 && page.v2.is_some() {
-        edit_v2(sctx, &i.token, &page, known).await.is_ok()
+    let result = if use_v2 && page.v2.is_some() {
+        edit_v2(sctx, &i.token, &page, known).await
     } else {
-        i.edit_response(sctx, page.into_edit()).await.is_ok()
+        i.edit_response(sctx, page.into_edit())
+            .await
+            .map(|_| ())
+            .map_err(|e| EditFail::of(&e))
+    };
+    survives(result)
+}
+
+/// Why an edit of the message failed.
+#[derive(Debug)]
+pub struct EditFail {
+    /// The message (or the interaction token) no longer exists: nothing can be edited any more.
+    pub gone: bool,
+    pub text: String,
+}
+
+impl EditFail {
+    fn of(e: &serenity::Error) -> Self {
+        let gone = matches!(
+            e,
+            serenity::Error::Http(serenity::HttpError::UnsuccessfulRequest(r))
+                if r.status_code.as_u16() == 404
+        );
+        Self {
+            gone,
+            text: e.to_string(),
+        }
+    }
+}
+
+/// A failed edit ends the session only when the message is really gone. Any other failure (a rate limit, a hiccup, a
+/// refused attachment) leaves the session alive: the buttons still answer and the next click edits again. Before this,
+/// one failed edit dropped the session while its buttons stayed enabled, so the message looked alive but never moved.
+pub(crate) fn survives(r: Result<(), EditFail>) -> bool {
+    match r {
+        Ok(()) => true,
+        Err(f) if f.gone => {
+            tracing::debug!("could not edit message: it is gone ({})", f.text);
+            false
+        }
+        Err(f) => {
+            tracing::warn!("edit failed, the session stays alive: {}", f.text);
+            true
+        }
     }
 }
 
@@ -364,26 +407,29 @@ async fn edit_v2(
     token: &str,
     page: &Page,
     known: &mut super::v2::Known,
-) -> Result<(), String> {
-    let comps = page.v2.clone().ok_or("no V2 body")?;
-    super::v2::validate(&comps)?;
+) -> Result<(), EditFail> {
+    let fail = |text: String| EditFail { gone: false, text };
+    let comps = page.v2.clone().ok_or_else(|| fail("no V2 body".into()))?;
+    super::v2::validate(&comps).map_err(fail)?;
     let (payload, upload) = super::v2::payload_reusing(comps.clone(), &page.files, known);
-    let reused = upload.len() < page.files.len();
     let first = sctx
         .http
         .edit_original_interaction_response(token, &payload, upload)
         .await;
     let msg = match first {
         Ok(m) => m,
-        Err(e) if reused => {
-            tracing::debug!("reusing attachments failed ({e}); uploading them again");
+        Err(e) if EditFail::of(&e).gone => return Err(EditFail::of(&e)),
+        Err(e) => {
+            // Whatever went wrong (a stale attachment id, a hiccup), the safe second try sends everything again and
+            // forgets what was known about the message.
+            tracing::debug!("edit failed ({e}); sending everything again");
+            known.clear();
             let payload = super::v2::payload(comps, &page.files);
             sctx.http
                 .edit_original_interaction_response(token, &payload, page.files.clone())
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| EditFail::of(&e))?
         }
-        Err(e) => return Err(e.to_string()),
     };
     let sent: Vec<(String, u64)> = msg
         .attachments
@@ -685,15 +731,16 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
                 let page = view.render(outcome != Outcome::Close);
                 shown = Shown::of(&page, use_v2);
                 let sent = if use_v2 && page.v2.is_some() {
-                    edit_v2(sctx, &answer.interaction.token, &page, &mut known)
-                        .await
-                        .is_ok()
+                    survives(edit_v2(sctx, &answer.interaction.token, &page, &mut known).await)
                 } else {
-                    answer
-                        .interaction
-                        .edit_response(sctx, page.into_edit())
-                        .await
-                        .is_ok()
+                    survives(
+                        answer
+                            .interaction
+                            .edit_response(sctx, page.into_edit())
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| EditFail::of(&e)),
+                    )
                 };
                 if !sent {
                     tracing::debug!("could not edit message after modal");
@@ -836,5 +883,56 @@ async fn nav_finish(data: &crate::Data, message: i64, ephemeral: bool) {
         data.ephemerals.forget(message);
     } else if let Err(e) = crate::nav::store::remove(&data.db, message).await {
         tracing::debug!("could not remove the message session: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The root cause of "the profile hangs after a picture edit": one failed edit ended the session while the
+    /// buttons stayed enabled. Only a vanished message may end it now.
+    #[test]
+    fn a_failed_edit_keeps_the_session_alive_unless_the_message_is_gone() {
+        assert!(survives(Ok(())));
+        assert!(
+            survives(Err(EditFail {
+                gone: false,
+                text: "429 rate limited".into()
+            })),
+            "a hiccup never kills the session"
+        );
+        assert!(
+            survives(Err(EditFail {
+                gone: false,
+                text: "400 invalid attachment id".into()
+            })),
+            "a refused attachment never kills the session"
+        );
+        assert!(
+            !survives(Err(EditFail {
+                gone: true,
+                text: "404 unknown message".into()
+            })),
+            "a deleted message does"
+        );
+    }
+
+    /// After a failed edit nothing is assumed about what the message holds: every file is uploaded again.
+    #[test]
+    fn after_a_failure_every_file_is_uploaded_again() {
+        use crate::ui::v2;
+        use poise::serenity_prelude::CreateAttachment;
+        let pic = CreateAttachment::bytes(vec![2; 10], "custom-5.png");
+        let mut known = v2::known_from(&[("custom-5.png".into(), 888)], &[pic.clone()]);
+        let (_, upload) = v2::payload_reusing(vec![], &[pic.clone()], &known);
+        assert!(upload.is_empty(), "unchanged and known: referenced by id");
+        known.clear();
+        let (body, upload) = v2::payload_reusing(vec![], &[pic], &known);
+        assert_eq!(upload.len(), 1);
+        assert_eq!(
+            body["attachments"][0],
+            serde_json::json!({"id": 0, "filename": "custom-5.png"})
+        );
     }
 }
