@@ -49,10 +49,27 @@ pub struct Config {
     /// VNDB (visual novels) needs no key; set `ENABLE_VNDB=false` to switch it off.
     #[serde(default = "d_true", deserialize_with = "opt_bool_true")]
     pub enable_vndb: bool,
+    /// TMDB (movies, TV, dramas). Needs `TMDB_API_KEY` or `TMDB_READ_TOKEN`; without either it is switched off.
+    #[serde(default)]
+    pub tmdb_api_key: Option<Secret>,
+    #[serde(default)]
+    pub tmdb_read_token: Option<Secret>,
+    #[serde(default = "d_region")]
+    pub tmdb_region: String,
+    #[serde(default = "d_true", deserialize_with = "opt_bool_true")]
+    pub enable_tmdb: bool,
+    #[serde(default = "d_tmdb_rate")]
+    pub tmdb_rate_limit_per_10s: u32,
     #[serde(default, deserialize_with = "opt_u64")]
     pub dev_guild_id: Option<u64>,
 }
 
+fn d_region() -> String {
+    "OM".into()
+}
+fn d_tmdb_rate() -> u32 {
+    30
+}
 fn d_true() -> bool {
     true
 }
@@ -128,6 +145,28 @@ impl Config {
         }
     }
 
+    /// TMDB settings: blank keys count as missing, `ENABLE_TMDB=false` switches it off.
+    pub fn tmdb_config(&self) -> crate::tmdb::Config {
+        let clean = |s: &Option<Secret>| {
+            s.as_ref()
+                .map(|s| s.expose().trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let on = self.enable_tmdb;
+        crate::tmdb::Config {
+            api_key: clean(&self.tmdb_api_key).filter(|_| on),
+            read_token: clean(&self.tmdb_read_token).filter(|_| on),
+            region: self
+                .tmdb_region
+                .trim()
+                .to_uppercase()
+                .chars()
+                .take(2)
+                .collect(),
+            rate_per_10s: self.tmdb_rate_limit_per_10s,
+        }
+    }
+
     pub fn load() -> anyhow::Result<Self> {
         // Only the working directory's .env; absent is fine.
         let _ = dotenvy::from_filename(".env");
@@ -153,6 +192,11 @@ impl Config {
             igdb_client_id: None,
             igdb_client_secret: None,
             enable_vndb: false,
+            tmdb_api_key: None,
+            tmdb_read_token: None,
+            tmdb_region: "OM".into(),
+            enable_tmdb: false,
+            tmdb_rate_limit_per_10s: 30,
             dev_guild_id: None,
         }
     }

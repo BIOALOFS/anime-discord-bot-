@@ -18,6 +18,9 @@ use sqlx::SqlitePool;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 
+pub mod summary;
+pub mod tmdb_notify;
+
 const TICK: Duration = Duration::from_secs(300);
 /// An episode that aired longer ago than this is never posted (restart catch-up window).
 pub const CATCH_UP_SECS: i64 = 6 * 3600;
@@ -149,6 +152,10 @@ pub struct Feed {
     pub chapters: Arc<crate::chapters::poll::Sources>,
     /// Unix time of the last chapter poll (chapters are checked every 15 minutes).
     pub last_chapter_poll: std::sync::atomic::AtomicI64,
+    /// Dramas, series and films (reminders look up their next episode / release here).
+    pub tmdb: Arc<crate::tmdb::Tmdb>,
+    /// Unix time of the last TMDB reminder pass (every 30 minutes).
+    pub last_tmdb_poll: std::sync::atomic::AtomicI64,
 }
 
 /// Run until `shutdown` flips to true. Never panics the process: every error is logged and retried.
@@ -184,6 +191,11 @@ async fn tick(f: &Feed) -> anyhow::Result<()> {
             if let Err(e) = serve_guild(f, cfg, &entries, now).await {
                 tracing::warn!(guild = cfg.guild_id, "feed for guild failed: {e:#}");
             }
+            if let Some(channel) = cfg.channel_id {
+                if let Err(e) = summary::send(f, cfg.guild_id, channel, now).await {
+                    tracing::warn!(guild = cfg.guild_id, "weekly summary failed: {e:#}");
+                }
+            }
         }
         if let Err(e) = deliver_reminders(f, &entries, now).await {
             tracing::warn!("reminders failed (will retry): {e:#}");
@@ -199,6 +211,15 @@ async fn tick(f: &Feed) -> anyhow::Result<()> {
             .store(now, std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = crate::chapters::poll::poll(f, now).await {
             tracing::warn!("chapter poll failed (will retry): {e:#}");
+        }
+    }
+    // Reminders for dramas, series and films: a separate pass every 30 minutes.
+    let last = f.last_tmdb_poll.load(std::sync::atomic::Ordering::Relaxed);
+    if now - last >= 1800 {
+        f.last_tmdb_poll
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = tmdb_notify::poll(f, now).await {
+            tracing::warn!("tmdb reminders failed (will retry): {e:#}");
         }
     }
     feed::prune_posted(&f.pool, now - 2 * 86_400).await?;
@@ -249,6 +270,20 @@ async fn deliver_reminders(f: &Feed, entries: &[AiringEntry], now: i64) -> anyho
         };
         // Marked first: whatever happens next, this release never notifies this user twice.
         reminders::mark(&f.pool, user, work, episode).await?;
+        let key = format!("anilist:{work}");
+        if !crate::db::notify::allows(
+            &f.pool,
+            user,
+            &key,
+            "anime",
+            e.media.format.as_deref(),
+            &e.media.genres,
+        )
+        .await
+        .unwrap_or(true)
+        {
+            continue;
+        }
         send_reminder(f, user, e).await;
     }
     Ok(())
@@ -262,18 +297,28 @@ async fn send_reminder(f: &Feed, user: i64, e: &AiringEntry) {
 
 /// DM the member; when DMs are closed, ping them in a notifications channel only where the server allows it.
 pub async fn notify_user(f: &Feed, user: i64, text: &str, embed: serenity::CreateEmbed) {
+    notify_user_with(f, user, text, embed, Vec::new()).await;
+}
+
+/// Same, with component rows (the universal buttons) under the embed.
+pub async fn notify_user_with(
+    f: &Feed,
+    user: i64,
+    text: &str,
+    embed: serenity::CreateEmbed,
+    rows: Vec<serenity::CreateActionRow>,
+) {
     let dm = async {
         let channel = serenity::UserId::new(user as u64)
             .create_dm_channel(&f.http)
             .await?;
-        channel
-            .send_message(
-                &f.http,
-                serenity::CreateMessage::new()
-                    .content(text)
-                    .embed(embed.clone()),
-            )
-            .await
+        let mut msg = serenity::CreateMessage::new()
+            .content(text)
+            .embed(embed.clone());
+        if !rows.is_empty() {
+            msg = msg.components(rows.clone());
+        }
+        channel.send_message(&f.http, msg).await
     };
     if dm.await.is_ok() {
         return;
@@ -282,13 +327,15 @@ pub async fn notify_user(f: &Feed, user: i64, text: &str, embed: serenity::Creat
         return;
     };
     for (_, channel) in channels {
-        let msg = serenity::CreateMessage::new()
+        let mut msg = serenity::CreateMessage::new()
             .content(format!("<@{user}> {text}"))
-            .embed(embed.clone())
-            .allowed_mentions(
-                serenity::CreateAllowedMentions::new()
-                    .users(vec![serenity::UserId::new(user as u64)]),
-            );
+            .embed(embed.clone());
+        if !rows.is_empty() {
+            msg = msg.components(rows.clone());
+        }
+        let msg = msg.allowed_mentions(
+            serenity::CreateAllowedMentions::new().users(vec![serenity::UserId::new(user as u64)]),
+        );
         if serenity::ChannelId::new(channel as u64)
             .send_message(&f.http, msg)
             .await
@@ -328,13 +375,8 @@ async fn serve_guild(
     Ok(())
 }
 
-/// Custom id of the "show the work" button (`shownotif:<anilist id>`) and of the menu of grouped messages.
-pub const SHOW_WORK_PREFIX: &str = "shownotif";
+/// Menu id of the grouped notifications sent before the universal buttons (old messages keep working).
 pub const SHOW_WORK_PICK: &str = "shownotif:pick";
-
-pub fn show_work_id(anilist_id: i64) -> String {
-    format!("{SHOW_WORK_PREFIX}:{anilist_id}")
-}
 
 /// The work a "show the work" press asks for: from the button id, or the chosen value of the menu.
 pub fn parse_show_work(custom_id: &str, values: &[String]) -> Option<i64> {
@@ -344,12 +386,13 @@ pub fn parse_show_work(custom_id: &str, values: &[String]) -> Option<i64> {
     custom_id.strip_prefix("shownotif:")?.parse().ok()
 }
 
-/// The button every notification carries.
-pub fn show_work_button(anilist_id: i64) -> serenity::CreateButton {
-    serenity::CreateButton::new(show_work_id(anilist_id))
-        .label(i18n::BTN_SHOW_WORK)
-        .emoji('📖')
-        .style(serenity::ButtonStyle::Primary)
+/// The buttons every work notification carries (the universal rule: a work message gets "أظهر الشخصيات", plus a
+/// reminder). Old messages that still carry `shownotif:` buttons keep working through `parse_show_work`.
+pub fn notification_buttons(anilist_id: i64) -> Vec<serenity::CreateButton> {
+    let key = format!("anilist:{anilist_id}");
+    let mut v = crate::components::standard_actions(crate::components::ItemKind::Work, Some(&key));
+    v.push(crate::components::remind_button(&key));
+    v
 }
 
 /// Up to this many releases get their own card; more are grouped so a busy night is a few messages, not a flood.
@@ -396,17 +439,16 @@ async fn send_batch<'a>(
                 .build(),
         );
         // One menu with the works of this message: each choice sends the work card as a new message.
-        let choices: Vec<crate::ui::select::Choice> = chunk
+        let items: Vec<(String, String)> = chunk
             .iter()
-            .map(|e| crate::ui::select::Choice {
-                label: crate::ui::embeds::fit(e.media.title.main(), 100),
-                description: None,
-                value: e.media.id.to_string(),
+            .map(|e| {
+                (
+                    crate::ui::embeds::fit(e.media.title.main(), 100),
+                    format!("anilist:{}", e.media.id),
+                )
             })
             .collect();
-        if let Some(menu) =
-            crate::ui::select::select_row(SHOW_WORK_PICK, i18n::BTN_SHOW_WORK, choices, true)
-        {
+        if let Some(menu) = crate::components::work_menu(i18n::BTN_SHOW_WORK, &items) {
             msg = msg.components(vec![menu]);
         }
         if let Some(role) = cfg.role_id {
@@ -430,7 +472,7 @@ async fn send_episode(
     e: &AiringEntry,
 ) -> bool {
     let m = &e.media;
-    let mut links = vec![show_work_button(m.id)];
+    let mut links = notification_buttons(m.id);
     if let Some(u) = &m.site_url {
         links.push(serenity::CreateButton::new_link(u).label(format!("🔗 {}", i18n::BTN_ANILIST)));
     }

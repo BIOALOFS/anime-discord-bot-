@@ -64,8 +64,6 @@ pub struct Profile {
     /// The name shown on the card instead of the Discord name (max `MAX_TITLE`).
     pub display_title: Option<String>,
     pub language: String,
-    /// Unix time the profile was created.
-    pub created_at: i64,
 }
 
 impl Profile {
@@ -161,7 +159,7 @@ pub async fn create_profile(pool: &SqlitePool, user: i64) -> Result<bool> {
 
 pub async fn get_profile(pool: &SqlitePool, user: i64) -> Result<Option<Profile>> {
     Ok(sqlx::query_as::<_, Profile>(
-        "SELECT user_id, bio, accent_color, quote, banner, privacy, display_title, language, created_at \
+        "SELECT user_id, bio, accent_color, quote, banner, privacy, display_title, language \
          FROM profiles WHERE user_id = ?1",
     )
     .bind(user)
@@ -601,27 +599,6 @@ pub async fn upsert_cache(pool: &SqlitePool, row: &CacheRow) -> Result<()> {
     Ok(())
 }
 
-pub async fn cache_get(pool: &SqlitePool, character: i64) -> Result<Option<CacheRow>> {
-    let row = sqlx::query(
-        "SELECT character_id, name_romaji, name_native, image_url, is_safe, main_work, main_work_url, favourites, fetched_at \
-         FROM character_cache WHERE character_id = ?1",
-    )
-    .bind(character)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|r| CacheRow {
-        character_id: r.get("character_id"),
-        name_romaji: r.get("name_romaji"),
-        name_native: r.get("name_native"),
-        image_url: r.get("image_url"),
-        is_safe: r.get("is_safe"),
-        main_work: r.get("main_work"),
-        main_work_url: r.get("main_work_url"),
-        favourites: r.get("favourites"),
-        fetched_at: r.get("fetched_at"),
-    }))
-}
-
 // ---- social -----------------------------------------------------------------------------
 
 pub async fn touch_user_guild(pool: &SqlitePool, guild: i64, user: i64) -> Result<()> {
@@ -655,41 +632,6 @@ pub async fn can_view(pool: &SqlitePool, viewer: i64, profile: &Profile) -> Resu
         Privacy::Private => false,
         Privacy::Servers => shares_guild(pool, viewer, profile.user_id).await?,
     })
-}
-
-/// Most favourited characters, per guild or global: `(character_id, count)`.
-pub async fn top_characters(
-    pool: &SqlitePool,
-    guild: Option<i64>,
-    offset: i64,
-    limit: i64,
-) -> Result<Vec<(i64, i64)>> {
-    let rows = sqlx::query(
-        "SELECT pc.character_id AS cid, count(*) AS n FROM profile_characters pc \
-         JOIN profiles p ON p.user_id = pc.user_id AND p.privacy != 'private' \
-         WHERE (?1 IS NULL OR pc.user_id IN (SELECT user_id FROM user_guilds WHERE guild_id = ?1)) \
-         GROUP BY pc.character_id ORDER BY n DESC, pc.character_id LIMIT ?2 OFFSET ?3",
-    )
-    .bind(guild)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| (r.get("cid"), r.get("n")))
-        .collect())
-}
-
-pub async fn top_character_count(pool: &SqlitePool, guild: Option<i64>) -> Result<i64> {
-    Ok(sqlx::query_scalar(
-        "SELECT count(DISTINCT pc.character_id) FROM profile_characters pc \
-         JOIN profiles p ON p.user_id = pc.user_id AND p.privacy != 'private' \
-         WHERE (?1 IS NULL OR pc.user_id IN (SELECT user_id FROM user_guilds WHERE guild_id = ?1))",
-    )
-    .bind(guild)
-    .fetch_one(pool)
-    .await?)
 }
 
 /// Everything stored about a user: profile (characters, works, groups), custom images, scores,

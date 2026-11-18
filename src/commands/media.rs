@@ -1,5 +1,5 @@
 //! The interactive work card (anime, manga, manhwa, manhua, novel) and its cast list.
-//! Entry points live in `/search`, `/random` and `/profile`.
+//! Entry points live in the category commands (`commands::category`) and `/profile`.
 
 use super::{
     buttons,
@@ -10,7 +10,7 @@ use crate::{
     anilist::{
         kind_of,
         models::{Character, Media},
-        AniError, ContentPolicy, MediaKind, SafeAniList,
+        AniError, ContentPolicy, MediaFilter, MediaKind, SafeAniList,
     },
     db::{
         profile as pdb, reminders,
@@ -46,6 +46,7 @@ pub enum Source {
         kind: MediaKind,
         genre: Option<String>,
         min_score: Option<u8>,
+        filter: MediaFilter,
     },
 }
 
@@ -82,6 +83,8 @@ pub struct MediaView {
     sub: Option<CharacterView>,
     /// Opened from another view (the recommendation list): Back at the first screen returns to that view.
     from_parent: bool,
+    /// Hide the synopsis behind a spoiler tag (server or member setting).
+    spoiler: bool,
 }
 
 pub fn pages_of(last_page: Option<usize>, has_next: bool, page: usize) -> usize {
@@ -132,6 +135,12 @@ impl MediaView {
             cast_for: None,
             sub: None,
             from_parent: false,
+            spoiler: crate::db::notify::spoiler_guard(
+                &ctx.data().db,
+                ctx.guild_id().map(|g| g.get() as i64),
+                ctx.author().id.get() as i64,
+            )
+            .await,
         };
         v.refresh_added().await;
         v.ensure_cast().await;
@@ -146,6 +155,7 @@ impl MediaView {
         policy: ContentPolicy,
         media: Media,
     ) -> Self {
+        let pool_for_spoiler = pool.clone();
         let mut v = Self {
             api,
             pool,
@@ -162,6 +172,7 @@ impl MediaView {
             cast_for: None,
             sub: None,
             from_parent: true,
+            spoiler: crate::db::notify::spoiler_guard(&pool_for_spoiler, None, user).await,
         };
         v.refresh_added().await;
         v.ensure_cast().await;
@@ -286,14 +297,21 @@ impl MediaView {
             kind,
             genre,
             min_score,
+            filter,
         } = self.source.clone()
         else {
             return Outcome::Keep;
         };
-        match self
-            .api
-            .random_media(kind, genre.as_deref(), min_score, self.policy)
-            .await
+        match pick_random(
+            &self.api,
+            self.user,
+            kind,
+            genre.as_deref(),
+            min_score,
+            &filter,
+            self.policy,
+        )
+        .await
         {
             Ok(Some(m)) => {
                 self.history.clear();
@@ -452,11 +470,16 @@ impl MediaView {
                 .emoji(if self.added { '✅' } else { '⭐' })
                 .style(star_style)
                 .disabled(!enabled),
-            serenity::CreateButton::new(BTN_CHARACTERS)
-                .label(i18n::BTN_CHARACTERS)
-                .emoji('👥')
-                .style(secondary)
-                .disabled(!enabled),
+            // "أظهر الشخصيات": a new message with the cast, never an edit of this one.
+            crate::components::standard_actions(
+                crate::components::ItemKind::Work,
+                Some(&format!("anilist:{}", m.id)),
+            )
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                serenity::CreateButton::new(BTN_CHARACTERS).label(i18n::BTN_CHARACTERS)
+            }),
         ];
         // Anime episodes and the chapters of tracked manga can remind.
         if kind_of(m) != MediaKind::Novel {
@@ -505,6 +528,12 @@ impl MediaView {
         .collect();
         rows.push(buttons(main));
         rows.push(buttons(extra));
+        // Watch / read status, for every source (answered globally, like the other universal controls).
+        rows.extend(crate::components::status_menu(
+            &format!("anilist:{}", m.id),
+            kind_of(m).is_written(),
+            None,
+        ));
         rows
     }
 }
@@ -528,7 +557,10 @@ impl View for MediaView {
                     .into_iter()
                     .collect::<Vec<_>>(),
             ),
-            Mode::Card(m) => (cards::work_card(m), self.card_rows(m, enabled)),
+            Mode::Card(m) => (
+                cards::spoiler_wrapped(cards::work_card(m), self.spoiler),
+                self.card_rows(m, enabled),
+            ),
             Mode::Characters {
                 media,
                 page,
@@ -674,8 +706,42 @@ pub async fn any_autocomplete(
     to_choices(items)
 }
 
-/// Resolve the typed value (autocomplete id or free text) and run the interactive card.
-pub async fn run_media(ctx: Context<'_>, kind: MediaKind, input: String) -> Result<(), Error> {
+/// A random safe work that matches the filter and is not one of the member's last five picks.
+pub async fn pick_random(
+    api: &SafeAniList,
+    user: i64,
+    kind: MediaKind,
+    genre: Option<&str>,
+    min_score: Option<u8>,
+    filter: &MediaFilter,
+    policy: ContentPolicy,
+) -> Result<Option<Media>, crate::anilist::AniError> {
+    let scope = format!("media:{}", kind.key());
+    let mut fallback = None;
+    for _ in 0..4 {
+        let Some(m) = api
+            .random_media_with(kind, genre, min_score, filter, policy)
+            .await?
+        else {
+            continue;
+        };
+        if !super::picks::seen(user, &scope, &work_key_of(&m)) {
+            super::picks::remember(user, &scope, &work_key_of(&m));
+            return Ok(Some(m));
+        }
+        fallback.get_or_insert(m);
+    }
+    Ok(fallback)
+}
+
+/// Resolve the typed value (autocomplete id or free text) and run the interactive card, keeping only the works that
+/// pass `filter` (format / year / status / origin).
+pub async fn run_media_with(
+    ctx: Context<'_>,
+    kind: MediaKind,
+    input: String,
+    filter: MediaFilter,
+) -> Result<(), Error> {
     ctx.defer().await?;
     let api = ctx.data().anilist.clone();
     let policy = policy(ctx);
@@ -686,7 +752,14 @@ pub async fn run_media(ctx: Context<'_>, kind: MediaKind, input: String) -> Resu
             Err(e) => return fail(ctx, e).await,
         }
     } else {
-        match api.search_media(input.trim(), kind, 10, policy).await {
+        match api
+            .search_media(input.trim(), kind, 10, policy)
+            .await
+            .map(|v| {
+                v.into_iter()
+                    .filter(|m| filter.matches(m))
+                    .collect::<Vec<_>>()
+            }) {
             Ok(mut v) if v.len() == 1 => Mode::Card(Box::new(v.remove(0))),
             Ok(v) if v.is_empty() => {
                 // AniList has nothing: try the (opt-in) fallback catalogs for written works.

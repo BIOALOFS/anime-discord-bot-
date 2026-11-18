@@ -141,6 +141,70 @@ impl Igdb {
         Ok(rank(parse_games(&doc, allow_mature), 10))
     }
 
+    /// Search narrowed to a platform (a case-insensitive part of its name, e.g. "playstation").
+    pub async fn search_games_on(
+        &self,
+        query: &str,
+        platform: &str,
+        allow_mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
+        let body = format!(
+            "search {}; fields {GAME_FIELDS}; where version_parent = null & platforms.name ~ *{}*; limit 25;",
+            quote(query),
+            quote(platform)
+        );
+        let doc = self.query("games", body).await?;
+        Ok(rank(parse_games(&doc, allow_mature), 10))
+    }
+
+    /// One page (20) of well-known games, most rated first; `offset` picks a random neighbourhood. `platform` narrows it.
+    pub async fn popular_games(
+        &self,
+        offset: u32,
+        platform: Option<&str>,
+        allow_mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
+        let plat = platform
+            .map(|p| format!(" & platforms.name ~ *{}*", quote(p)))
+            .unwrap_or_default();
+        let body = format!(
+            "fields {GAME_FIELDS}; where version_parent = null & total_rating_count > 25{plat}; sort total_rating_count desc; limit 20; offset {offset};"
+        );
+        let doc = self.query("games", body).await?;
+        Ok(parse_games(&doc, allow_mature)
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect())
+    }
+
+    /// The characters of one game.
+    pub async fn characters_of(
+        &self,
+        game: i64,
+        allow_mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
+        let body = format!(
+            "fields {CHARACTER_FIELDS}; where games = ({game}) & mug_shot != null; limit 25;"
+        );
+        let doc = self.query("characters", body).await?;
+        Ok(rank(parse_characters(&doc, allow_mature), 25))
+    }
+
+    pub async fn popular_characters(
+        &self,
+        offset: u32,
+        allow_mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
+        let body = format!(
+            "fields {CHARACTER_FIELDS}; where mug_shot != null; limit 20; offset {offset};"
+        );
+        let doc = self.query("characters", body).await?;
+        Ok(parse_characters(&doc, allow_mature)
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect())
+    }
+
     pub async fn game_by_id(
         &self,
         id: i64,

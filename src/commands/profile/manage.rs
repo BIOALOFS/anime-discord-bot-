@@ -84,6 +84,12 @@ pub(super) async fn add(ctx: Context<'_>, character: String) -> Result<(), Error
     if require_own(ctx).await?.is_none() {
         return Ok(());
     }
+    // A TMDB cast entry or a game / visual-novel character picked from a suggestion or a roster.
+    let key = character.trim();
+    if key.starts_with("tmdb-cast:") || key.starts_with("igdb:c") || key.starts_with("vndb:c") {
+        let text = crate::global::add(ctx.data(), key, uid(ctx)).await;
+        return private_reply(ctx, text).await;
+    }
     let api = ctx.data().anilist.clone();
     match resolve_character(&api, policy(ctx), &character).await {
         Err(e) => fail_private(ctx, e).await,

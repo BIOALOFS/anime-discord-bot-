@@ -3,6 +3,7 @@
 //! MangaDex (official API, no key), MangaUpdates (release info) and RSS/Atom feeds an admin added. There is no
 //! scraping of websites and no site extensions.
 
+pub mod digest;
 pub mod mangadex;
 pub mod mangaupdates;
 pub mod poll;

@@ -143,6 +143,7 @@ const COVER_HOSTS: &[&str] = &[
     "cdn.mangaupdates.com",
     "images.igdb.com",
     "t.vndb.org",
+    "image.tmdb.org",
 ];
 const MAX_COVER_BYTES: usize = 3 * 1024 * 1024;
 
@@ -293,6 +294,114 @@ impl Providers {
             },
         )
         .await
+    }
+
+    /// Platform-narrowed game search.
+    pub async fn search_games_on(
+        &self,
+        query: &str,
+        platform: &str,
+        allow_mature: bool,
+    ) -> Vec<Work> {
+        let (Some(igdb), true) = (&self.igdb, query.trim().chars().count() >= 2) else {
+            return Vec::new();
+        };
+        self.cached(
+            format!(
+                "igdb:gp:{allow_mature}:{}:{}",
+                platform.to_lowercase(),
+                query.trim().to_lowercase()
+            ),
+            || async {
+                igdb.search_games_on(query, platform, allow_mature)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::debug!("igdb platform search failed: {e}");
+                        Vec::new()
+                    })
+            },
+        )
+        .await
+    }
+
+    /// A random well-known game (optionally on a platform) or visual novel. `source`: `igdb`, `vndb` or `None` for either.
+    pub async fn random_work(
+        &self,
+        source: Option<&str>,
+        platform: Option<&str>,
+        allow_mature: bool,
+    ) -> Option<Work> {
+        let want_igdb = self.igdb.is_some() && source != Some("vndb");
+        let want_vndb = self.cfg.vndb && source != Some("igdb") && platform.is_none();
+        let use_igdb = match (want_igdb, want_vndb) {
+            (true, true) => rand::random_range(0..2) == 0,
+            (a, _) => a,
+        };
+        let list = if use_igdb {
+            let offset = rand::random_range(0..30u32) * 20;
+            self.igdb
+                .as_ref()?
+                .popular_games(offset, platform, allow_mature)
+                .await
+                .unwrap_or_default()
+        } else if want_vndb {
+            self.vndb
+                .popular_vns(rand::random_range(1..=15))
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if list.is_empty() {
+            return None;
+        }
+        let i = rand::random_range(0..list.len());
+        list.into_iter().nth(i)
+    }
+
+    /// The characters of a game or visual novel from its provider key (`igdb:55`, `vndb:v17`).
+    pub async fn characters_of(&self, key: &str, allow_mature: bool) -> Vec<Work> {
+        let Some((prefix, tail)) = key.split_once(':') else {
+            return Vec::new();
+        };
+        self.cached(format!("roster:{key}:{allow_mature}"), || async {
+            match prefix {
+                "igdb" => match (&self.igdb, tail.parse::<i64>()) {
+                    (Some(igdb), Ok(id)) => igdb
+                        .characters_of(id, allow_mature)
+                        .await
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                },
+                "vndb" if self.cfg.vndb && tail.starts_with('v') => {
+                    self.vndb.characters_of(tail).await.unwrap_or_default()
+                }
+                _ => Vec::new(),
+            }
+        })
+        .await
+    }
+
+    /// A random game or visual-novel character.
+    pub async fn random_character(&self, source: Option<&str>, allow_mature: bool) -> Option<Work> {
+        let want_igdb = self.igdb.is_some() && source != Some("vndb");
+        let list = if want_igdb {
+            let offset = rand::random_range(0..100u32) * 20;
+            self.igdb
+                .as_ref()?
+                .popular_characters(offset, allow_mature)
+                .await
+                .unwrap_or_default()
+        } else if self.cfg.vndb {
+            self.vndb.popular_characters(1).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if list.is_empty() {
+            return None;
+        }
+        let i = rand::random_range(0..list.len());
+        list.into_iter().nth(i)
     }
 
     pub async fn search_visual_novels(&self, query: &str) -> Vec<Work> {

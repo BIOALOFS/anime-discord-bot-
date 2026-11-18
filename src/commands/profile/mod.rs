@@ -90,9 +90,51 @@ async fn ac_action(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocomplet
 async fn ac_value(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     match option_str(ctx, "action").as_deref() {
         Some("add-character") => ac_character(ctx, partial).await,
-        Some("add-work") => any_autocomplete(ctx, partial).await,
+        Some("add-work") => work_suggestions(ctx, partial).await,
         _ => Vec::new(),
     }
+}
+
+/// AniList works plus shows and films from TMDB (their values are provider keys such as `tmdb-tv:123`).
+async fn work_suggestions(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    let mut out = any_autocomplete(ctx, partial).await;
+    let data = ctx.data();
+    if data.tmdb.enabled()
+        && partial.trim().chars().count() >= 2
+        && crate::guild::autocomplete_allowed(ctx).await
+    {
+        let tmdb = data.tmdb.clone();
+        let items = data
+            .auto
+            .items(ctx.author().id.get(), "tmdb-add", partial, |q| async move {
+                let (tv, movies) = futures::join!(
+                    tmdb.search(crate::tmdb::Kind::Tv, &q, 1),
+                    tmdb.search(crate::tmdb::Kind::Movie, &q, 1)
+                );
+                tv.iter()
+                    .take(4)
+                    .chain(movies.iter().take(4))
+                    .map(|w| {
+                        (
+                            format!(
+                                "{} ({})",
+                                w.title,
+                                if w.kind == Some(crate::tmdb::Kind::Movie) {
+                                    "فيلم"
+                                } else {
+                                    "مسلسل"
+                                }
+                            ),
+                            w.key(),
+                        )
+                    })
+                    .collect()
+            })
+            .await;
+        out.extend(to_choices(items));
+    }
+    out.truncate(25);
+    out
 }
 
 /// Show a profile: yours, or `user`'s (respecting their privacy setting).

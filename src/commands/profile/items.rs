@@ -53,6 +53,8 @@ pub struct Item {
     pub custom_image_id: Option<i64>,
     pub favourites: Option<i64>,
     pub visible: bool,
+    /// Watch / read status of a work (works only).
+    pub status: Option<String>,
 }
 
 impl Item {
@@ -73,6 +75,7 @@ impl Item {
             custom_image_id: e.custom_image_id,
             favourites: e.favourites,
             visible: e.visible(),
+            status: None,
         }
     }
 
@@ -80,6 +83,8 @@ impl Item {
         let kind = match w.kind.as_str() {
             "game" => crate::i18n::KIND_GAME,
             "vn" => crate::i18n::KIND_VN,
+            "tmdb-tv" => crate::i18n::KIND_SERIES,
+            "tmdb-movie" => crate::i18n::KIND_MOVIE,
             other => MediaKind::from_key(other).map_or("", kind_label),
         };
         let tag = format!("{} {}", flag(w.country.as_deref()), kind)
@@ -105,6 +110,7 @@ impl Item {
             custom_image_id: None,
             favourites: None,
             visible: w.visible(),
+            status: None,
         }
     }
 

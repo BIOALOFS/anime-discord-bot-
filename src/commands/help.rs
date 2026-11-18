@@ -1,11 +1,12 @@
-//! `/help category`: commands grouped by category, with examples and a select menu to switch.
+//! `/help`: one ephemeral message. A section menu, a menu of every real command (built from the registered list, so
+//! it can never go stale), three quick guides as buttons, and an about page with the required credits.
 
 use super::buttons;
 use crate::{
     error::{Context, Error},
+    tmdb,
     ui::{
-        autocomplete::to_choices,
-        embeds::Emb,
+        embeds::{fit, Emb},
         pagination::{close_button, CLOSE},
         select::{select_row, Choice},
         session::{self, Outcome, Page, View},
@@ -13,167 +14,365 @@ use crate::{
 };
 use poise::serenity_prelude as serenity;
 
-const CATEGORY_ID: &str = "help_category";
+const SECTION_ID: &str = "help_section";
+const COMMAND_ID: &str = "help_command";
+const GUIDE_PREFIX: &str = "help_guide:";
 
-pub struct HelpCategory {
+pub struct Section {
     pub key: &'static str,
     pub label: &'static str,
-    pub body: &'static str,
+    pub intro: &'static str,
+    /// Command names this section explains; every registered command is in exactly one section.
+    pub commands: &'static [&'static str],
 }
 
-pub const CATEGORIES: &[HelpCategory] = &[
-    HelpCategory {
-        key: "search",
-        label: "بحث",
-        body: "**`/search`** ابحث عن عمل: أنمي أو مانجا أو مانهوا أو مانهوا صينية أو رواية، ولعبة أو رواية بصرية عند تفعيل مصادرها.\n\
-               مثال: `/search type:مانهوا name:Solo Leveling`\n\
-               • الاقتراحات تتغير بحسب النوع الذي اخترته.\n\
-               • على بطاقة العمل: ⭐ أضف إلى بروفايلك، 👥 الشخصيات، 🔗 الرابط، وقائمة منسدلة بالشخصيات الرئيسية تفتح بطاقة الشخصية في نفس الرسالة.\n\n\
-               **`/character`** ابحث عن شخصية من أنمي أو مانجا أو لعبة (IGDB) أو رواية بصرية (VNDB).\n\
-               مثال: `/character name:Mario` أو `/character name:Pyramid Head source:ألعاب`\n\
-               • خيار `work` يحصر النتائج في عمل معين، وخيار `source` يختار: الكل / أنمي-مانجا / ألعاب.\n\
-               • عند تعدد النتائج تظهر قائمة اختيار. على البطاقة: 📖 الوصف، ➕ أضف لبروفايلي، 👥 شخصيات العمل، 🎲 عشوائية.\n\
-               • تحت كل صورة شخصية أزرار: ➕ إضافة لبروفايلي (تتحول إلى ➖ إزالة إذا كانت فيه)، 🎬 الأعمال، 🔗 رابط المصدر، ↩ رجوع. وفي كل رسالة تذكر شخصيات قائمة منسدلة تفتح الشخصية في نفس الرسالة.\n\
-               • على بطاقة الأنمي زر 🔔 «ذكّرني» يرسل لك رسالة خاصة عند صدور حلقة جديدة (وزر 🔕 لإلغائه).\n\n\
-               **`/airing`** موعد الحلقة القادمة لأنمي، أو جدول هذا الأسبوع.\n\
-               **`/random`** اختيار عشوائي: عمل أو شخصية أو `شخصية اليوم` أو `أعياد ميلاد اليوم`.\n\
-               مثال: `/random type:أنمي genre:Action min_score:75`\n\
-               **`/top`** أكثر الشخصيات أو الأعمال تفضيلًا في السيرفر أو عالميًا (مع قائمة منسدلة لفتح بطاقة أي شخصية).",
+pub const SECTIONS: &[Section] = &[
+    Section {
+        key: "start",
+        label: "البداية",
+        intro: "أهلًا! أنا بوت للأنمي والمانجا والروايات والدراما والمسلسلات والأفلام والألعاب.\n\n\
+                اكتب `/` في الشات واختر الأمر. أوامر الأعمال كلها تعمل بنفس الطريقة: تختار **النوع** (عمل، شخصية، عمل عشوائي، شخصية عشوائية) ثم تكتب **الاسم** وتختار من الاقتراحات.\n\n\
+                تحت أي رسالة عن شخصية ستجد «أظهر العمل»، وتحت أي رسالة عن عمل ستجد «أظهر الشخصيات». كلاهما يرسل رسالة جديدة ولا يلمس الأصلية، ويمكن لأي عضو الضغط عليهما.\n\n\
+                اختر قسمًا من القائمة الأولى، أو أمرًا من الثانية، أو جرّب الأدلة السريعة بالأسفل.",
+        commands: &["help"],
     },
-    HelpCategory {
+    Section {
+        key: "works",
+        label: "الأعمال والشخصيات",
+        intro: "سبعة أوامر بنفس الشكل: `/anime` `/manga` `/novel` `/drama` `/series` `/movie` `/game`.\n\n\
+                • **النوع:** عمل، شخصية، عمل عشوائي، أو شخصية عشوائية.\n\
+                • **الاسم:** تظهر اقتراحات أثناء الكتابة. مع العشوائي لا تحتاج اسمًا.\n\
+                • **الفلاتر** تختلف بحسب الأمر (الصيغة، السنة، الحالة، البلد، التصنيف، المنصة…) وتنطبق على البحث وعلى العشوائي.\n\
+                • زر «عشوائي آخر» يغيّر النتيجة في الرسالة نفسها دون تكرار آخر خمس نتائج لك.\n\n\
+                الدراما الآسيوية في `/drama` وبقية العالم في `/series`، والمشرف يقدر ينقل بلدًا بين الاثنين من `/admin`.",
+        commands: &["anime", "manga", "novel", "drama", "series", "movie", "game"],
+    },
+    Section {
+        key: "events",
+        label: "الفعاليات والترتيب",
+        intro: "ألعاب جماعية، ترتيب السيرفر، وجدول الأسبوع.",
+        commands: &["event", "top", "schedule", "airing", "recommend"],
+    },
+    Section {
         key: "profile",
-        label: "بروفايل",
-        body: "**`/profile`** بدون خيارات يعرض بروفايلك (مع `user` يعرض بروفايل عضو) في **رسالة واحدة وكتلة بصرية واحدة**: الغلاف (يدعم GIF متحركًا) ثم سطر معلومات مضغوط (الاسم والنبذة والشخصيات والأعمال والخصوصية وتاريخ الانضمام) ثم صورة العنصر الحالي وبياناته (`3/12`). لون الشريط الجانبي هو لونك المختار من `/edit`.\n\
-               الأزرار: ⏮ الأول ◀ السابق، زر التبديل (يعرض اسم الوضع الآخر: «أعمال» أو «شخصيات») ▶ التالي ⏭ الأخير.\n\
-               القائمة الأولى للقفز إلى أي عنصر في الصفحة الحالية (25)، والثانية لتغيير الصفحة.\n\
-               • `action:add-character` أو `add-work` مع `value` لإضافة شخصية أو عمل.\n\
-               مثال: `/profile action:add-work value:Tower of God`\n\
-               كل التعديلات من **`/edit`**.",
+        label: "بروفايلك",
+        intro: "بروفايلك يجمع شخصياتك وأعمالك من كل المصادر. العرض من `/profile`، وكل التعديلات من `/edit`.",
+        commands: &["profile", "edit", "suggest"],
     },
-    HelpCategory {
-        key: "edit",
-        label: "تعديل",
-        body: "**`/edit`** كل شيء يُعدَّل من هنا: `target` ثم `action` (ثم `character` أو `value` أو `text` أو `image`).\n\
-               • **profile**: `banner` الغلاف: بدون قيمة تفتح قائمة **16 غلافًا جاهزًا** مع معاينة، أو أرفق صورة/GIF (حتى 3MB، متحرك)، أو `value` لون مثل #ff8800 أو reset، \
-               `description` النبذة (300 حرف)، `title` الاسم المعروض (40)، `color` لون الشريط الجانبي للبروفايل (ألوان جاهزة أو `#ff8800` أو `reset`)، `privacy` الخصوصية، `reset` إعادة الضبط، \
-               `export` / `import` / `delete-data` لبياناتك.\n\
-               • **character**: اختر `character` من بروفايلك ثم `image` (PNG/JPG/WebP/GIF حتى 3MB، وGIF لشخصيات بروفايلك فقط)، `title` اللقب (40)، \
-               `description` الوصف (300)، `reset` إعادة للأصل، `remove` إزالة، `move` نقل الموضع (النص = الرقم).\n\
-               • **work**: `remove` أو `move` لعمل من `value`.\n\
-               كل تأكيد خاص بك، وفيه زر «تراجع» عند الحاجة. الصور المخصصة تعمل فقط إذا فعّلها مشرف السيرفر.",
-    },
-    HelpCategory {
-        key: "alerts",
-        label: "إشعارات وتذكير",
-        body: "إشعارات الحلقات الجديدة تغطي **كل الأنمي تلقائيًا** عند تحديد قناة الإشعارات بـ **`/set-notifications-channel`**.\n\
-               المشرف يضبط التصفية من **`/admin`** ← الإشعارات: الكل (الافتراضي)، الشائع فقط، أعمال بروفايلات الأعضاء فقط، أو صيغ وأنواع محددة. وعند كثرة الإصدارات تُجمَّع في رسائل قليلة.\n\
-               **كل إشعار** فيه زر «أظهر العمل» يرسل بطاقة العمل في **رسالة جديدة** ولا يعدّل الإشعار. وفي الرسائل المجمّعة قائمة لاختيار العمل.\n\
-               **فصول المانجا والمانهوا:** من `/admin` ← مصادر الفصول: MangaDex (رسمي، لغة عربية أو إنجليزية)، MangaUpdates، وروابط RSS/Atom يضيفها المشرف (https فقط وبحماية من الروابط الداخلية). تُنشر فصول الأعمال **المتابَعة** فقط (الموجودة في بروفايل عضو أو تذكيراته) مع زر «اقرأ». لا يوجد سحب لمواقع.\n\
-               **التذكير الشخصي:** زر «ذكّرني» على بطاقة الأنمي أو المانجا يرسل لك رسالة خاصة (وإن كانت مغلقة فتنبيه في قناة الإشعارات إذا سمح المشرف). قائمة تذكيراتك وحذفها: `/settings setting:reminders` (حتى 50).\n\
-               ملاحظة: بيانات الجدول متاحة للأنمي فقط في AniList، وليست للمانجا أو المانهوا.",
-    },
-    HelpCategory {
-        key: "suggest",
-        label: "اقتراحات الأعضاء",
-        body: "**`/suggest add`** اربط بين عملين من أي نوع (أنمي، مانجا، رواية، لعبة، رواية بصرية) مع سبب (300 حرف): `first` و`second` و`reason`. لا يُقبل نفس الزوج مرتين في السيرفر (بأي ترتيب)، وحد يومي لكل عضو يضبطه المشرف.\n\
-               **`/suggest random`** اقتراح عشوائي من السيرفر: **صورتا العملين أولًا** ثم السبب وصاحب الاقتراح وتاريخه، وتحتها أزرار (اقتراح آخر، فتح العملين) وقائمة لفتح بطاقة أي عمل في رسالة جديدة خاصة بك. خيار `work` يحصر الاقتراحات في عمل.\n\
-               **`/suggest mine`** اقتراحاتك مع قائمة لحذف أحدها. المشرف يحذف أي اقتراح من زر 🗑 في `/suggest random`.\n\
-               **`/recommend`** توصيات تلقائية من AniList مبنية على مفضلاتك.",
-    },
-    HelpCategory {
+    Section {
         key: "settings",
-        label: "إعدادات",
-        body: "**`/settings`** تفضيلاتك الشخصية فقط: `setting:language` اللغة، `setting:privacy` الخصوصية، `setting:reminders` تذكيراتك.\n\
-               **إدارة السيرفر (للمشرفين، مخفية عن غيرهم):**\n\
-               • **`/admin`** لوحة أزرار: الأمان (NSFW، الألعاب، الألعاب الناضجة)، الإشعارات (التشغيل، التصفية، تنبيه التذكير بالقناة)، الصور المخصصة (التفعيل ومن يرفع)، الرتب، القنوات (عرض وإلغاء)، الحدود (مهلة الأوامر وحد الاقتراحات)، إعادة الضبط.\n\
-               • **`/set-bot-channel`** القناة الوحيدة التي تعمل فيها أوامر البوت (المشرفون مستثنون).\n\
-               • **`/set-notifications-channel`** قناة إشعارات الحلقات.\n\
-               إلغاء تحديد أي قناة من `/admin` ← القنوات.",
+        label: "تذكيراتك وإعداداتك",
+        intro: "التذكير زر 🔔 «ذكّرني» على بطاقة العمل: يصلك خاص عند صدور حلقة أو فصل جديد، وإن كان خاصك مغلقًا يصل في قناة الإشعارات إذا سمح المشرف.",
+        commands: &["settings"],
     },
-    HelpCategory {
-        key: "games",
-        label: "ألعاب وتوصيات",
-        body: "**`/game`** ألعاب **جماعية**: يستطيع أي عضو في القناة الضغط والإجابة، وأسرع إجابة صحيحة تكسب النقاط، ومن يخطئ لا يعيد في الجولة نفسها. لعبة واحدة نشطة في كل قناة، والتخطي والإنهاء لمن بدأ اللعبة أو للمشرفين.\n\
-               الأنواع (مع خيار `difficulty` سهل/عادي/صعب): `character-image` خمّن الشخصية من صورة تتضح تدريجيًا، `work-cover` خمّن العمل من الغلاف، `character-hints` خمّن الشخصية من تلميحات، `true-false` صح أم خطأ، `higher-lower` الأعلى تقييمًا أو شعبية، `order-years` رتّب ثلاثة أعمال بسنة الإصدار، `race` سباق 10 جولات. وأيضًا `versus` أيهما تفضّل، و`leaderboard` الترتيب (يشمل نقاط الأسبوع لكل سيرفر).\n\
-               **`/recommend`** توصيات مبنية على مفضلاتك: اختر عملًا من القائمة لتفتح بطاقته (الغلاف والحالة والتقييم وأزرار الإضافة والتذكير). مع `user` تحصل على توصيات مشتركة بينكما.\n\
-               **`/help`** يعرض هذه المساعدة، ويمكنك تغيير القسم من القائمة.",
+    Section {
+        key: "admin",
+        label: "للمشرفين",
+        intro: "هذه الأوامر تظهر لمن يملك صلاحية «إدارة السيرفر» فقط.",
+        commands: &["admin", "set-notifications-channel", "set-bot-channel"],
+    },
+    Section {
+        key: "about",
+        label: "عن البوت والمصادر",
+        intro: "",
+        commands: &[],
     },
 ];
 
-pub fn find(key: &str) -> Option<&'static HelpCategory> {
-    CATEGORIES.iter().find(|c| c.key == key)
+/// The quick guides: `(key, button label, text)`.
+pub const GUIDES: &[(&str, &str, &str)] = &[
+    (
+        "character",
+        "كيف أضيف شخصية لبروفايلي",
+        "1. ابحث عن الشخصية بأي أمر من أوامر الأعمال (مثل `/anime` ثم النوع «شخصية»).\n\
+         2. اضغط **➕ أضف لبروفايلي** تحت بطاقتها.\n\
+         3. افتح `/profile` لتراها، وعدّل ترتيبها أو لقبها أو صورتها من `/edit`.\n\n\
+         تقدر أيضًا تضيفها من قائمة شخصيات أي عمل بزر «أظهر الشخصيات».",
+    ),
+    (
+        "reminder",
+        "كيف أفعّل التذكير",
+        "1. افتح بطاقة العمل (أنمي أو دراما أو مسلسل أو فيلم أو مانجا).\n\
+         2. اضغط **🔔 ذكّرني**، وللإلغاء اضغطه مرة ثانية.\n\
+         3. ستصلك رسالة خاصة عند صدور حلقة أو فصل جديد، ورسالة «قريبًا» قبل صدور الأفلام والحلقات.\n\n\
+         قائمة تذكيراتك وإعدادات الإشعارات في `/settings`.",
+    ),
+    (
+        "customize",
+        "كيف أخصص بروفايلي",
+        "كل شيء من `/edit`:\n\
+         • **الغلاف:** اختر غلافًا جاهزًا أو أرفق صورتك. المقاس الموصى به 1200×400 (النسبة بين 2:1 و4:1).\n\
+         • **النبذة والاسم واللون والخصوصية.**\n\
+         • **الشخصيات:** غيّر صورة أو لقب أو وصف أي شخصية في بروفايلك، أو انقلها لمكان آخر.\n\n\
+         الصور المخصصة تعمل إذا فعّلها مشرف السيرفر.",
+    ),
+];
+
+/// What `/help` knows about one registered command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CmdInfo {
+    pub name: String,
+    pub ar_name: String,
+    pub description: String,
+    /// `(Arabic option name, Arabic description)`.
+    pub options: Vec<(String, String)>,
+    pub subcommands: Vec<String>,
+}
+
+type Command = poise::Command<crate::Data, Error>;
+
+/// Built from the registered commands themselves.
+pub fn cmd_infos(cmds: &[Command]) -> Vec<CmdInfo> {
+    cmds.iter()
+        .map(|c| CmdInfo {
+            name: c.name.to_string(),
+            ar_name: c
+                .name_localizations
+                .get("ar")
+                .cloned()
+                .unwrap_or_else(|| c.name.to_string()),
+            description: c
+                .description_localizations
+                .get("ar")
+                .cloned()
+                .or_else(|| c.description.clone().map(|d| d.to_string()))
+                .unwrap_or_default(),
+            options: c
+                .parameters
+                .iter()
+                .map(|p| {
+                    (
+                        p.name_localizations
+                            .get("ar")
+                            .cloned()
+                            .unwrap_or_else(|| p.name.to_string()),
+                        p.description_localizations
+                            .get("ar")
+                            .cloned()
+                            .or_else(|| p.description.clone().map(|d| d.to_string()))
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+            subcommands: c
+                .subcommands
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{} — {}",
+                        s.name_localizations
+                            .get("ar")
+                            .cloned()
+                            .unwrap_or_else(|| s.name.to_string()),
+                        s.description_localizations
+                            .get("ar")
+                            .cloned()
+                            .unwrap_or_default()
+                    )
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// A short usage example per command.
+pub fn example(name: &str) -> &'static str {
+    match name {
+        "anime" => "`/anime` النوع: عمل، الاسم: Frieren",
+        "manga" => "`/manga` النوع: عمل عشوائي، الصيغة: مانهوا كورية",
+        "novel" => "`/novel` النوع: شخصية، الاسم: Subaru",
+        "drama" => "`/drama` النوع: عمل، الاسم: Crash Landing on You",
+        "series" => "`/series` النوع: عمل عشوائي، التصنيف: غموض",
+        "movie" => "`/movie` النوع: عمل، الاسم: Spirited Away",
+        "game" => "`/game` النوع: عمل، الاسم: Hades، المنصة: PC",
+        "event" => "`/event` الفئة: أنمي، النوع: تخمين الشخصية",
+        "top" => "`/top` القسم: دراما، المدة: هذا الأسبوع",
+        "schedule" => "`/schedule` ثم اختر اليوم والفئة",
+        "profile" => "`/profile` أو `/profile` المستخدم: @عضو",
+        "edit" => "`/edit` الهدف: بروفايل، الإجراء: غلاف",
+        "suggest" => "`/suggest add` ربط عملين بسبب",
+        "recommend" => "`/recommend` توصيات من مفضلاتك",
+        "airing" => "`/airing` الحلقة القادمة لأنمي",
+        "settings" => "`/settings` تذكيراتك وخصوصيتك",
+        "help" => "`/help`",
+        "admin" => "`/admin` لوحة إعدادات السيرفر",
+        "set-notifications-channel" => "`/set-notifications-channel` قناة الإشعارات",
+        "set-bot-channel" => "`/set-bot-channel` القناة الوحيدة للبوت",
+        _ => "",
+    }
+}
+
+fn about_text() -> String {
+    format!(
+        "**المصادر**\n\
+         • الأنمي والمانجا والروايات والشخصيات: AniList.\n\
+         • الدراما والمسلسلات والأفلام والممثلون: TMDB. «{}»\n\
+         • _{}_\n\
+         • أماكن المشاهدة: {} (JustWatch) عبر TMDB.\n\
+         • الألعاب: IGDB، والروايات البصرية: VNDB.\n\
+         • فصول المانجا: MangaDex وMangaUpdates.\n\n\
+         **الأمان:** لا أعرض أي عمل للبالغين ولا محتوى جنسيًا من أي مصدر، وإذا لم أتأكد من أمان عمل أخفيه.\n\
+         **الخصوصية:** لا أطلب صلاحيات حساسة ولا أقرأ رسائل الأعضاء.",
+        tmdb::ATTRIBUTION_AR,
+        tmdb::ATTRIBUTION_EN,
+        tmdb::JUSTWATCH_CREDIT,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Shown {
+    Section(usize),
+    Command(usize),
+    Guide(usize),
 }
 
 struct HelpView {
-    current: &'static HelpCategory,
+    cmds: Vec<CmdInfo>,
+    shown: Shown,
+}
+
+impl HelpView {
+    fn embed(&self) -> Emb {
+        match &self.shown {
+            Shown::Section(i) => {
+                let s = &SECTIONS[*i];
+                let body = if s.key == "about" {
+                    about_text()
+                } else {
+                    s.intro.to_string()
+                };
+                let mut list = String::new();
+                for name in s.commands {
+                    if let Some(c) = self.cmds.iter().find(|c| c.name == *name) {
+                        list.push_str(&format!("\n• `/{}` — {}", c.name, c.description));
+                    }
+                }
+                Emb::new()
+                    .title(format!("المساعدة — {}", s.label))
+                    .description(fit(&format!("{body}\n{list}"), 3900))
+            }
+            Shown::Command(i) => {
+                let c = &self.cmds[*i];
+                let mut body = format!("{}\n", c.description);
+                if !c.options.is_empty() {
+                    body.push_str("\n**الخيارات:**\n");
+                    for (n, d) in &c.options {
+                        body.push_str(&format!("• **{n}** — {d}\n"));
+                    }
+                }
+                if !c.subcommands.is_empty() {
+                    body.push_str("\n**الأوامر الفرعية:**\n");
+                    for s in &c.subcommands {
+                        body.push_str(&format!("• {s}\n"));
+                    }
+                }
+                let ex = example(&c.name);
+                if !ex.is_empty() {
+                    body.push_str(&format!("\n**مثال:** {ex}"));
+                }
+                Emb::new()
+                    .title(format!("/{} — {}", c.name, c.ar_name))
+                    .description(fit(&body, 3900))
+            }
+            Shown::Guide(i) => Emb::new().title(GUIDES[*i].1).description(GUIDES[*i].2),
+        }
+    }
 }
 
 impl View for HelpView {
+    fn ephemeral(&self) -> bool {
+        true
+    }
+
     fn render(&self, enabled: bool) -> Page {
-        let embed = Emb::new()
-            .title(format!("المساعدة — {}", self.current.label))
-            .description(self.current.body)
-            .build();
-        let choices = CATEGORIES
+        let sections = SECTIONS
             .iter()
-            .map(|c| Choice {
-                label: c.label.to_string(),
+            .map(|s| Choice {
+                label: s.label.to_string(),
                 description: None,
-                value: c.key.to_string(),
+                value: s.key.to_string(),
             })
             .collect();
-        let mut rows: Vec<_> = select_row(CATEGORY_ID, "اختر القسم…", choices, enabled)
+        let commands = self
+            .cmds
+            .iter()
+            .map(|c| Choice {
+                label: format!("/{}", c.name),
+                description: Some(fit(&c.description, 100)),
+                value: c.name.clone(),
+            })
+            .collect();
+        let mut rows: Vec<_> = select_row(SECTION_ID, "اختر قسمًا…", sections, enabled)
             .into_iter()
             .collect();
-        rows.push(buttons(vec![close_button(enabled)]));
-        Page::embed(embed, rows)
+        rows.extend(select_row(COMMAND_ID, "أو اختر أمرًا…", commands, enabled));
+        let mut guide_row: Vec<_> = GUIDES
+            .iter()
+            .map(|(k, label, _)| {
+                serenity::CreateButton::new(format!("{GUIDE_PREFIX}{k}"))
+                    .label(*label)
+                    .style(serenity::ButtonStyle::Secondary)
+                    .disabled(!enabled)
+            })
+            .collect();
+        guide_row.push(close_button(enabled));
+        rows.push(buttons(guide_row));
+        Page::embed(self.embed().build(), rows)
     }
 
     async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
         match id {
             CLOSE => Outcome::Close,
-            CATEGORY_ID => match values.first().and_then(|v| find(v)) {
-                Some(c) => {
-                    self.current = c;
+            SECTION_ID => match values
+                .first()
+                .and_then(|v| SECTIONS.iter().position(|s| s.key == v))
+            {
+                Some(i) => {
+                    self.shown = Shown::Section(i);
                     Outcome::Update
                 }
                 None => Outcome::Keep,
             },
-            _ => Outcome::Keep,
+            COMMAND_ID => match values
+                .first()
+                .and_then(|v| self.cmds.iter().position(|c| &c.name == v))
+            {
+                Some(i) => {
+                    self.shown = Shown::Command(i);
+                    Outcome::Update
+                }
+                None => Outcome::Keep,
+            },
+            other => match other
+                .strip_prefix(GUIDE_PREFIX)
+                .and_then(|k| GUIDES.iter().position(|g| g.0 == k))
+            {
+                Some(i) => {
+                    self.shown = Shown::Guide(i);
+                    Outcome::Update
+                }
+                None => Outcome::Keep,
+            },
         }
     }
 }
 
-async fn ac_category(_ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
-    let needle = partial.trim().to_lowercase();
-    to_choices(
-        CATEGORIES
-            .iter()
-            .filter(|c| needle.is_empty() || c.label.contains(&needle) || c.key.contains(&needle))
-            .map(|c| (c.label.to_string(), c.key.to_string()))
-            .collect(),
-    )
-}
-
-/// Commands and examples, grouped by category.
+/// How to use the bot, from the real list of commands.
 #[poise::command(
     slash_command,
     name_localized("ar", "مساعدة"),
-    description_localized("ar", "الأوامر وأمثلتها حسب القسم")
+    description_localized("ar", "شرح الأوامر والأدلة السريعة والمصادر")
 )]
-pub async fn help(
-    ctx: Context<'_>,
-    #[description = "Category"]
-    #[description_localized("ar", "القسم")]
-    #[name_localized("ar", "القسم")]
-    #[autocomplete = "ac_category"]
-    category: Option<String>,
-) -> Result<(), Error> {
-    let current = category
-        .as_deref()
-        .and_then(|c| find(c.trim()))
-        .unwrap_or(&CATEGORIES[0]);
-    session::run(ctx, HelpView { current }).await
+pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
+    let cmds = cmd_infos(&ctx.framework().options().commands);
+    session::run(
+        ctx,
+        HelpView {
+            cmds,
+            shown: Shown::Section(0),
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -181,39 +380,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn help_covers_every_command_and_fits_discord_limits() {
-        let all: String = CATEGORIES.iter().map(|c| c.body).collect();
-        for cmd in [
-            "/search",
-            "/character",
-            "/airing",
-            "/random",
-            "/top",
-            "/profile",
-            "/edit",
-            "/settings",
-            "/admin",
-            "/set-bot-channel",
-            "/set-notifications-channel",
-            "/game",
-            "/recommend",
-            "/suggest",
-            "/help",
-        ] {
-            if cmd == "/help" {
-                continue;
-            }
-            assert!(all.contains(cmd), "{cmd} is not documented in /help");
+    fn every_section_and_guide_fits_the_limits() {
+        assert!(SECTIONS.len() <= 25 && GUIDES.len() <= 4);
+        let mut keys = std::collections::HashSet::new();
+        assert!(SECTIONS.iter().all(|s| keys.insert(s.key)));
+        for s in SECTIONS {
+            assert!(s.intro.chars().count() <= 3900, "{}", s.key);
         }
-        for c in CATEGORIES {
-            assert!(
-                c.body.chars().count() <= 4000,
-                "{} is too long for an embed",
-                c.key
-            );
-            assert!(find(c.key).is_some());
+        for (_, label, text) in GUIDES {
+            assert!(label.chars().count() <= 80 && text.chars().count() <= 3900);
         }
-        assert!(CATEGORIES.len() <= 25);
-        assert!(find("nope").is_none());
+        let labels: Vec<_> = GUIDES.iter().map(|g| g.1).collect();
+        assert_eq!(
+            labels,
+            [
+                "كيف أضيف شخصية لبروفايلي",
+                "كيف أفعّل التذكير",
+                "كيف أخصص بروفايلي"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_about_page_carries_the_required_credits() {
+        let t = about_text();
+        assert!(t.contains(tmdb::ATTRIBUTION_AR) && t.contains(tmdb::ATTRIBUTION_EN));
+        assert!(
+            t.contains("JustWatch")
+                && t.contains("AniList")
+                && t.contains("IGDB")
+                && t.contains("VNDB")
+        );
+        assert!(t.chars().count() < 3900);
+    }
+
+    #[test]
+    fn nothing_is_registered_without_a_section_and_nothing_is_documented_that_does_not_exist() {
+        // The cross-check against the real command list lives in main's tests (it needs the registry).
+        let mut all: Vec<&str> = SECTIONS
+            .iter()
+            .flat_map(|s| s.commands.iter().copied())
+            .collect();
+        let n = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(n, all.len(), "a command is in two sections");
+        assert!(
+            all.iter().all(|c| !example(c).is_empty()),
+            "every documented command has an example"
+        );
     }
 }

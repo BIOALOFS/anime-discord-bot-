@@ -23,16 +23,30 @@ pub enum AddResult {
 }
 
 pub async fn add(pool: &SqlitePool, user: i64, work: i64, title: &str) -> Result<AddResult> {
+    add_keyed(pool, user, work, title, &format!("anilist:{work}"), "anime").await
+}
+
+/// A reminder with its provider key and category (`anime`, `drama`, `series`, `movie`, `manga`, `novel`).
+pub async fn add_keyed(
+    pool: &SqlitePool,
+    user: i64,
+    work: i64,
+    title: &str,
+    key: &str,
+    category: &str,
+) -> Result<AddResult> {
     if has(pool, user, work).await? {
         return Ok(AddResult::Already);
     }
     if count(pool, user).await? >= MAX_PER_USER {
         return Ok(AddResult::Full);
     }
-    sqlx::query("INSERT OR IGNORE INTO reminders (user_id, work_id, title) VALUES (?1, ?2, ?3)")
+    sqlx::query("INSERT OR IGNORE INTO reminders (user_id, work_id, title, work_key, category) VALUES (?1, ?2, ?3, ?4, ?5)")
         .bind(user)
         .bind(work)
         .bind(title.chars().take(100).collect::<String>())
+        .bind(key)
+        .bind(category)
         .execute(pool)
         .await?;
     Ok(AddResult::Added)

@@ -30,6 +30,7 @@ pub enum Screen {
     Channels,
     Limits,
     Chapters,
+    Library,
     Reset,
 }
 
@@ -42,6 +43,7 @@ pub const HOME: &[(&str, &str, char, Screen)] = &[
     ("go:channels", "القنوات", '📌', Screen::Channels),
     ("go:limits", "الحدود", '⏱', Screen::Limits),
     ("go:chapters", "مصادر الفصول", '📖', Screen::Chapters),
+    ("go:library", "المسلسلات والجدول", '📺', Screen::Library),
     ("go:reset", "إعادة الضبط", '🗑', Screen::Reset),
 ];
 
@@ -65,10 +67,14 @@ const C_CLEAR_BOT: &str = "c:clear_bot";
 const C_CLEAR_NOTIFY: &str = "c:clear_notify";
 const L_COOLDOWN: &str = "l:cooldown";
 const X_CONFIRM: &str = "x:confirm";
+const LIB_SPOILER: &str = "lib:spoiler";
+const LIB_TZ: &str = "lib:tz";
+const LIB_COUNTRY: &str = "lib:country";
 const CH_MANGADEX: &str = "ch:mangadex";
 const CH_MANGAUPDATES: &str = "ch:mangaupdates";
 const CH_RSS: &str = "ch:rss";
 const CH_LANG: &str = "ch:lang";
+const CH_DIGEST: &str = "ch:digest";
 const CH_ADD_FEED: &str = "ch:addfeed";
 const CH_REMOVE_FEED: &str = "ch:rmfeed";
 
@@ -88,6 +94,10 @@ pub struct State {
     pub feed: FeedConfig,
     pub chapters: cdb::Settings,
     pub feeds: Vec<cdb::Feed>,
+    pub timezone: String,
+    pub spoiler: bool,
+    pub digest_hours: i64,
+    pub overrides: std::collections::HashMap<String, crate::tmdb::model::Target>,
 }
 
 pub const POPULARITY_CHOICES: [i64; 5] = [500, 1500, 3000, 5000, 10_000];
@@ -124,6 +134,70 @@ fn yes_no(b: bool) -> &'static str {
 
 fn channel_text(c: Option<i64>, unset: &str) -> String {
     c.map_or_else(|| unset.to_string(), |c| format!("<#{c}>"))
+}
+
+/// Time zones offered for schedules: `(Arabic city, IANA name)`.
+pub const TIMEZONES: &[(&str, &str)] = &[
+    ("مسقط", "Asia/Muscat"),
+    ("الرياض", "Asia/Riyadh"),
+    ("دبي", "Asia/Dubai"),
+    ("الكويت", "Asia/Kuwait"),
+    ("الدوحة", "Asia/Qatar"),
+    ("المنامة", "Asia/Bahrain"),
+    ("بغداد", "Asia/Baghdad"),
+    ("عمّان", "Asia/Amman"),
+    ("بيروت", "Asia/Beirut"),
+    ("دمشق", "Asia/Damascus"),
+    ("القاهرة", "Africa/Cairo"),
+    ("الخرطوم", "Africa/Khartoum"),
+    ("طرابلس", "Africa/Tripoli"),
+    ("تونس", "Africa/Tunis"),
+    ("الجزائر", "Africa/Algiers"),
+    ("الدار البيضاء", "Africa/Casablanca"),
+    ("إسطنبول", "Europe/Istanbul"),
+    ("التوقيت العالمي (UTC)", "UTC"),
+];
+
+pub fn timezone_options(current: &str) -> Vec<Opt> {
+    TIMEZONES
+        .iter()
+        .map(|(label, tz)| ((*label).to_string(), (*tz).to_string(), *tz == current))
+        .collect()
+}
+
+/// Where a country is listed for this server: `/drama` or `/series`, with the override applied.
+pub fn country_target(
+    code: &str,
+    overrides: &std::collections::HashMap<String, crate::tmdb::model::Target>,
+) -> crate::tmdb::model::Target {
+    crate::tmdb::model::classify(&[code.to_string()], overrides)
+}
+
+pub fn target_label(t: crate::tmdb::model::Target) -> &'static str {
+    match t {
+        crate::tmdb::model::Target::Drama => "الدراما",
+        crate::tmdb::model::Target::Series => "المسلسلات",
+    }
+}
+
+/// Countries as menu options; choosing one moves it to the other command.
+pub fn country_options(
+    overrides: &std::collections::HashMap<String, crate::tmdb::model::Target>,
+) -> Vec<Opt> {
+    crate::tmdb::lookup::COUNTRIES
+        .iter()
+        .take(25)
+        .map(|(c, n)| {
+            (
+                format!(
+                    "{n} — الآن في {}",
+                    target_label(country_target(c, overrides))
+                ),
+                (*c).to_string(),
+                false,
+            )
+        })
+        .collect()
 }
 
 /// One option of a select menu: `(label, value, selected)`.
@@ -296,6 +370,10 @@ impl AdminView {
             feed: feed::get_config(pool, guild).await?,
             chapters: cdb::settings(pool, guild).await?,
             feeds: cdb::feeds(pool, guild).await?,
+            timezone: adb::timezone(pool, guild).await?,
+            digest_hours: cdb::digest_hours(pool, guild).await?,
+            spoiler: adb::spoiler_guard(pool, guild).await?,
+            overrides: crate::db::notify::drama_overrides(pool, guild).await?,
         })
     }
 
@@ -380,12 +458,19 @@ pub fn embed_for(screen: Screen, s: &State, guild: i64) -> Emb {
             if s.suggest_limit == 0 { "بلا حد".to_string() } else { s.suggest_limit.to_string() }
         )),
         Screen::Chapters => e.title("📖 مصادر الفصول").description(format!(
-            "إشعارات الفصول الجديدة للمانجا والمانهوا والمانهوا الصينية **المتابَعة فقط** (الموجودة في بروفايل عضو أو تذكيراته) في قناة الإشعارات.\n\n• MangaDex (رسمي، مرتبة الأولوية الأولى): {}\n• MangaUpdates: {}\n• روابط RSS/Atom: {} ({} رابط)\n• لغة MangaDex المفضلة: **{}**\n\nلا يوجد أي سحب لمواقع.",
+            "إشعارات الفصول الجديدة للمانجا والمانهوا والمانهوا الصينية **المتابَعة فقط** (الموجودة في بروفايل عضو أو تذكيراته) في قناة الإشعارات.\n\n• MangaDex (رسمي، مرتبة الأولوية الأولى): {}\n• MangaUpdates: {}\n• روابط RSS/Atom: {} ({} رابط)\n• لغة MangaDex المفضلة: **{}**\n• ملخص الفصول: **{}** (رسالة واحدة بحد أقصى 15 فصلًا، والباقي خلف زر «المزيد»)\n\nلا يوجد أي سحب لمواقع.",
             yes_no(s.chapters.mangadex),
             yes_no(s.chapters.mangaupdates),
             yes_no(s.chapters.rss),
             s.feeds.len(),
-            if s.chapters.lang == "ar" { "العربية" } else { "English" }
+            if s.chapters.lang == "ar" { "العربية" } else { "English" },
+            crate::commands::notify_panel::digest_label(s.digest_hours)
+        )),
+        Screen::Library => e.title("📺 المسلسلات والجدول").description(format!(
+            "• منطقة الجدول: **{}**\n• حماية الحرق (إخفاء ملخص العمل خلف ||سبويلر||): {}\n• تصنيف البلدان: الدراما الآسيوية في `/drama` وبقية العالم في `/series`، ويمكنك نقل أي بلد للآخر من القائمة الثانية.\n\nالبلدان المنقولة حاليًا: {}",
+            TIMEZONES.iter().find(|(_, tz)| *tz == s.timezone).map_or(s.timezone.as_str(), |(l, _)| *l),
+            yes_no(s.spoiler),
+            if s.overrides.is_empty() { "لا شيء".to_string() } else { s.overrides.iter().map(|(c, t)| format!("{} ← {}", crate::tmdb::lookup::country_name(c), target_label(*t))).collect::<Vec<_>>().join("، ") }
         )),
         Screen::Reset => e.title("🗑 إعادة الضبط").description(
             "سيتم حذف إعدادات هذا السيرفر: القنوات والإشعارات والصور المخصصة والرتب والنقاط. بروفايلات الأعضاء العامة لا تُحذف.",
@@ -473,6 +558,29 @@ pub fn components_for(
                 kind_options(&s.feed.kinds),
                 0,
                 5,
+                enabled,
+            ),
+        ],
+        Screen::Library => vec![
+            buttons(vec![
+                toggle(LIB_SPOILER, "حماية الحرق", s.spoiler, enabled),
+                back_button(enabled),
+                close_button(enabled),
+            ]),
+            menu(
+                LIB_TZ,
+                "منطقة الجدول الزمنية",
+                timezone_options(&s.timezone),
+                1,
+                1,
+                enabled,
+            ),
+            menu(
+                LIB_COUNTRY,
+                "انقل بلدًا بين الدراما والمسلسلات",
+                country_options(&s.overrides),
+                1,
+                1,
                 enabled,
             ),
         ],
@@ -577,6 +685,23 @@ pub fn components_for(
                     1,
                     enabled,
                 ),
+                menu(
+                    CH_DIGEST,
+                    "كم مرة يصل ملخص الفصول؟",
+                    crate::db::notify::DIGEST_HOURS
+                        .iter()
+                        .map(|h| {
+                            (
+                                crate::commands::notify_panel::digest_label(*h),
+                                h.to_string(),
+                                *h == s.digest_hours,
+                            )
+                        })
+                        .collect(),
+                    1,
+                    1,
+                    enabled,
+                ),
                 buttons(vec![serenity::CreateButton::new(CH_ADD_FEED)
                     .label("إضافة رابط RSS")
                     .emoji('➕')
@@ -676,6 +801,11 @@ impl View for AdminView {
                         cdb::set_lang(&pool, g, l).await?;
                     }
                 }
+                CH_DIGEST => {
+                    if let Some(h) = first.and_then(|v| v.parse::<i64>().ok()) {
+                        cdb::set_digest_hours(&pool, g, h).await?;
+                    }
+                }
                 CH_REMOVE_FEED => {
                     if let Some(id) = first.and_then(|v| v.parse::<i64>().ok()) {
                         cdb::remove_feed(&pool, g, id).await?;
@@ -704,6 +834,34 @@ impl View for AdminView {
                 }
                 N_FORMATS => feed::set_formats(&pool, g, values).await?,
                 N_KINDS => feed::set_kinds(&pool, g, values).await?,
+                LIB_SPOILER => adb::set_spoiler_guard(&pool, g, !self.state.spoiler).await?,
+                LIB_TZ => {
+                    if let Some(tz) = first.filter(|t| TIMEZONES.iter().any(|(_, z)| z == t)) {
+                        adb::set_timezone(&pool, g, tz).await?;
+                    }
+                }
+                LIB_COUNTRY => {
+                    if let Some(code) =
+                        first.filter(|c| crate::tmdb::lookup::country_code(c).is_some())
+                    {
+                        let default =
+                            crate::tmdb::model::classify(&[code.to_string()], &Default::default());
+                        let now = country_target(code, &self.state.overrides);
+                        let wanted = if now == crate::tmdb::model::Target::Drama {
+                            crate::tmdb::model::Target::Series
+                        } else {
+                            crate::tmdb::model::Target::Drama
+                        };
+                        let value = if wanted == default {
+                            "default"
+                        } else if wanted == crate::tmdb::model::Target::Drama {
+                            "drama"
+                        } else {
+                            "series"
+                        };
+                        crate::db::notify::set_drama_override(&pool, g, code, value).await?;
+                    }
+                }
                 I_TOGGLE => custom::set_custom_images(&pool, g, !self.state.images).await?,
                 I_POLICY => {
                     adb::set_upload_admins_only(&pool, g, !self.state.upload_admins).await?
@@ -833,6 +991,10 @@ mod tests {
             suggest_limit: 10,
             reminder_ping: false,
             chapters: cdb::Settings::default(),
+            timezone: "Asia/Muscat".into(),
+            digest_hours: 2,
+            spoiler: false,
+            overrides: Default::default(),
             feeds: vec![cdb::Feed {
                 id: 1,
                 url: "https://a.example/f".into(),
@@ -851,7 +1013,7 @@ mod tests {
         }
     }
 
-    const SCREENS: [Screen; 9] = [
+    const SCREENS: [Screen; 10] = [
         Screen::Home,
         Screen::Safety,
         Screen::Notifications,
@@ -860,6 +1022,7 @@ mod tests {
         Screen::Channels,
         Screen::Limits,
         Screen::Chapters,
+        Screen::Library,
         Screen::Reset,
     ];
 
@@ -888,7 +1051,7 @@ mod tests {
 
     #[test]
     fn home_has_every_section_in_two_rows_of_buttons() {
-        assert_eq!(HOME.len(), 8);
+        assert_eq!(HOME.len(), 9);
         let rows = components_for(Screen::Home, &state(), 1, false, true);
         let json = serde_json::to_string(&rows).expect("json");
         for (id, ..) in HOME {

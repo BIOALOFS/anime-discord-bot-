@@ -5,32 +5,39 @@ code, logs and docs are English. Adult media and characters are filtered out eve
 
 ## Commands
 
-Twelve user commands and three admin commands, with chained options instead of dozens of subcommands:
+Seventeen user commands and three admin commands. The seven category commands share one shape, so learning one teaches all.
 
 | Command | What it does |
 | --- | --- |
-| `/profile` | **One message, one visual block** (Discord Components V2: a single container; if Discord refuses V2 the same page is sent as two embeds). In order: the banner (PNG/JPG/WebP or an animated GIF), a compact info text (name/title, bio, `الشخصيات 4 · الأعمال 1 · عام · انضم 2026-11-15`), the current item's picture and its text with the counter `1/4` shown once. The container's side-bar is the colour you chose in `/edit` (presets or `#hex`, reset to default). Components are exactly: row 1 `⏮ ◀ mode-toggle ▶ ⏭` (the toggle names the *other* mode: "أعمال" while viewing characters, "شخصيات" while viewing works; it resets to item 1), row 2 a dropdown of the items on this page (25), row 3 a dropdown to switch pages (grouped ranges beyond 25 pages). `action:add-character` / `add-work` + `value` adds favourites. Only the person who ran the command can press the controls (others get an ephemeral hint). |
-| `/edit` | Every modification. `target` = `profile` (banner, description ≤300, title ≤40, colour, privacy, reset, export/import/delete data), `character` (image incl. GIF for characters in your profile, title ≤40, description ≤300, reset, remove, move) or `work` (remove, move). The banner action without a value opens a menu of **16 ready-made banners** (gradients and patterns drawn in code, no bundled pictures) with a preview; you can also upload a picture/GIF (3 MB, needs custom images enabled in the server), give a colour like `#ff8800`, or reset. Confirmations are ephemeral with an undo button. |
-| `/search` | Works only: `type` (anime, manga, manhwa, manhua, novel, plus game / visual novel when those providers are enabled) → `name` with type-aware autocomplete |
-| `/character` | `name` (autocomplete ranked by popularity, main work in the label) + optional `work` filter + optional `source` (all, anime/manga, games). Several matches → a select menu |
-| `/airing` | Next episode of an anime or this week's schedule |
-| `/random` | Random work/character, today's spotlight, today's character birthdays |
-| `/top` | Most favourited characters or works (server or global); characters come with a dropdown that opens their card |
-| `/recommend` | Automatic AniList recommendations from your favourites (with `user`: for both of you) |
-| `/suggest` | Member suggestions: `add` links two works of any provider/type (anime, manga, novel, game, visual novel) with a reason ≤300 chars; `random` shows one from this server. Layout: **both covers first** (side by side in a media gallery), then the reason, the author mention (no ping) and the added date, then buttons (another, open first/second work, delete for the author or Manage Guild) and a menu that opens either work's card as a new ephemeral message; `mine` lists yours with a menu to delete one. The same pair (either order) can only be added once per server; links and mentions are stripped from reasons; daily limit per member (default 10, set in `/admin` → Limits). |
-| `/game` | **Collective games**: any member of the channel can answer, the first correct answer wins the round's points (speed bonus), wrong answerers are locked out of that round, presses are rate-limited, one game per channel; only the starter or an admin can skip or end; the final scoreboard and a weekly per-server leaderboard are kept. Modes (with a `difficulty` option): `character-image` (a picture that sharpens as hints arrive), `work-cover`, `character-hints`, `true-false`, `higher-lower`, `order-years`, `race` (10 rounds), plus `versus` and `leaderboard`. |
-| `/settings` | Personal preferences only: language, privacy and your **reminders** (list and cancel; max 50) |
-| `/help` | Commands by category with examples |
-| `/admin` | Admin panel (Manage Guild, hidden from others): ephemeral buttons for Safety (NSFW, mature games, games), Notifications (on/off, filter mode), Custom images (on/off, who may upload), Roles, Channels (read-only summary, unset), Limits (cooldown) and Reset |
-| `/set-bot-channel` | Admin-only, one `channel` option: the single channel where commands work (admins may bypass) |
-| `/set-notifications-channel` | Admin-only, one `channel` option: where new episode notifications are posted |
+| `/anime` `/manga` `/novel` `/drama` `/series` `/movie` `/game` | Same options everywhere: **type** (work, character, random work, random character), **name** (autocomplete; optional for random picks) and the filters of the category: anime — format, year, status; manga — format (manga, manhwa, manhua, one-shot), status; novel — origin, status; drama — country, year, status; series — country, year, status, genre; movie — year, genre, country; game — platform, source (IGDB games or VNDB visual novels). Filters apply to searches and to random picks. A random pick avoids your last five and the **"عشوائي آخر"** button re-rolls in the same message. `/drama` lists Asian productions, `/series` the rest of the world (an admin can move a country from `/admin` → المسلسلات والجدول). |
+| `/event` | **Collective games** with a `category` option (anime, manga, novel, drama, series, movie): any member of the channel can answer, the first correct answer wins the round's points (speed bonus), one game per channel, only the starter or an admin can skip or end. Modes: `character-image`, `work-cover`, `character-hints`, `true-false`, `higher-lower`, `order-years`, `race`, plus `versus` and `leaderboard`. The character modes need character pictures, so they are not offered for dramas, series and films. The answer's "أظهر العمل / أظهر الشخصيات" button appears only after the reveal. |
+| `/top` | The **server's** rankings (never across servers): anime, manga, novels, drama, series, films, games, characters, members, event points; a time range (week, month, all time); a hero card for first place, places 2–10 as a list, pages, and a menu that opens any item as a new message. Cached for five minutes. |
+| `/schedule` | This week's calendar: anime from AniList (exact times) and dramas/series from TMDB (the day), in your time zone (default `Asia/Muscat`, set per server in `/admin`, per member in `/settings`). Day and category selects, "أعمالي فقط", pages, and a menu that opens any work. |
+| `/profile` | **One message, one visual block** (Components V2; embeds as a fallback): banner (PNG/JPG/WebP or animated GIF), a compact info line (`الشخصيات 4 · الأعمال 1 · عام`), the current item's picture and text, the counter `1/4`. It holds characters and works of **every** source: AniList, TMDB shows and films, TMDB cast entries (with the actor's photo, labelled), games, visual novels. A work shows your watch status as a text line. |
+| `/edit` | Every modification. `target` = `profile` (banner, description, title, colour, privacy, reset, export/import/delete data), `character` or `work`. **Banner:** recommended **1200×400**; ratio between 2:1 and 4:1, at least 600 px wide, 3 MB. A still picture is center-cropped to 3:1 and you see a preview with *confirm / cancel*; a GIF must already have a fitting ratio (it is never cropped). 16 ready-made banners at exactly 1200×400. |
+| `/suggest` | Member suggestions: `add` links two works with a reason ≤300 chars, `random` shows one from this server, `mine` lists yours. |
+| `/recommend` | Automatic AniList recommendations from your favourites (with `user`: for both of you). |
+| `/airing` | Next episode of an anime. |
+| `/settings` | Personal preferences: language, privacy, reminders (max 50) and **notifications** (a private panel: a switch, a filter mode and a digest interval per category, time zone, the hour of the weekly summary, the spoiler guard and what you never want to hear about). |
+| `/help` | One ephemeral message built from the real command list: a section menu, a command menu, three quick guides (add a character to my profile, turn on a reminder, customise my profile) and the credits page. |
+| `/admin` | Admin panel (Manage Guild): Safety, Notifications, Custom images, Roles, Channels, Limits, Chapter sources (incl. digest interval), **المسلسلات والجدول** (schedule time zone, spoiler guard, moving countries between drama and series) and Reset. |
+| `/set-bot-channel` | Admin-only: the single channel where commands work (admins may bypass). |
+| `/set-notifications-channel` | Admin-only: where new episode, chapter and weekly-summary messages are posted. |
 
-Under every character image (from `/character`, a work's cast, `/top`, `/random`, a game round or a roster) there are the same buttons: add to / remove from my profile, works, source link and back. Inside `/profile` there are none. Every anime card has a 🔔 **remind me** button: when a new episode is released the bot DMs you (if your DMs are closed and the server allows it in `/admin` → Notifications, it pings you in the notifications channel). Reminders reuse the batched airing fetch, so they add no AniList calls of their own.
+**Every message about a character carries "أظهر العمل" and every message about a work carries "أظهر الشخصيات"** (a work card also has add-to-profile, a 🔔 reminder button and a watch-status select: watching or reading now, completed, later, paused, dropped). Both buttons send a **new** message, never edit the old one, and any member can press them; lists use select menus that open items as new messages. The profile is the one exception. Removed commands: `/search`, `/character` and `/random` (their jobs are in the category commands); the old minigame `/game` is now `/event`, and `/game` is the games category.
 
-Both channel commands check that the bot can view, send, embed links and attach files there. Unsetting a channel is done
-in `/admin` → Channels. Wherever a message lists character names it carries a dropdown (max 25 options, provider-prefixed
-values) that opens the character in the same message with a Back button: `/character` results, work rosters, the cast on a
-work card, `/top`, `/random` birthdays and profile cards.
+Both channel commands check that the bot can view, send, embed links and attach files there. Unsetting a channel is done in `/admin` → Channels.
+
+### Credits and data sources
+
+* **AniList** — anime, manga, novels and their characters.
+* **TMDB** — dramas, series, films, cast and posters. *This product uses the TMDB API but is not endorsed or certified by TMDB.* The same statement (in Arabic and English) is in `/help` → عن البوت والمصادر, and TMDB cards carry the footer "المصدر: TMDB".
+* **JustWatch** — where-to-watch data comes through TMDB; cards that show it say "Streaming data by JustWatch" (up to 6 providers for the server's region).
+* **IGDB** (games, non-commercial) and **VNDB** (visual novels); **MangaDex** and **MangaUpdates** for chapters.
+
+### TMDB setup
+
+Create a free account at <https://www.themoviedb.org/settings/api>, request an API key and put it in `.env` as `TMDB_API_KEY` (or the "API Read Access Token" as `TMDB_READ_TOKEN`; the token wins if both are set). Without either, `/drama`, `/series`, `/movie` and the TMDB parts of `/schedule` and `/top` say the source is not enabled. The bot never asks TMDB for adult titles (`include_adult=false`, the adult flag, a keyword blacklist and NC-17 / explicit certifications are all checked, and a title without a reliable verdict is hidden). Requests are rate-limited (`TMDB_RATE_LIMIT_PER_10S`, default 30) and cached: searches 10 min, details 6 h, lists 1 h, misses 5 min.
 
 ### Notifications
 
@@ -77,6 +84,10 @@ Environment variables (a `.env` file in the working directory is read if present
 | `ENABLE_FALLBACK_PROVIDERS` | `false` | no | MangaDex/MangaUpdates fallback for works AniList lacks (see below) |
 | `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET` | empty | no | enable IGDB games and game characters (see below); both are needed |
 | `ENABLE_VNDB` | `true` | no | VNDB visual novels and characters, no key needed; `false` switches it off |
+| `TMDB_API_KEY` or `TMDB_READ_TOKEN` | empty | no | enable dramas, series and films (see *TMDB setup*) |
+| `TMDB_REGION` | `OM` | no | region of the "where to watch" data (ISO 3166-1) |
+| `ENABLE_TMDB` | `true` | no | `false` switches TMDB off even with a key |
+| `TMDB_RATE_LIMIT_PER_10S` | `30` | no | request budget per 10 seconds (TMDB allows about 50 per second) |
 | `CACHE_TTL_*` | see `.env.example` | no | cache lifetimes in seconds |
 
 Create the Discord application at <https://discord.com/developers/applications>, add a bot, copy its token and invite
@@ -94,7 +105,7 @@ they can only be set for characters already in your own profile and only appear 
 
 ### Fallback providers (optional, off by default)
 
-`ENABLE_FALLBACK_PROVIDERS=true` lets `/search` fall back to MangaDex and MangaUpdates when AniList has no match for a
+`ENABLE_FALLBACK_PROVIDERS=true` lets the written-work categories fall back to MangaDex and MangaUpdates when AniList has no match for a
 written work. Only `safe`/`suggestive` ratings are accepted (MangaUpdates works need known, non-adult genres), the
 source is credited in the card footer, and covers are downloaded by the bot and attached (never hotlinked). These APIs
 were not reachable from the development sandbox, so this path is covered by fixture tests only.
@@ -102,7 +113,7 @@ were not reachable from the development sandbox, so this path is covered by fixt
 ### Games and visual novels (optional)
 
 AniList has no video games, so two optional providers sit behind the `CatalogProvider` trait. Ids are provider-prefixed
-(`igdb:55`, `vndb:v17`, characters `igdb:c55` / `vndb:c12`). They feed `/search type:game|vn` and `/character`, and
+(`igdb:55`, `vndb:v17`, characters `igdb:c55` / `vndb:c12`). They feed `/game` (work and character searches, random picks), and
 their works and characters can be added to profiles like any other. Pictures are downloaded and cached by the bot
 (never hotlinked) and every card credits the source.
 
@@ -157,26 +168,28 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 
 1. أنشئ تطبيقًا وبوتًا من <https://discord.com/developers/applications> وانسخ التوكن، ثم ادعُ البوت بنطاقَي `bot` و`applications.commands`.
 2. أنشئ ملف `.env` (انسخ `.env.example`) وضع `DISCORD_TOKEN`، وللتجربة السريعة ضع `DEV_GUILD_ID` ليظهر الأمر فورًا في سيرفرك.
-3. شغّل: `cargo run` ثم جرّب `/search` و`/profile`.
+3. شغّل: `cargo run` ثم جرّب `/anime` و`/profile` و`/help`.
 
-أوامر المستخدمين: `/profile` (عرض بطاقات مع غلاف وإضافة) `/edit` (كل التعديلات) `/search` `/character` `/airing` `/random` `/top` `/recommend` `/game` `/settings` (اللغة والخصوصية) `/help`.
-أوامر الإدارة (للمشرفين): `/admin` لوحة أزرار، `/set-bot-channel` قناة الأوامر، `/set-notifications-channel` قناة إشعارات الحلقات. إشعارات الحلقات تغطي كل الأنمي تلقائيًا، والتصفية من لوحة الإدارة.
+أوامر المستخدمين: `/anime` `/manga` `/novel` `/drama` `/series` `/movie` `/game` `/event` `/top` `/schedule` `/profile` `/edit` `/suggest` `/recommend` `/airing` `/settings` `/help`.
+أوامر الإدارة (للمشرفين): `/admin` لوحة أزرار، `/set-bot-channel` قناة الأوامر، `/set-notifications-channel` قناة الإشعارات.
 
 ### دليل المستخدم
-- **`/profile`**: رسالة واحدة: الغلاف (يدعم GIF متحرك)، بطاقة المعلومات، بطاقة العنصر. الصف الأول `⏮ ◀ زر التبديل ▶ ⏭` (يعرض اسم الوضع الآخر: «أعمال» أو «شخصيات»)، والثاني قائمة للقفز إلى أي عنصر في الصفحة، والثالث قائمة لتغيير الصفحة.
-- **`/edit`**: كل التعديلات. للغلاف: بدون قيمة تفتح قائمة 16 غلافًا جاهزًا مع معاينة، أو أرفق صورة/GIF (حتى 3MB)، أو لونًا مثل `#ff8800`، أو `reset`.
-- **أزرار الشخصية** تحت كل صورة شخصية (خارج البروفايل): إضافة/إزالة من بروفايلي، الأعمال، رابط المصدر، رجوع.
-- **زر «ذكّرني»** على بطاقة الأنمي: رسالة خاصة عند صدور حلقة جديدة؛ قائمة تذكيراتك من `/settings setting:reminders`.
-- **`/suggest`**: `add` لربط عملين من أي نوع مع السبب، `random` اقتراح عشوائي (صورتا العملين أولًا ثم السبب والمؤلف والتاريخ، وقائمة لفتح بطاقة أي عمل)، `mine` اقتراحاتك مع الحذف.
-- **لون البروفايل**: `/edit` ← البروفايل ← اللون (ألوان جاهزة أو `#ff8800` أو `reset`). البروفايل رسالة واحدة وكتلة واحدة.
-- **`/game`**: ألعاب جماعية يجيب فيها أي عضو في القناة؛ أسرع إجابة صحيحة تكسب، والتخطي والإنهاء لمن بدأ اللعبة أو للمشرفين، مع ترتيب أسبوعي لكل سيرفر.
-- **زر «أظهر العمل»** في كل إشعار يرسل بطاقة العمل في رسالة جديدة ولا يعدّل الإشعار.
+- **أوامر الأعمال السبعة** تعمل بالطريقة نفسها: اختر **النوع** (عمل، شخصية، عمل عشوائي، شخصية عشوائية) ثم **الاسم** من الاقتراحات، ولكل أمر فلاتره (الصيغة، السنة، الحالة، البلد، التصنيف، المنصة…). زر «عشوائي آخر» يغيّر النتيجة في الرسالة نفسها.
+- **`/drama`** للدراما الآسيوية و**`/series`** لمسلسلات بقية العالم و**`/movie`** للأفلام (من TMDB)، و**`/game`** للألعاب والروايات البصرية.
+- تحت كل رسالة عن شخصية زر **«أظهر العمل»**، وتحت كل رسالة عن عمل زر **«أظهر الشخصيات»**؛ كلاهما يرسل رسالة جديدة ويعمل لأي عضو. وعلى بطاقة العمل أيضًا: أضف لبروفايلي، ذكّرني، وقائمة حالتك (أشاهده الآن، أكملته، سأشاهده لاحقًا، متوقف، أسقطته).
+- **`/profile`**: رسالة واحدة تضم شخصياتك وأعمالك من كل المصادر، و**`/edit`** لكل التعديلات. الغلاف الموصى به **1200×400** (النسبة بين 2:1 و4:1 وأقل عرض 600 بكسل)؛ الصورة الثابتة تُقصّ من المنتصف مع معاينة وزرّي «اعتمد» و«إلغاء»، والـGIF يُقبل فقط إن كانت نسبته مناسبة.
+- **`/top`** ترتيب السيرفر (أنمي، مانجا، روايات، دراما، مسلسلات، أفلام، ألعاب، شخصيات، الأعضاء، نقاط الفعاليات) بمدة أسبوع أو شهر أو الكل.
+- **`/schedule`** جدول الأسبوع للأنمي والدراما والمسلسلات بتوقيتك، و**`/event`** الفعاليات الجماعية مع خيار الفئة.
+- **التذكير**: زر «ذكّرني» على أي بطاقة يرسل لك رسالة خاصة عند صدور حلقة أو فصل أو فيلم، وقبلها بيوم تنبيه «قريبًا». لوحة الإشعارات والاستثناءات من `/settings` ← الإشعارات.
+- **`/help`** يشرح كل أمر مسجّل فعلًا، مع أدلة سريعة وصفحة المصادر.
 
 ### دليل المشرف
-- **`/set-bot-channel`** القناة الوحيدة لأوامر البوت (المشرفون مستثنون)، و**`/set-notifications-channel`** قناة إشعارات الحلقات. يتحقق البوت من صلاحياته في القناة.
-- **`/admin`** (لوحة أزرار خاصة بك): الأمان، الإشعارات (التشغيل، نوع التصفية، تنبيه التذكير بالقناة)، **مصادر الفصول** (MangaDex وMangaUpdates وروابط RSS مع لغة عربية أو إنجليزية؛ تُنشر فصول الأعمال المتابَعة فقط)، الصور المخصصة (التفعيل ومن يرفع)، الرتب، القنوات (عرض وإلغاء التحديد)، الحدود (مهلة الأوامر وحد الاقتراحات اليومي)، إعادة ضبط بيانات السيرفر بتأكيد.
-- ما حُذف في الجولة الخامسة موثّق في `CLEANUP.md`.
-`/search` للأعمال فقط و`/character` للشخصيات (أنمي/مانجا وألعاب). الألعاب اختيارية: ضع `IGDB_CLIENT_ID` و`IGDB_CLIENT_SECRET` من <https://dev.twitch.tv/console> (تطبيق من نوع Confidential، رابط OAuth: `http://localhost`، وحساب Twitch بتحقق ثنائي) ويعمل VNDB بدون مفتاح. اكتب `/help` لرؤية الأمثلة. أوامر الإدارة تحتاج صلاحية إدارة السيرفر.
+- **`/set-bot-channel`** القناة الوحيدة لأوامر البوت (المشرفون مستثنون)، و**`/set-notifications-channel`** قناة الإشعارات. يتحقق البوت من صلاحياته في القناة.
+- **`/admin`**: الأمان، الإشعارات، **مصادر الفصول** (مع تكرار الملخص: كل ساعة، ساعتين وهو الافتراضي، 4، 8، يوميًا)، **المسلسلات والجدول** (منطقة الجدول الزمنية، حماية الحرق، نقل بلد بين الدراما والمسلسلات)، الصور المخصصة، الرتب، القنوات، الحدود، إعادة الضبط.
+- كل أحد صباح اثنين يصل ملخص أسبوعي في قناة الإشعارات.
+- ما حُذف في الجولات السابقة موثّق في `CLEANUP.md`.
+- **TMDB**: ضع `TMDB_API_KEY` (أو `TMDB_READ_TOKEN`) في `.env` من <https://www.themoviedb.org/settings/api>. هذا المنتج يستخدم TMDB API لكنه غير معتمد أو مصدّق من TMDB. بيانات أماكن المشاهدة من JustWatch عبر TMDB.
+- الألعاب اختيارية: ضع `IGDB_CLIENT_ID` و`IGDB_CLIENT_SECRET` من <https://dev.twitch.tv/console> (تطبيق من نوع Confidential، رابط OAuth: `http://localhost`، وحساب Twitch بتحقق ثنائي) ويعمل VNDB بدون مفتاح.
 
 > **تنبيه أمني:** نُشر توكن حقيقي سابقًا داخل `.env` في تاريخ المستودع. أعد ضبط التوكن من لوحة المطورين ولا ترفع `.env` أبدًا.
 

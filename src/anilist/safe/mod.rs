@@ -97,6 +97,54 @@ pub fn kind_of(m: &Media) -> MediaKind {
     }
 }
 
+/// Optional narrowing of a category search: AniList format (`TV`, `MOVIE`...), year and status (`FINISHED`...).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MediaFilter {
+    pub format: Option<String>,
+    pub year: Option<i32>,
+    pub status: Option<String>,
+    /// Country of origin (`JP`, `KR`, `CN`), for categories that do not fix one (novels).
+    pub country: Option<String>,
+}
+
+impl MediaFilter {
+    pub fn is_empty(&self) -> bool {
+        self.format.is_none()
+            && self.year.is_none()
+            && self.status.is_none()
+            && self.country.is_none()
+    }
+
+    pub fn cache_key(&self) -> String {
+        format!(
+            "{}/{}/{}/{}",
+            self.format.as_deref().unwrap_or(""),
+            self.year.unwrap_or(0),
+            self.status.as_deref().unwrap_or(""),
+            self.country.as_deref().unwrap_or("")
+        )
+    }
+
+    /// Does a work found by name pass the filter? (Searches cannot be narrowed server-side, so they are checked here.)
+    pub fn matches(&self, m: &Media) -> bool {
+        self.format.as_deref().is_none_or(|f| {
+            m.format
+                .as_deref()
+                .is_some_and(|mf| mf.eq_ignore_ascii_case(f))
+        }) && self.year.is_none_or(|y| m.year() == Some(y))
+            && self.status.as_deref().is_none_or(|s| {
+                m.status
+                    .as_deref()
+                    .is_some_and(|ms| ms.eq_ignore_ascii_case(s))
+            })
+            && self.country.as_deref().is_none_or(|c| {
+                m.country_of_origin
+                    .as_deref()
+                    .is_some_and(|mc| mc.eq_ignore_ascii_case(c))
+            })
+    }
+}
+
 fn kind_vars(mut vars: Value, kind: MediaKind) -> Value {
     vars["type"] = json!(kind.type_str());
     if let Some(c) = kind.country() {
@@ -524,10 +572,39 @@ impl SafeAniList {
         min_score: Option<u8>,
         policy: ContentPolicy,
     ) -> Result<Option<Media>, AniError> {
+        self.random_media_with(kind, genre, min_score, &MediaFilter::default(), policy)
+            .await
+    }
+
+    /// Same, narrowed by format / year / status (sent to AniList, so a narrow filter still finds something).
+    pub async fn random_media_with(
+        &self,
+        kind: MediaKind,
+        genre: Option<&str>,
+        min_score: Option<u8>,
+        filter: &MediaFilter,
+        policy: ContentPolicy,
+    ) -> Result<Option<Media>, AniError> {
         let mut max_page: usize = 50;
         for _ in 0..5 {
             let page = rand::random_range(1..=max_page.max(1));
             let mut vars = kind_vars(json!({"page": page}), kind);
+            if let Some(f) = filter.format.as_deref() {
+                vars["formatIn"] = json!([f]);
+            }
+            if let Some(c) = filter
+                .country
+                .as_deref()
+                .filter(|_| kind.country().is_none())
+            {
+                vars["country"] = json!(c);
+            }
+            if let Some(y) = filter.year {
+                vars["seasonYear"] = json!(y);
+            }
+            if let Some(st) = filter.status.as_deref() {
+                vars["status"] = json!(st);
+            }
             if let Some(g) = genre.filter(|g| !g.is_empty()) {
                 vars["genre"] = json!(g);
             }
@@ -536,11 +613,12 @@ impl SafeAniList {
             }
             let vars = adult_vars(vars, policy);
             let key = format!(
-                "rm:{}:{}:{}:{page}:{}",
+                "rm:{}:{}:{}:{page}:{}:{}",
                 kind.key(),
                 genre.unwrap_or(""),
                 min_score.unwrap_or(0),
-                policy.allow_adult
+                policy.allow_adult,
+                filter.cache_key()
             );
             let Some(doc) = self
                 .client

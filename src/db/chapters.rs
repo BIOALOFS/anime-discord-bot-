@@ -53,6 +53,50 @@ pub async fn settings(pool: &SqlitePool, guild: i64) -> Result<Settings> {
     )
 }
 
+/// Hours between chapter digests (1, 2 default, 4, 8 or 24).
+pub async fn digest_hours(pool: &SqlitePool, guild: i64) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT digest_hours FROM chapter_settings WHERE guild_id = ?1",
+    )
+    .bind(guild)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(2))
+}
+
+pub async fn set_digest_hours(pool: &SqlitePool, guild: i64, hours: i64) -> Result<()> {
+    if !crate::db::notify::DIGEST_HOURS.contains(&hours) {
+        return Ok(());
+    }
+    ensure(pool, guild).await?;
+    sqlx::query("UPDATE chapter_settings SET digest_hours = ?2 WHERE guild_id = ?1")
+        .bind(guild)
+        .bind(hours)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Is it time for this server's next digest? (The first one is always due.)
+pub async fn digest_due(pool: &SqlitePool, guild: i64, now: i64) -> Result<bool> {
+    let row: Option<(i64, i64)> =
+        sqlx::query_as("SELECT digest_hours, digest_at FROM chapter_settings WHERE guild_id = ?1")
+            .bind(guild)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.is_none_or(|(hours, at)| now - at >= hours * 3600 - 60))
+}
+
+pub async fn mark_digest(pool: &SqlitePool, guild: i64, now: i64) -> Result<()> {
+    ensure(pool, guild).await?;
+    sqlx::query("UPDATE chapter_settings SET digest_at = ?2 WHERE guild_id = ?1")
+        .bind(guild)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn ensure(pool: &SqlitePool, guild: i64) -> Result<()> {
     sqlx::query("INSERT OR IGNORE INTO chapter_settings (guild_id) VALUES (?1)")
         .bind(guild)
@@ -328,6 +372,31 @@ mod tests {
             "a server without members tracks nothing"
         );
         assert_eq!(tracked_works(&pool, 10, 1).await.expect("limited").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn digests_are_due_after_their_interval_and_only_valid_hours_are_stored() {
+        let pool = connect_memory().await;
+        assert_eq!(
+            digest_hours(&pool, 1).await.expect("h"),
+            2,
+            "two hours by default"
+        );
+        assert!(
+            digest_due(&pool, 1, 1_000).await.expect("due"),
+            "the first digest is always due"
+        );
+        mark_digest(&pool, 1, 10_000).await.expect("mark");
+        assert!(!digest_due(&pool, 1, 10_000 + 3_000).await.expect("due"));
+        assert!(digest_due(&pool, 1, 10_000 + 2 * 3600).await.expect("due"));
+        set_digest_hours(&pool, 1, 8).await.expect("set");
+        set_digest_hours(&pool, 1, 5).await.expect("ignored");
+        assert_eq!(digest_hours(&pool, 1).await.expect("h"), 8);
+        assert!(
+            !digest_due(&pool, 1, 10_000 + 2 * 3600).await.expect("due"),
+            "the new interval applies"
+        );
+        assert!(digest_due(&pool, 1, 10_000 + 8 * 3600).await.expect("due"));
     }
 
     #[tokio::test]

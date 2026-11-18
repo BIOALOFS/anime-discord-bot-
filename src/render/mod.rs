@@ -132,7 +132,7 @@ impl Renderer {
             .await
     }
 
-    /// The 1200x300 strip above the profile card: a ready-made banner, a colour, or (legacy) an allow-listed https
+    /// The 1200x400 strip above the profile card: a ready-made banner, a colour, or (legacy) an allow-listed https
     /// picture. Uploaded pictures are attached as stored and never go through here.
     pub async fn banner(&self, spec: BannerSpec, title: String) -> Option<Rendered> {
         let base = match &spec {

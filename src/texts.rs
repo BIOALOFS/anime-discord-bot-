@@ -1,20 +1,21 @@
-//! Every user-facing string lives here so another language can be added later.
+//! Every user-facing string lives here (`docs/TONE.md` explains how they are written), so the voice stays
+//! consistent and another language can be added later. The rest of the code reaches this module as `i18n`.
 
-pub const ERR_GENERIC: &str = "حدث خطأ غير متوقع، حاول مرة أخرى لاحقًا.";
-pub const ERR_COOLDOWN: &str = "تمهّل قليلًا، حاول بعد لحظات.";
-pub const ERR_MISSING_PERMS: &str = "ليست لديك الصلاحية لاستخدام هذا الأمر.";
+pub const ERR_GENERIC: &str = "عذرًا، حدث خلل من جهتي. جرّب مرة أخرى بعد قليل.";
+pub const ERR_COOLDOWN: &str = "على مهلك 😄 انتظر لحظات ثم أعد المحاولة.";
+pub const ERR_MISSING_PERMS: &str = "هذا الأمر يحتاج صلاحية لا تملكها.";
 
 // ---- generic ----
-pub const ERR_BUSY: &str = "الخدمة مشغولة، حاول بعد قليل.";
-pub const ERR_SERVICE: &str = "تعذّر الاتصال بـ AniList، حاول مرة أخرى لاحقًا.";
-pub const NOT_YOURS: &str = "هذه الأزرار ليست لك.";
-pub const NO_RESULTS: &str = "لم أجد نتائج مطابقة.";
-pub const NOT_FOUND: &str = "لم أجد هذا العنصر.";
-pub const HIDDEN_NOTICE: &str = "تم إخفاء عناصر غير مناسبة.";
+pub const ERR_BUSY: &str = "الخدمة مزدحمة الآن، أعد المحاولة بعد لحظات.";
+pub const ERR_SERVICE: &str = "لم أستطع الوصول إلى AniList الآن. جرّب بعد قليل.";
+pub const NOT_YOURS: &str = "هذه الرسالة لمن استخدم الأمر. شغّل الأمر بنفسك لتتحكم بها.";
+pub const NO_RESULTS: &str = "لم أجد شيئًا بهذا الاسم. جرّب كتابة مختلفة أو الاسم بالإنجليزية.";
+pub const NOT_FOUND: &str = "لم أعثر على هذا العنصر.";
+pub const HIDDEN_NOTICE: &str = "أخفيتُ بعض النتائج لأنها غير مناسبة.";
 pub const READ_MORE: &str = "اقرأ المزيد";
 pub const POWERED_BY: &str = "Powered by AniList";
 pub const PICK_PLACEHOLDER: &str = "اختر من النتائج…";
-pub const PICK_PROMPT: &str = "وجدت عدة نتائج، اختر واحدًا:";
+pub const PICK_PROMPT: &str = "وجدتُ أكثر من نتيجة، اختر الأقرب:";
 pub const NONE: &str = "—";
 
 // ---- buttons ----
@@ -26,7 +27,7 @@ pub const BTN_BACK: &str = "رجوع";
 pub const BTN_WORKS: &str = "الأعمال";
 pub const BTN_ADD_TO_PROFILE: &str = "أضف لبروفايلي";
 pub const BTN_RANDOM_CHARACTER: &str = "شخصية عشوائية";
-pub const BTN_REROLL: &str = "مرة أخرى";
+pub const BTN_REROLL: &str = "عشوائي آخر";
 
 // ---- media card ----
 pub const F_SCORE: &str = "التقييم";
@@ -64,39 +65,40 @@ pub fn episode_n(n: i32) -> String {
 // ---- seasonal ----
 
 // ---- random ----
-pub const RANDOM_FAILED: &str = "لم أجد نتيجة مناسبة بعد عدة محاولات، جرّب مرة أخرى.";
+pub const RANDOM_FAILED: &str = "لم أجد نتيجة مناسبة بعد عدة محاولات. جرّب مرة أخرى أو خفّف الفلاتر.";
 
 // ---- profiles ----
 pub const PROFILE_TITLE: &str = "بروفايل";
-pub const PROFILE_NONE_OTHER: &str = "هذا المستخدم ليس لديه بروفايل.";
-pub const PROFILE_PRIVATE: &str = "هذا البروفايل غير متاح لك.";
-pub const PROFILE_EMPTY: &str = "لا توجد شخصيات في هذا البروفايل بعد.";
+pub const PROFILE_NONE_OTHER: &str = "هذا العضو لم ينشئ بروفايلًا بعد.";
+pub const PROFILE_PRIVATE: &str = "هذا البروفايل خاص، لا يمكنك رؤيته.";
+pub const PROFILE_EMPTY: &str =
+    "بروفايلك فارغ حتى الآن. ابحث عن شخصية تحبها وأضفها بزر «أضف لبروفايلي».";
 pub const PROFILE_NOT_IN_LIST: &str = "هذه الشخصية ليست في بروفايلك. اختر من القائمة المقترحة.";
 pub const PROFILE_AMBIGUOUS: &str = "وجدت أكثر من شخصية بهذا الاسم، اختر واحدة من القائمة المقترحة.";
-pub const ALREADY_ADDED: &str = "هذه الشخصية موجودة بالفعل في بروفايلك.";
-pub const CHARACTER_HIDDEN: &str = "لا يمكن إضافة هذه الشخصية (محتوى غير مناسب).";
+pub const ALREADY_ADDED: &str = "هذه الشخصية في بروفايلك أصلًا 😉";
+pub const CHARACTER_HIDDEN: &str = "لا أستطيع إضافة هذه الشخصية لأن محتواها غير مناسب.";
 pub fn added_character(name: &str, pos: i64) -> String {
-    format!("تمت إضافة **{name}** في المركز {pos} ✅")
+    format!("أضفتُ **{name}** إلى بروفايلك في المركز {pos} ✅")
 }
 pub fn removed_character(name: &str) -> String {
-    format!("تمت إزالة **{name}** من بروفايلك.")
+    format!("أزلتُ **{name}** من بروفايلك.")
 }
 pub fn moved_character(name: &str, pos: i64) -> String {
-    format!("تم نقل **{name}** إلى المركز {pos}.")
+    format!("نقلتُ **{name}** إلى المركز {pos}.")
 }
 pub const BTN_CANCEL: &str = "إلغاء";
-pub const CANCELLED: &str = "تم الإلغاء.";
-pub const BIO_SET: &str = "تم تحديث النبذة.";
-pub const COLOR_SET: &str = "تم تحديث اللون.";
+pub const CANCELLED: &str = "تمام، ألغيتُ العملية.";
+pub const BIO_SET: &str = "حدّثتُ نبذتك.";
+pub const COLOR_SET: &str = "حدّثتُ اللون.";
 pub const COLOR_INVALID: &str = "لون غير صالح، استخدم صيغة مثل `#3DB4F2`.";
-pub const BANNER_SET: &str = "تم تحديث الغلاف.";
-pub const PRIVACY_SET: &str = "تم تحديث الخصوصية.";
+pub const BANNER_SET: &str = "غلافك الجديد جاهز 🎨";
+pub const PRIVACY_SET: &str = "حدّثتُ خصوصية بروفايلك.";
 pub const EXPORT_DONE: &str = "هذا ملف بروفايلك. يمكنك استيراده لاحقًا بالأمر `/profile import`.";
 pub const IMPORT_BAD_FILE: &str =
     "ملف غير صالح: أرسل ملف JSON مُصدَّر من `/profile export` (حتى 2 ميغابايت).";
 pub fn import_report(added: usize, dups: usize, invalid: usize) -> String {
     format!(
-        "تم الاستيراد: أُضيفت **{added}**، مكررة **{dups}**، غير صالحة **{invalid}**.\nتظهر الشخصيات بعد التحقق من سلامتها عند عرض البروفايل."
+        "انتهى الاستيراد: أضفتُ **{added}**، وتخطيتُ **{dups}** مكررة و**{invalid}** غير صالحة.\nتظهر الشخصيات بعد أن أتحقق من سلامتها عند عرض البروفايل."
     )
 }
 pub const SCOPE_SERVER: &str = "السيرفر";
@@ -151,9 +153,9 @@ pub fn volumes_n(n: i32) -> String {
     format!("{n} مجلد")
 }
 pub const BTN_UNDO: &str = "تراجع";
-pub const WORK_ADDED: &str = "✅ تمت الإضافة إلى بروفايلك";
-pub const WORK_REMOVED: &str = "تمت الإزالة من بروفايلك";
-pub const UNDONE: &str = "تم التراجع.";
+pub const WORK_ADDED: &str = "✅ أضفته إلى بروفايلك";
+pub const WORK_REMOVED: &str = "أزلتُه من بروفايلك";
+pub const UNDONE: &str = "تراجعتُ عن ذلك.";
 pub const BTN_ADDED: &str = "مضاف";
 pub const BADGE_COLLECTOR: &str = "🏅 جامع";
 pub const BADGE_GAMER: &str = "🎮 لاعب";
@@ -163,46 +165,47 @@ pub const BTN_SECTION_WORKS: &str = "أعمال";
 pub const BTN_SECTION_CHARACTERS: &str = "شخصيات";
 // ---- works / customization / lists ----
 pub const WORK_AMBIGUOUS: &str = "وجدت عدة أعمال، اختر واحدًا من الاقتراحات المنسدلة:";
-pub const WORK_ALREADY: &str = "هذا العمل موجود بالفعل في بروفايلك.";
-pub const WORK_NOT_IN_LIST: &str = "هذا العمل ليس في بروفايلك. اختر من القائمة المقترحة.";
+pub const WORK_ALREADY: &str = "هذا العمل في بروفايلك أصلًا 😉";
+pub const WORK_NOT_IN_LIST: &str = "هذا العمل ليس في بروفايلك. اختر من الاقتراحات.";
 pub const TEXT_REJECTED: &str = "النص غير مقبول: لا روابط ولا إشارات ولا دعوات ولا كلمات غير لائقة.";
 pub fn custom_saved(name: &str) -> String {
-    format!("تم حفظ التخصيص لـ **{name}** (يظهر في بروفايلك فقط).")
+    format!("حفظتُ تخصيصك لـ **{name}** (يظهر في بروفايلك فقط).")
 }
 pub fn custom_reset(name: &str) -> String {
-    format!("تمت إعادة **{name}** إلى الوضع الافتراضي.")
+    format!("أعدتُ **{name}** كما كانت في الأصل.")
 }
 pub fn custom_image_saved(name: &str, animated: bool) -> String {
     if animated {
-        format!("تم حفظ الصورة المتحركة لـ **{name}**. تظهر متحركة في بطاقة الشخصية وكإطار أول في الشبكة.")
+        format!("حفظتُ الصورة المتحركة لـ **{name}**. تظهر متحركة في بطاقة الشخصية، وكإطار أول في الشبكة.")
     } else {
-        format!("تم حفظ الصورة المخصصة لـ **{name}** (تظهر في بروفايلك فقط).")
+        format!("حفظتُ صورتك المخصصة لـ **{name}** (تظهر في بروفايلك فقط).")
     }
 }
 pub const CUSTOM_IMAGES_OFF: &str =
     "الصور المخصصة غير مفعّلة في هذا السيرفر. يمكن للمشرف تفعيلها من `/settings`.";
-pub const UPLOAD_BANNED: &str = "تم منعك من رفع الصور في هذا السيرفر.";
-pub const IMAGE_REQUIRED: &str = "أرفق صورة في خيار `image`.";
+pub const UPLOAD_BANNED: &str =
+    "مُنعتَ من رفع الصور في هذا السيرفر، تواصل مع المشرفين إن كان هذا خطأً.";
+pub const IMAGE_REQUIRED: &str = "أرفق الصورة في خيار `image` لو سمحت.";
 pub const IMAGE_TOO_LARGE: &str = "الصورة كبيرة جدًا (الحد 3 ميغابايت).";
 pub const IMAGE_INVALID: &str = "ملف الصورة غير صالح. المسموح: PNG وJPG وWebP وGIF.";
 pub const IMAGE_LIMIT: &str = "وصلت إلى الحد الأقصى للصور المخصصة (30). احذف بعضها أولًا.";
-pub const IMAGE_DOWNLOAD_FAILED: &str = "تعذّر تحميل الصورة، حاول مرة أخرى.";
-pub const UPLOAD_SLOW_DOWN: &str = "تمهّل قليلًا قبل رفع صورة جديدة.";
+pub const IMAGE_DOWNLOAD_FAILED: &str = "لم أستطع تحميل الصورة. جرّب مرة أخرى.";
+pub const UPLOAD_SLOW_DOWN: &str = "على مهلك، انتظر قليلًا قبل رفع صورة أخرى.";
 pub const BTN_DELETE_ALL: &str = "احذف كل بياناتي";
 pub const DELETE_CONFIRM: &str = "⚠️ سيتم حذف **كل** بياناتك نهائيًا: البروفايل والأعمال والصور المخصصة ونتائج الألعاب. هل أنت متأكد؟";
-pub const DATA_DELETED: &str = "تم حذف كل بياناتك.";
+pub const DATA_DELETED: &str = "حذفتُ كل بياناتك.";
 pub const PROFILE_PICK_ACTION: &str = "اختر الفئة ثم الإجراء من الاقتراحات المنسدلة.";
 pub const PROFILE_NEEDS_VALUE: &str =
     "اختر القيمة من الاقتراحات في خيار `value` (شخصية أو عمل أو غيرها).";
 pub const PROFILE_NEEDS_TEXT: &str = "اكتب النص في خيار `text`.";
 pub const PROFILE_NEEDS_POSITION: &str = "اكتب رقم المركز في خيار `text` (مثل 1).";
 pub const PRIVACY_UNKNOWN: &str = "قيمة غير معروفة. اختر من الاقتراحات.";
-pub const NO_BIRTHDAYS: &str = "لا توجد شخصيات مشهورة لها عيد ميلاد اليوم.";
+pub const NO_BIRTHDAYS: &str = "لا توجد شخصيات مشهورة يوافق عيد ميلادها اليوم.";
 pub const TOP_CHARACTERS: &str = "أكثر الشخصيات تفضيلًا";
 pub const TOP_WORKS: &str = "أكثر الأعمال تفضيلًا";
 
 // ---- /settings ----
-pub const SETTINGS_SAVED: &str = "تم الحفظ ✅";
+pub const SETTINGS_SAVED: &str = "تم، حفظتُ التغيير ✅";
 // ---- recommend ----
 pub const REC_TITLE: &str = "توصيات لك";
 pub const REC_TITLE_TOGETHER: &str = "توصيات مشتركة لكما";
@@ -219,7 +222,7 @@ pub fn rec_why_together(seed: &str) -> String {
 }
 
 // ---- games ----
-pub const GAMES_DISABLED: &str = "الألعاب معطّلة في هذا السيرفر.";
+pub const GAMES_DISABLED: &str = "الفعاليات معطّلة في هذا السيرفر.";
 pub const GAME_PICK_MODE: &str = "اختر نوع اللعبة من الاقتراحات.";
 pub const VERSUS_PROMPT: &str = "أيهما تفضّل؟";
 pub const VERSUS_RESULTS: &str = "نتائج التصويت حتى الآن:";
@@ -240,7 +243,7 @@ pub fn cooldown_wait(secs: u64) -> String {
 }
 pub const ADMIN_CONFIRM_RESET: &str = "⚠️ هل أنت متأكد؟ اضغط «نعم، احذف كل شيء» للتأكيد.";
 pub const SERVER_ONLY: &str = "هذا الأمر يعمل داخل السيرفرات فقط.";
-pub const NOT_ADMIN: &str = "هذا الأمر للمشرفين فقط (صلاحية إدارة السيرفر).";
+pub const NOT_ADMIN: &str = "هذا الأمر للمشرفين فقط (صلاحية «إدارة السيرفر»).";
 pub const CHANNEL_NOT_TEXT: &str = "اختر قناة نصية من هذا السيرفر.";
 pub fn channel_missing_permissions(channel: u64, missing: &[&str]) -> String {
     format!(
@@ -254,17 +257,17 @@ pub fn notifications_channel_set(channel: u64) -> String {
 pub fn bot_channel_set(channel: u64) -> String {
     format!("✅ أوامر البوت تعمل الآن في <#{channel}> فقط (المشرفون مستثنون). لإلغاء القيد استخدم `/admin` ← القنوات.")
 }
-pub const LANGUAGE_SET: &str = "✅ تم حفظ اللغة: العربية.";
+pub const LANGUAGE_SET: &str = "✅ حفظتُ اللغة: العربية.";
 pub const LANGUAGE_SET_EN: &str = "✅ Language saved. The bot's texts are currently Arabic only.";
 pub const LANGUAGE_UNKNOWN: &str = "اللغة غير معروفة. اختر من القائمة.";
 pub const SETTINGS_UNKNOWN: &str = "إعداد غير معروف. اختر اللغة أو الخصوصية.";
 pub const UPLOAD_ADMINS_ONLY: &str = "رفع الصور المخصصة في هذا السيرفر للمشرفين فقط.";
-pub const BANNER_PRESET_SET: &str = "✅ تم تغيير الغلاف.";
+pub const BANNER_PRESET_SET: &str = "✅ غيّرتُ غلافك 🎨";
 pub const BANNER_RESET: &str = "✅ عاد الغلاف إلى الافتراضي.";
 pub const BANNER_UNKNOWN: &str =
     "اختر تدرجًا من القائمة، أو لونًا مثل #ff8800، أو reset، أو أرفق صورة.";
 pub const PROFILE_RESET_DONE: &str = "✅ أُعيد ضبط البروفايل (الشخصيات والأعمال محفوظة).";
-pub const TITLE_SET: &str = "✅ تم تغيير الاسم المعروض.";
+pub const TITLE_SET: &str = "✅ غيّرتُ اسمك المعروض.";
 pub const BIO_TOO_LONG: &str = "النبذة أطول من 300 حرف.";
 pub const TITLE_TOO_LONG: &str = "الاسم أطول من 40 حرفًا.";
 pub const EDIT_NEEDS_CHARACTER: &str = "اختر شخصية من بروفايلك في خيار «الشخصية».";
@@ -276,17 +279,16 @@ pub const PAGES_NEXT_GROUP: &str = "مجموعة الصفحات التالية �
 pub const SELECT_PAGE_PLACEHOLDER: &str = "انتقل إلى صفحة…";
 pub const F_PROFILE_CHARACTERS: &str = "الشخصيات";
 pub const F_PROFILE_WORKS: &str = "الأعمال";
-pub const F_PROFILE_JOINED: &str = "انضم";
 pub const F_PROFILE_SUGGESTIONS: &str = "الاقتراحات";
 pub const BANNER_PICKER_TITLE: &str = "🎨 اختر غلافًا جاهزًا";
-pub const BANNER_PICKER_HELP: &str = "اختر من القائمة لترى المعاينة ثم اضغط «تطبيق».\nلرفع صورتك أو GIF: `/edit` ← البروفايل ← الغلاف وأرفق الملف (إن سمح السيرفر بالصور المخصصة). للون: اكتب `#ff8800` في القيمة.";
+pub const BANNER_PICKER_HELP: &str = "اختر من القائمة لترى المعاينة ثم اضغط «تطبيق».\nلرفع صورتك أو GIF: `/edit` ← البروفايل ← الغلاف وأرفق الملف (إن سمح السيرفر بالصور المخصصة). المقاس الموصى به **1200×400**، والنسبة بين 2:1 و4:1، وأقل عرض 600 بكسل. للون: اكتب `#ff8800` في القيمة.";
 pub const BANNER_PICKER_PLACEHOLDER: &str = "الأغلفة الجاهزة…";
 pub const BANNER_APPLY: &str = "تطبيق";
 pub const BANNER_RESET_BTN: &str = "إعادة للافتراضي";
 pub const BTN_REMOVE_FROM_PROFILE: &str = "إزالة من بروفايلي";
-pub const CHARACTER_REMOVED: &str = "تمت إزالة الشخصية من بروفايلك.";
+pub const CHARACTER_REMOVED: &str = "أزلتُ الشخصية من بروفايلك.";
 pub const SUGGESTED_BY: &str = "اقترحه";
-pub const SUGGEST_ADDED: &str = "✅ تمت إضافة الاقتراح";
+pub const SUGGEST_ADDED: &str = "✅ أضفتُ اقتراحك";
 pub const SUGGEST_REASON_LONG: &str = "السبب أطول من 300 حرف.";
 pub const SUGGEST_REASON_BAD: &str =
     "اكتب سببًا نصيًا (الروابط والإشارات والكلمات غير المناسبة تُحذف).";
@@ -295,8 +297,8 @@ pub const SUGGEST_NONE: &str =
     "لا توجد اقتراحات في هذا السيرفر بعد. أضف أول اقتراح بـ `/suggest add`.";
 pub const SUGGEST_NONE_MINE: &str = "ليس لديك اقتراحات في هذا السيرفر.";
 pub const SUGGEST_ANOTHER: &str = "اقتراح آخر";
-pub const SUGGEST_DELETED: &str = "🗑 تم حذف الاقتراح.";
-pub const SUGGEST_CANNOT_DELETE: &str = "لا يمكنك حذف هذا الاقتراح.";
+pub const SUGGEST_DELETED: &str = "🗑 حذفتُ الاقتراح.";
+pub const SUGGEST_CANNOT_DELETE: &str = "هذا الاقتراح ليس لك، فلا تستطيع حذفه.";
 pub const SUGGEST_MINE_TITLE: &str = "اقتراحاتي";
 pub const SUGGEST_DELETE_PLACEHOLDER: &str = "اختر اقتراحًا لحذفه…";
 pub const BTN_DELETE: &str = "حذف";
@@ -309,11 +311,12 @@ pub fn suggest_limit(limit: i64) -> String {
 pub const REMINDER_DM: &str = "🔔 تذكير: صدرت حلقة جديدة من عمل طلبتَ التذكير به.";
 pub const BTN_REMIND: &str = "ذكّرني";
 pub const BTN_REMINDER_CANCEL: &str = "إلغاء التذكير";
-pub const REMINDER_SET: &str = "🔔 سأذكّرك عند صدور حلقة جديدة (رسالة خاصة).";
-pub const REMINDER_CANCELLED: &str = "🔕 أُلغي التذكير.";
-pub const REMINDER_FULL: &str = "وصلت إلى الحد الأقصى للتذكيرات (50). احذف بعضها من /settings.";
+pub const REMINDER_SET: &str = "تمام 🔔 سأرسل لك رسالة خاصة عند صدور الجديد.";
+pub const REMINDER_CANCELLED: &str = "🔕 ألغيتُ التذكير.";
+pub const REMINDER_FULL: &str =
+    "وصلتَ إلى الحد الأقصى للتذكيرات (50). احذف بعضها من /settings ثم جرّب مجددًا.";
 pub const REMINDERS_TITLE: &str = "تذكيراتي";
-pub const REMINDERS_NONE: &str = "ليس لديك تذكيرات. استخدم زر «ذكّرني» على بطاقة أنمي.";
+pub const REMINDERS_NONE: &str = "لا توجد تذكيرات عندك. اضغط «ذكّرني» على أي عمل لتضيف واحدًا.";
 pub const REMINDERS_PLACEHOLDER: &str = "اختر تذكيرًا لإلغائه…";
 pub fn current_language(label: &str) -> String {
     format!("اللغة الحالية: **{label}**. اختر قيمة لتغييرها.")
@@ -322,7 +325,7 @@ pub fn current_privacy(label: &str) -> String {
     format!("الخصوصية الحالية: **{label}**. اختر قيمة لتغييرها.")
 }
 pub const BTN_SHOW_WORK: &str = "أظهر العمل";
-pub const SHOW_WORK_UNAVAILABLE: &str = "تعذر عرض العمل الآن.";
+pub const SHOW_WORK_UNAVAILABLE: &str = "لم أستطع عرض هذا العمل الآن. جرّب بعد قليل.";
 pub const SUGGEST_OPEN_PLACEHOLDER: &str = "افتح بطاقة أحد العملين…";
 pub const ARENA_CHARACTER_IMAGE: &str = "🖼 خمّن الشخصية من الصورة";
 pub const ARENA_WORK_COVER: &str = "📚 خمّن العمل من الغلاف";
@@ -348,7 +351,7 @@ pub const ARENA_NOBODY: &str = "لم يُجب أحد بشكل صحيح.";
 pub const ARENA_MANAGE_DENIED: &str = "التخطي والإنهاء لمن بدأ اللعبة أو للمشرفين فقط.";
 pub const ARENA_ALREADY_ANSWERED: &str = "أجبتَ في هذه الجولة بالفعل.";
 pub const ARENA_WRONG: &str = "❌ إجابة خاطئة — انتظر الجولة القادمة.";
-pub const ARENA_CHANNEL_BUSY: &str = "توجد لعبة جارية في هذه القناة. انتظر انتهاءها.";
+pub const ARENA_CHANNEL_BUSY: &str = "هناك فعالية جارية في هذه القناة الآن. انتظر حتى تنتهي.";
 pub fn arena_winner(user: u64) -> String {
     format!("🏆 أسرع إجابة صحيحة: <@{user}>")
 }
@@ -372,8 +375,138 @@ pub fn feed_url_error(code: &str) -> String {
         "Credentials" => "لا يُسمح بكلمة مرور داخل الرابط",
         "Port" => "المنفذ غير مسموح",
         "InternalHost" | "PrivateAddress" => "عنوان داخلي أو خاص غير مسموح",
-        "Unresolvable" => "تعذر الوصول إلى النطاق",
+        "Unresolvable" => "لم أستطع الوصول إلى هذا النطاق",
         _ => "رابط غير صالح",
     };
     format!("❌ {why}.")
+}
+pub const F_STATS: &str = "التقييم والشعبية";
+pub const F_SEASONS: &str = "المواسم";
+pub const F_NETWORK: &str = "القناة";
+pub const F_RELEASE: &str = "تاريخ الإصدار";
+pub const F_RUNTIME: &str = "المدة";
+pub const F_COUNTRY: &str = "البلد";
+pub const F_GENRES: &str = "التصنيفات";
+pub const MINUTES: &str = "دقيقة";
+pub const F_WHERE_TO_WATCH: &str = "أين أشاهد";
+pub const PLAYED_BY: &str = "يؤدي الدور:";
+pub const ACTOR_PHOTO_NOTE: &str = "📷 الصورة للممثل، فـ TMDB لا يوفّر صور الشخصيات.";
+pub const NO_CHARACTERS: &str = "لا توجد شخصيات لعرضها لهذا العمل.";
+pub const NO_CHARACTERS_SOURCE: &str = "هذا المصدر لا يوفّر قائمة شخصيات للأعمال.";
+pub const PICK_CHARACTER_PLACEHOLDER: &str = "اختر شخصية لعرضها";
+pub const REMINDER_UNSUPPORTED: &str = "التذكير غير متاح لهذا النوع من الأعمال.";
+pub const STATUS_CLEARED: &str = "أزلتُ حالتك مع هذا العمل.";
+pub fn status_saved(label: &str) -> String {
+    format!("حفظتُ حالتك: {label}")
+}
+pub const CATEGORY_NEEDS_NAME: &str = "اكتب اسمًا أولًا، أو اختر «عمل عشوائي» أو «شخصية عشوائية».";
+pub const TMDB_UNAVAILABLE: &str = "مصدر الدراما والمسلسلات والأفلام غير مفعّل على هذا البوت.";
+pub const SCHEDULE_TITLE: &str = "جدول الأسبوع";
+pub const SCHEDULE_EMPTY: &str = "لا شيء مجدول في هذا اليوم بهذه الفلاتر.";
+pub const SCHEDULE_SOURCES: &str = "AniList · TMDB";
+pub const SCHEDULE_CATEGORY_PLACEHOLDER: &str = "الفئة";
+pub const SCHEDULE_OPEN_PLACEHOLDER: &str = "افتح عملًا من القائمة";
+pub const SCHEDULE_MINE: &str = "أعمالي فقط";
+pub const SCHEDULE_NO_MINE: &str = "لا توجد أعمال في بروفايلك أو تذكيراتك بعد، فالقائمة فارغة.";
+pub const ARENA_CATEGORY_UNSUPPORTED: &str = "هذا النوع من الفعاليات غير متاح لهذه الفئة، جرّب «خمّن العمل من الغلاف» أو «صح أم خطأ» أو «الأعلى تقييمًا» أو «الترتيب بالسنة» أو «السباق».";
+pub const BANNER_TOO_NARROW: &str = "الصورة ضيقة جدًا: أقل عرض للغلاف 600 بكسل (الموصى به 1200×400).";
+pub const BANNER_BAD_RATIO: &str =
+    "الصورة المتحركة يجب أن تكون نسبتها بين 2:1 و4:1 (الموصى به 1200×400)، فلا أقصّها حتى لا تتشوّه.";
+pub const BANNER_CONFIRM_TITLE: &str = "معاينة الغلاف";
+pub const BANNER_CONFIRM_HELP: &str = "قصصتُ الصورة من المنتصف لتناسب الغلاف (1200×400). هل تعتمدها؟";
+pub const BANNER_CONFIRM_BTN: &str = "اعتمد الغلاف";
+pub const BANNER_CANCELLED: &str = "أُلغي تغيير الغلاف.";
+pub const KIND_SERIES: &str = "مسلسل";
+pub const KIND_MOVIE: &str = "فيلم";
+pub const F_PROFILE_STATUS: &str = "الحالة";
+pub const TOP_EMPTY: &str =
+    "لا توجد بيانات بعد لهذا القسم. أضف أعمالًا أو شخصيات لبروفايلك وسيظهر الترتيب هنا.";
+pub const TOP_CACHE_NOTE: &str = "يتحدّث كل 5 دقائق";
+pub const TOP_SECTION_PLACEHOLDER: &str = "القسم";
+pub const TOP_RANGE_PLACEHOLDER: &str = "المدة";
+pub const TOP_OPEN_PLACEHOLDER: &str = "افتح عنصرًا من القائمة";
+pub const REMINDER_SOON: &str = "🔔 تنبيه من تذكيراتك: عمل تتابعه يصدر قريبًا.";
+pub const REMINDER_OUT: &str = "🔔 تنبيه من تذكيراتك: صدر شيء جديد من عمل تتابعه.";
+pub const CHAPTER_DIGEST_TITLE: &str = "📖 فصول جديدة";
+pub const CHAPTER_DIGEST_MORE: &str = "المزيد";
+pub const BTN_CHAPTER: &str = "فصل";
+pub const CHAPTER_DIGEST_EXPIRED: &str =
+    "انتهت صلاحية هذا الملخص، ستصلك الفصول القادمة في الملخص التالي.";
+
+#[cfg(test)]
+mod tests {
+    /// Constants that are brand names or symbols, not sentences.
+    const NOT_SENTENCES: &[&str] = &[
+        "BTN_ANILIST",
+        "POWERED_BY",
+        "NONE",
+        "COLOR_INVALID",
+        "LANGUAGE_SET_EN",
+    ];
+
+    fn constants() -> Vec<(String, String)> {
+        let src = include_str!("texts.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let mut out = Vec::new();
+        let mut lines = prod.lines().peekable();
+        while let Some(line) = lines.next() {
+            let Some(rest) = line.trim().strip_prefix("pub const ") else {
+                continue;
+            };
+            let Some((name, tail)) = rest.split_once(':') else {
+                continue;
+            };
+            // The value may start on the next line.
+            let mut body = tail.to_string();
+            if !body.contains('"') {
+                if let Some(next) = lines.next() {
+                    body.push_str(next);
+                }
+            }
+            if let (Some(a), Some(b)) = (body.find('"'), body.rfind('"')) {
+                if b > a {
+                    out.push((name.trim().to_string(), body[a + 1..b].to_string()));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_message_is_non_empty_and_arabic() {
+        let all = constants();
+        assert!(all.len() > 200, "the scan found only {} strings", all.len());
+        let arabic = |s: &str| s.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c));
+        for (name, text) in &all {
+            if NOT_SENTENCES.contains(&name.as_str()) || name.starts_with("F_") && !arabic(text) {
+                continue;
+            }
+            assert!(!text.trim().is_empty(), "{name} is empty");
+            // Pure ASCII values are ids or labels such as "TV"; sentences must have Arabic.
+            let has_letters = text.chars().any(|c| c.is_alphabetic());
+            assert!(
+                !has_letters || arabic(text) || text.len() <= 24,
+                "{name} has no Arabic: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stiff_passive_openers_that_were_rewritten_stay_rewritten() {
+        let all = constants();
+        for (name, text) in &all {
+            for stiff in [
+                "تمت إضافة",
+                "تمت إزالة",
+                "تم نقل",
+                "حدث خطأ غير متوقع",
+                "لم أجد نتائج مطابقة",
+            ] {
+                assert!(
+                    !text.starts_with(stiff),
+                    "{name} went back to the stiff wording: {text}"
+                );
+            }
+        }
+    }
 }

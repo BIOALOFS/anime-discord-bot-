@@ -3,7 +3,7 @@
 //! the rounds, and a scoreboard (plus a weekly leaderboard per server) is kept. Only the starter or an admin can skip
 //! or end a game. Everything comes from the safe AniList wrapper (no adult works or characters).
 
-use super::{buttons, game::masked_clue, policy, say_ephemeral};
+use super::{buttons, event::masked_clue, policy, say_ephemeral};
 use crate::{
     anilist::{models::Character, models::Media, ContentPolicy, MediaKind, SafeAniList},
     db::game as gdb,
@@ -180,6 +180,8 @@ pub struct Round {
     pub hints: Vec<Hint>,
     /// Shown after the round (the right answer with a link when there is one).
     pub reveal: String,
+    /// What the answer is, so the universal button ("أظهر العمل" / "أظهر الشخصيات") can be offered after the reveal.
+    pub item: Option<(crate::components::ItemKind, String)>,
 }
 
 /// Seconds after the round start at which hint `n` (0-based) appears: evenly spread over the first 80% of the time.
@@ -205,7 +207,7 @@ pub fn order_options(correct: [usize; 3]) -> (Vec<String>, usize) {
         others.swap(i, rand::random_range(0..=i));
     }
     others.truncate(3);
-    let (all, at) = super::game::shuffle_options(correct, others);
+    let (all, at) = super::event::shuffle_options(correct, others);
     let label = |p: &[usize; 3]| {
         p.iter()
             .map(|i| letters[*i])
@@ -249,6 +251,42 @@ fn pick<T: Clone>(v: &[T]) -> Option<T> {
 
 const WORK_KINDS: [MediaKind; 3] = [MediaKind::Anime, MediaKind::Manga, MediaKind::Manhwa];
 
+/// Where the rounds' works come from: AniList kinds, or a TMDB category (dramas, series, films).
+#[derive(Clone)]
+pub enum Pool {
+    Ani(&'static [MediaKind]),
+    Tmdb(Box<TmdbPool>),
+}
+
+#[derive(Clone)]
+pub struct TmdbPool {
+    pub tmdb: Arc<crate::tmdb::Tmdb>,
+    pub cat: crate::tmdb::find::Cat,
+    pub overrides: HashMap<String, crate::tmdb::model::Target>,
+}
+
+impl Pool {
+    pub fn default_pool() -> Self {
+        Self::Ani(&WORK_KINDS)
+    }
+
+    /// Kinds for the AniList-based work rounds.
+    fn kinds(&self) -> &'static [MediaKind] {
+        match self {
+            Self::Ani(k) => k,
+            Self::Tmdb(_) => &WORK_KINDS,
+        }
+    }
+
+    /// TMDB has posters, years and ratings but no character pictures or descriptions.
+    pub fn supports(&self, mode: Mode) -> bool {
+        match self {
+            Self::Ani(_) => true,
+            Self::Tmdb(_) => !matches!(mode, Mode::CharacterImage | Mode::CharacterHints),
+        }
+    }
+}
+
 async fn media_set(
     api: &SafeAniList,
     policy: ContentPolicy,
@@ -271,7 +309,8 @@ async fn make_character_image(
         .iter()
         .map(|c| c.display_name().to_string())
         .collect();
-    let (options, correct) = super::game::shuffle_options(answer.display_name().to_string(), names);
+    let (options, correct) =
+        super::event::shuffle_options(answer.display_name().to_string(), names);
     let hints = (0..d.start_level()).rev().map(Hint::Picture).collect();
     Some(Round {
         title: i18n::ARENA_CHARACTER_IMAGE.into(),
@@ -282,7 +321,24 @@ async fn make_character_image(
         correct,
         hints,
         reveal: reveal_character(&answer),
+        item: character_item(&answer),
     })
+}
+
+/// The character button of a round: shown after the reveal, pointing at the character's first work.
+fn character_item(c: &Character) -> Option<(crate::components::ItemKind, String)> {
+    let id = c.media.as_ref()?.nodes.first()?.id?;
+    Some((
+        crate::components::ItemKind::Character,
+        format!("anilist:{id}"),
+    ))
+}
+
+fn work_item(m: &Media) -> Option<(crate::components::ItemKind, String)> {
+    Some((
+        crate::components::ItemKind::Work,
+        format!("anilist:{}", m.id),
+    ))
 }
 
 fn reveal_character(c: &Character) -> String {
@@ -292,11 +348,16 @@ fn reveal_character(c: &Character) -> String {
     }
 }
 
-async fn make_work_cover(api: &SafeAniList, policy: ContentPolicy, d: Difficulty) -> Option<Round> {
-    let (answer, decoys) = media_set(api, policy, &WORK_KINDS).await?;
+async fn make_work_cover(
+    api: &SafeAniList,
+    policy: ContentPolicy,
+    d: Difficulty,
+    pool: &Pool,
+) -> Option<Round> {
+    let (answer, decoys) = media_set(api, policy, pool.kinds()).await?;
     let url = answer.cover()?.to_string();
     let names: Vec<String> = decoys.iter().map(|m| m.title.main().to_string()).collect();
-    let (options, correct) = super::game::shuffle_options(answer.title.main().to_string(), names);
+    let (options, correct) = super::event::shuffle_options(answer.title.main().to_string(), names);
     let mut hints: Vec<Hint> = (0..d.start_level()).rev().map(Hint::Picture).collect();
     hints.push(Hint::Text(masked_clue(&answer)));
     Some(Round {
@@ -308,6 +369,7 @@ async fn make_work_cover(api: &SafeAniList, policy: ContentPolicy, d: Difficulty
         correct,
         hints,
         reveal: format!("✅ **{}**", answer.title.main()),
+        item: work_item(&answer),
     })
 }
 
@@ -321,7 +383,7 @@ async fn make_character_hints(
         .description
         .as_deref()
         .and_then(|t| crate::ui::text::clean_description_max(t, None, 600))?;
-    let masked = super::game::mask_title(&desc, &[answer.display_name()]);
+    let masked = super::event::mask_title(&desc, &[answer.display_name()]);
     let chars: Vec<char> = masked.chars().collect();
     if chars.len() < 40 {
         return None;
@@ -335,7 +397,8 @@ async fn make_character_hints(
         .iter()
         .map(|c| c.display_name().to_string())
         .collect();
-    let (options, correct) = super::game::shuffle_options(answer.display_name().to_string(), names);
+    let (options, correct) =
+        super::event::shuffle_options(answer.display_name().to_string(), names);
     Some(Round {
         title: i18n::ARENA_CHARACTER_HINTS.into(),
         prompt: format!("{}\n{}", i18n::ARENA_WHO_IS_THIS, cut(60)),
@@ -345,6 +408,7 @@ async fn make_character_hints(
         correct,
         hints,
         reveal: reveal_character(&answer),
+        item: character_item(&answer),
     })
 }
 
@@ -352,8 +416,9 @@ async fn make_true_false(
     api: &SafeAniList,
     policy: ContentPolicy,
     _d: Difficulty,
+    pool: &Pool,
 ) -> Option<Round> {
-    let (m, _) = media_set(api, policy, &[MediaKind::Anime]).await?;
+    let (m, _) = media_set(api, policy, &pool.kinds()[..1]).await?;
     for _ in 0..6 {
         let kind = rand::random_range(0..3u8);
         let lie = rand::random::<bool>();
@@ -366,6 +431,7 @@ async fn make_true_false(
                 options: vec![i18n::ARENA_TRUE.into(), i18n::ARENA_FALSE.into()],
                 correct: if truth { 0 } else { 1 },
                 hints: Vec::new(),
+                item: work_item(&m),
                 reveal: format!(
                     "{} **{}**",
                     i18n::ARENA_ANSWER_WAS,
@@ -385,8 +451,9 @@ async fn make_higher_lower(
     api: &SafeAniList,
     policy: ContentPolicy,
     _d: Difficulty,
+    pool: &Pool,
 ) -> Option<Round> {
-    let (a, mut decoys) = media_set(api, policy, &WORK_KINDS).await?;
+    let (a, mut decoys) = media_set(api, policy, pool.kinds()).await?;
     let b = decoys.pop()?;
     let by_score = rand::random::<bool>();
     let metric = |m: &Media| {
@@ -401,7 +468,7 @@ async fn make_higher_lower(
         return None;
     }
     let (options, correct) =
-        super::game::shuffle_options(a.title.main().to_string(), vec![b.title.main().to_string()]);
+        super::event::shuffle_options(a.title.main().to_string(), vec![b.title.main().to_string()]);
     // `shuffle_options` put `a` at `correct`; the right answer is the one with the higher number.
     let right = if x > y { correct } else { 1 - correct };
     let what = if by_score {
@@ -417,6 +484,7 @@ async fn make_higher_lower(
         options: options.clone(),
         correct: right,
         hints: Vec::new(),
+        item: work_item(if x > y { &a } else { &b }),
         reveal: format!(
             "✅ **{}** ({}) · {} ({})",
             options[right],
@@ -431,8 +499,9 @@ async fn make_order_years(
     api: &SafeAniList,
     policy: ContentPolicy,
     _d: Difficulty,
+    pool: &Pool,
 ) -> Option<Round> {
-    let (a, mut decoys) = media_set(api, policy, &[MediaKind::Anime]).await?;
+    let (a, mut decoys) = media_set(api, policy, &pool.kinds()[..1]).await?;
     let (b, c) = (decoys.pop()?, decoys.pop()?);
     let mut works = [a, b, c];
     let years: Vec<i32> = works.iter().filter_map(Media::year).collect();
@@ -473,6 +542,7 @@ async fn make_order_years(
         options,
         correct,
         hints: Vec::new(),
+        item: None,
         reveal: format!("✅ {reveal}"),
     })
 }
@@ -483,7 +553,11 @@ pub async fn make_round(
     policy: ContentPolicy,
     mode: Mode,
     d: Difficulty,
+    pool: &Pool,
 ) -> Option<Round> {
+    if let Pool::Tmdb(t) = pool {
+        return super::arena_tmdb::make_round(t, mode, d).await;
+    }
     for _ in 0..4 {
         let chosen = if mode == Mode::Race {
             [
@@ -499,11 +573,11 @@ pub async fn make_round(
         };
         let round = match chosen {
             Mode::CharacterImage => make_character_image(api, policy, d).await,
-            Mode::WorkCover => make_work_cover(api, policy, d).await,
+            Mode::WorkCover => make_work_cover(api, policy, d, pool).await,
             Mode::CharacterHints => make_character_hints(api, policy, d).await,
-            Mode::TrueFalse => make_true_false(api, policy, d).await,
-            Mode::HigherLower => make_higher_lower(api, policy, d).await,
-            Mode::OrderYears => make_order_years(api, policy, d).await,
+            Mode::TrueFalse => make_true_false(api, policy, d, pool).await,
+            Mode::HigherLower => make_higher_lower(api, policy, d, pool).await,
+            Mode::OrderYears => make_order_years(api, policy, d, pool).await,
             Mode::Race => None,
         };
         if round.is_some() {
@@ -545,6 +619,7 @@ enum Phase {
 
 pub struct Arena {
     api: Arc<SafeAniList>,
+    source: Pool,
     renderer: Arc<Renderer>,
     policy: ContentPolicy,
     pool: SqlitePool,
@@ -734,7 +809,15 @@ impl View for Arena {
                     self.finish().await;
                     return Outcome::Close;
                 }
-                match make_round(&self.api, self.policy, self.mode, self.difficulty).await {
+                match make_round(
+                    &self.api,
+                    self.policy,
+                    self.mode,
+                    self.difficulty,
+                    &self.source,
+                )
+                .await
+                {
                     Some(r) => {
                         self.begin_round(r).await;
                         Outcome::Update
@@ -863,6 +946,13 @@ impl View for Arena {
             embed.build(),
             vec![self.answer_row(enabled), self.manage_row(enabled)],
         );
+        // The universal buttons appear only once the answer is out (rule 5).
+        if let (Phase::Revealing { .. }, Some((kind, key))) = (&self.phase, &self.round.item) {
+            let extra = crate::components::standard_actions(*kind, Some(key));
+            if !extra.is_empty() {
+                page.components.insert(1, buttons(extra));
+            }
+        }
         if matches!(self.phase, Phase::Finished) {
             page.components.clear();
         }
@@ -871,16 +961,25 @@ impl View for Arena {
 }
 
 /// Start a collective game in this channel.
-pub async fn start(ctx: Context<'_>, mode: Mode, difficulty: Difficulty) -> Result<(), Error> {
+pub async fn start(
+    ctx: Context<'_>,
+    mode: Mode,
+    difficulty: Difficulty,
+    source: Pool,
+) -> Result<(), Error> {
+    if !source.supports(mode) {
+        return say_ephemeral(ctx, i18n::ARENA_CATEGORY_UNSUPPORTED).await;
+    }
     let Some(guard) = try_claim(ctx.channel_id().get()) else {
         return say_ephemeral(ctx, i18n::ARENA_CHANNEL_BUSY).await;
     };
     let (api, pol) = (ctx.data().anilist.clone(), policy(ctx));
-    let Some(round) = make_round(&api, pol, mode, difficulty).await else {
+    let Some(round) = make_round(&api, pol, mode, difficulty, &source).await else {
         return say_ephemeral(ctx, i18n::RANDOM_FAILED).await;
     };
     let mut arena = Arena {
         api,
+        source,
         renderer: ctx.data().renderer.clone(),
         policy: pol,
         pool: ctx.data().db.clone(),
@@ -1030,8 +1129,10 @@ mod tests {
             correct: 1,
             hints: Vec::new(),
             reveal: "r".into(),
+            item: None,
         };
         Arena {
+            source: Pool::default_pool(),
             api: Arc::new(SafeAniList::with_fixture(|_, _| {
                 Err(crate::anilist::AniError::NotFound)
             })),
