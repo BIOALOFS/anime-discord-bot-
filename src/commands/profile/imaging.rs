@@ -4,7 +4,7 @@
 use image::{
     codecs::gif::{GifDecoder, GifEncoder, Repeat},
     imageops::FilterType,
-    AnimationDecoder, Frame, ImageReader, Limits, RgbaImage,
+    AnimationDecoder, Frame, ImageReader, Limits,
 };
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
@@ -177,83 +177,103 @@ fn process_gif(input: &[u8]) -> Result<Processed, ImageError> {
 
 // ---- banners ---------------------------------------------------------------------------------------
 
-/// A banner must be at least this wide, and its width/height must be between 2:1 and 4:1 (1200x400 is the sweet spot).
-pub const BANNER_MIN_WIDTH: u32 = 600;
-pub const BANNER_W: u32 = 1200;
-pub const BANNER_H: u32 = 400;
+/// A banner is accepted as it is: any shape, any size. Only technical protections remain.
+pub const BANNER_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// A decompression-bomb guard: a picture with more pixels than this is refused before it is decoded.
+pub const BANNER_MAX_PIXELS: u64 = 40_000_000;
+/// Frames x pixels an animated banner may add up to (it is decoded once to prove it is a real GIF).
+const BANNER_MAX_ANIMATION_PIXELS: u64 = 400_000_000;
+const BANNER_MAX_FRAMES: usize = 300;
+/// Static banners are re-encoded (this strips metadata); a picture longer than this is scaled down, never cropped,
+/// because Discord scales it on display anyway and the file has to fit one message.
+const BANNER_MAX_SIDE: u32 = 1920;
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum BannerError {
-    TooNarrow,
-    /// Only animated or static GIFs are refused for their ratio (static pictures are cropped instead).
-    BadRatio,
-    Image(ImageError),
-}
-
-/// Is `w:h` between 2:1 and 4:1?
-pub fn banner_ratio_ok(w: u32, h: u32) -> bool {
-    h > 0 && (2 * h..=4 * h).contains(&w)
-}
-
-/// Centered crop to 3:1, then at most 1200x400 (never enlarged).
-pub fn crop_banner(img: &RgbaImage) -> RgbaImage {
-    let (w, h) = img.dimensions();
-    // 3:1 inside the picture.
-    let (cw, ch) = if w >= 3 * h { (3 * h, h) } else { (w, w / 3) };
-    let (cw, ch) = (cw.max(1), ch.max(1));
-    let (x, y) = ((w - cw) / 2, (h - ch) / 2);
-    let cropped = image::imageops::crop_imm(img, x, y, cw, ch).to_image();
-    if cw > BANNER_W {
-        image::imageops::resize(&cropped, BANNER_W, BANNER_H, FilterType::Triangle)
-    } else {
-        cropped
+/// Validate a banner. A GIF keeps its bytes and its animation; a static picture is decoded and re-encoded as PNG at
+/// its own proportions. Nothing is cropped and no shape is refused.
+pub fn process_banner(input: &[u8]) -> Result<Processed, ImageError> {
+    if input.len() > BANNER_MAX_BYTES {
+        return Err(ImageError::TooLarge);
+    }
+    match sniff(input).ok_or(ImageError::UnknownFormat)? {
+        Format::Gif => banner_gif(input),
+        other => banner_static(input, other),
     }
 }
 
-/// Validate and prepare a banner: static pictures are center-cropped (the caller shows a preview), GIFs must already
-/// have a fitting ratio and are kept whole.
-pub fn process_banner(input: &[u8]) -> Result<Processed, BannerError> {
-    if input.len() > MAX_BYTES {
-        return Err(BannerError::Image(ImageError::TooLarge));
+fn banner_gif(input: &[u8]) -> Result<Processed, ImageError> {
+    let decoder = GifDecoder::new(Cursor::new(input)).map_err(|_| ImageError::Corrupt)?;
+    let (w, h) = image::ImageDecoder::dimensions(&decoder);
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > BANNER_MAX_PIXELS {
+        return Err(ImageError::TooBig);
     }
-    let format = sniff(input).ok_or(BannerError::Image(ImageError::UnknownFormat))?;
-    if format == Format::Gif {
-        let decoder = GifDecoder::new(Cursor::new(input))
-            .map_err(|_| BannerError::Image(ImageError::Corrupt))?;
-        let (w, h) = image::ImageDecoder::dimensions(&decoder);
-        if w < BANNER_MIN_WIDTH {
-            return Err(BannerError::TooNarrow);
+    let mut frames = 0usize;
+    for frame in decoder.into_frames() {
+        frame.map_err(|_| ImageError::Corrupt)?;
+        frames += 1;
+        if frames > BANNER_MAX_FRAMES
+            || frames as u64 * u64::from(w) * u64::from(h) > BANNER_MAX_ANIMATION_PIXELS
+        {
+            return Err(ImageError::TooBig);
         }
-        if !banner_ratio_ok(w, h) {
-            return Err(BannerError::BadRatio);
-        }
-        return process_gif(input).map_err(BannerError::Image);
     }
+    if frames == 0 {
+        return Err(ImageError::Corrupt);
+    }
+    Ok(Processed {
+        hash: hash_of(input),
+        bytes: input.to_vec(),
+        mime: "image/gif",
+        width: w,
+        height: h,
+        animated: frames > 1,
+    })
+}
+
+fn banner_static(input: &[u8], format: Format) -> Result<Processed, ImageError> {
     let fmt = match format {
         Format::Png => image::ImageFormat::Png,
         Format::Jpeg => image::ImageFormat::Jpeg,
         _ => image::ImageFormat::WebP,
     };
-    let mut reader = ImageReader::with_format(Cursor::new(input), fmt);
-    reader.limits(limits());
-    let img = reader
-        .decode()
-        .map_err(|_| BannerError::Image(ImageError::Corrupt))?
-        .to_rgba8();
-    if img.width() < BANNER_MIN_WIDTH {
-        return Err(BannerError::TooNarrow);
+    let reader = || {
+        let mut r = ImageReader::with_format(Cursor::new(input), fmt);
+        r.limits(limits());
+        r
+    };
+    let (w, h) = reader()
+        .into_dimensions()
+        .map_err(|_| ImageError::Corrupt)?;
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > BANNER_MAX_PIXELS {
+        return Err(ImageError::TooBig);
     }
-    let out_img = crop_banner(&img);
+    let img = reader()
+        .decode()
+        .map_err(|_| ImageError::Corrupt)?
+        .to_rgba8();
+    let long = img.width().max(img.height());
+    let img = if long > BANNER_MAX_SIDE {
+        let f = BANNER_MAX_SIDE as f32 / long as f32;
+        image::imageops::resize(
+            &img,
+            ((img.width() as f32 * f).round() as u32).max(1),
+            ((img.height() as f32 * f).round() as u32).max(1),
+            FilterType::Triangle,
+        )
+    } else {
+        img
+    };
     let mut out = Vec::new();
-    out_img
-        .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
-        .map_err(|_| BannerError::Image(ImageError::Corrupt))?;
+    img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|_| ImageError::Corrupt)?;
+    if out.len() > BANNER_MAX_BYTES {
+        return Err(ImageError::TooLarge);
+    }
     Ok(Processed {
         hash: hash_of(&out),
         bytes: out,
         mime: "image/png",
-        width: out_img.width(),
-        height: out_img.height(),
+        width: img.width(),
+        height: img.height(),
         animated: false,
     })
 }
@@ -263,71 +283,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn banner_ratio_is_between_two_to_one_and_four_to_one() {
-        assert!(
-            banner_ratio_ok(1200, 400) && banner_ratio_ok(800, 400) && banner_ratio_ok(1600, 400)
-        );
-        assert!(
-            !banner_ratio_ok(1000, 600) && !banner_ratio_ok(2000, 400) && !banner_ratio_ok(5, 0)
-        );
-    }
-
-    #[test]
-    fn a_static_banner_is_centered_cropped_to_three_to_one_and_capped_at_1200_by_400() {
-        let tall = RgbaImage::from_pixel(900, 900, Rgba([1, 2, 3, 255]));
-        assert_eq!(crop_banner(&tall).dimensions(), (900, 300));
-        let wide = RgbaImage::from_pixel(3000, 500, Rgba([1, 2, 3, 255]));
-        assert_eq!(
-            crop_banner(&wide).dimensions(),
-            (1200, 400),
-            "a big crop is scaled down to the standard size"
-        );
-        let exact = RgbaImage::from_pixel(1200, 400, Rgba([1, 2, 3, 255]));
-        assert_eq!(crop_banner(&exact).dimensions(), (1200, 400));
-        let small = RgbaImage::from_pixel(600, 300, Rgba([1, 2, 3, 255]));
-        assert_eq!(
-            crop_banner(&small).dimensions(),
-            (600, 200),
-            "never enlarged"
-        );
-    }
-
-    #[test]
-    fn the_crop_keeps_the_middle_of_the_picture() {
-        let mut img = RgbaImage::from_pixel(600, 600, Rgba([0, 0, 255, 255]));
-        for y in 200..400 {
-            for x in 0..600 {
-                img.put_pixel(x, y, Rgba([255, 0, 0, 255]));
-            }
+    fn any_shape_and_size_is_accepted_without_cropping() {
+        for (w, h) in [(500, 200), (1000, 700), (700, 1400), (1900, 500), (1, 1)] {
+            let out = process_banner(&png_bytes(w, h)).expect("accepted");
+            assert!(!out.animated && out.mime == "image/png");
+            assert_eq!(
+                (out.width, out.height),
+                (w, h),
+                "{w}x{h} keeps its own proportions and size"
+            );
         }
-        let c = crop_banner(&img);
-        assert_eq!(c.dimensions(), (600, 200));
-        assert!(
-            c.pixels().all(|p| p[0] == 255),
-            "exactly the red middle band remains"
-        );
     }
 
     #[test]
-    fn narrow_pictures_and_badly_shaped_gifs_are_refused_with_their_own_reasons() {
-        let tiny = png_bytes(500, 200);
-        assert_eq!(process_banner(&tiny).err(), Some(BannerError::TooNarrow));
-        let ok = process_banner(&png_bytes(1000, 700)).expect("any shape is cropped");
-        assert_eq!((ok.width, ok.height), (1000, 333));
-        assert_eq!(
-            process_banner(&gif_bytes(1, 700, 700)).err(),
-            Some(BannerError::BadRatio)
-        );
-        assert_eq!(
-            process_banner(&gif_bytes(1, 500, 200)).err(),
-            Some(BannerError::TooNarrow)
-        );
-        let g = process_banner(&gif_bytes(2, 800, 300)).expect("a fitting GIF is kept whole");
-        assert!(g.animated && g.mime == "image/gif");
+    fn a_huge_still_is_scaled_down_never_cropped() {
+        let out = process_banner(&png_bytes(3840, 1080)).expect("accepted");
+        assert_eq!(out.width, BANNER_MAX_SIDE);
+        assert_eq!(out.height, 540, "the ratio is kept");
+    }
+
+    #[test]
+    fn an_animated_gif_is_accepted_whole_whatever_its_shape() {
+        for (w, h) in [(800, 300), (700, 700), (200, 900)] {
+            let bytes = gif_bytes(3, w, h);
+            let g = process_banner(&bytes).expect("accepted");
+            assert!(g.animated && g.mime == "image/gif");
+            assert_eq!(g.bytes, bytes, "the animation is stored untouched");
+            assert_eq!((g.width, g.height), (w, h));
+        }
+    }
+
+    #[test]
+    fn a_wrong_type_a_corrupt_file_and_an_oversized_file_are_refused() {
         assert_eq!(
             process_banner(b"<svg/>").err(),
-            Some(BannerError::Image(ImageError::UnknownFormat))
+            Some(ImageError::UnknownFormat)
         );
+        let mut broken = png_bytes(50, 50);
+        broken.truncate(40);
+        assert_eq!(process_banner(&broken).err(), Some(ImageError::Corrupt));
+        assert_eq!(
+            process_banner(&vec![0u8; BANNER_MAX_BYTES + 1]).err(),
+            Some(ImageError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn the_pixel_guard_refuses_a_decompression_bomb_before_decoding_it() {
+        // 7000 x 7000 = 49M pixels of one colour: tiny on disk, huge in memory.
+        let bomb = png_bytes(7000, 7000);
+        assert!(bomb.len() < BANNER_MAX_BYTES);
+        assert_eq!(process_banner(&bomb).err(), Some(ImageError::TooBig));
     }
 
     fn png_bytes(w: u32, h: u32) -> Vec<u8> {
