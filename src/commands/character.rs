@@ -708,7 +708,7 @@ impl CharacterView {
 fn source_of(key: Option<&str>) -> CharacterSource {
     match key.map(str::trim) {
         Some("anime") => CharacterSource::AnimeManga,
-        Some("games") => CharacterSource::Games,
+        Some("games" | "games-only") => CharacterSource::Games,
         _ => CharacterSource::All,
     }
 }
@@ -816,6 +816,13 @@ pub(crate) async fn character_suggestions(
     let providers = data.providers.clone();
     let use_games = source != CharacterSource::AnimeManga && games_on && providers.games_enabled();
     let use_ani = source != CharacterSource::Games;
+    let wikis = data.wikis.clone();
+    let wiki_names: std::collections::HashMap<i64, String> = wikis
+        .sources()
+        .await
+        .iter()
+        .map(|w| (w.id, w.name.clone()))
+        .collect();
     // The options that change the answer are part of the cache scope.
     let scope = format!("{source:?}|{mature}");
     let items = data
@@ -870,6 +877,41 @@ pub(crate) async fn character_suggestions(
                         .take(3)
                         .map(|g| (i18n::roster_of_game(&g.title), format!("roster:{}", g.id))),
                 );
+                // The owner's wikis, from the local index only. The same character (same name and same game) that a main
+                // source already listed is not listed again.
+                if source != CharacterSource::AnimeManga && text.chars().count() >= 2 {
+                    let mut known: Vec<(String, Option<String>)> = ani
+                        .iter()
+                        .map(|c| {
+                            (
+                                c.display_name().to_string(),
+                                c.main_work().map(str::to_string),
+                            )
+                        })
+                        .collect();
+                    known.extend(prov.0.iter().map(|w| (w.title.clone(), w.subtitle.clone())));
+                    for pg in wikis
+                        .suggest(&text, Some(crate::wiki::Kind::Character), None, 8)
+                        .await
+                    {
+                        if known.iter().any(|(n, g)| {
+                            crate::wiki::same_identity(
+                                n,
+                                g.as_deref(),
+                                &pg.title,
+                                pg.parent_title.as_deref(),
+                            )
+                        }) {
+                            continue;
+                        }
+                        let wiki = wiki_names.get(&pg.wiki_id).cloned().unwrap_or_default();
+                        let label = match &pg.parent_title {
+                            Some(g) => format!("{} — {g} ({wiki})", pg.title),
+                            None => format!("{} ({wiki})", pg.title),
+                        };
+                        out.push((label, pg.key()));
+                    }
+                }
                 out
             },
         )
@@ -888,6 +930,8 @@ pub async fn search_character(
     let api = ctx.data().anilist.clone();
     let providers = ctx.data().providers.clone();
     let policy = policy(ctx);
+    // "games-only" (a provider was chosen with `source`) keeps the wikis out of the fallback.
+    let wikis_allowed = source.as_deref() != Some("games-only");
     let source = source_of(source.as_deref());
     let (games_on, mature) = super::fallback::game_flags(ctx).await;
     let use_games = source != CharacterSource::AnimeManga && games_on && providers.games_enabled();
@@ -910,6 +954,11 @@ pub async fn search_character(
             return say_ephemeral(ctx, game_notice(games_on, &providers)).await;
         }
         let msg = crate::global::roster_msg(ctx.data(), game.trim(), 0, mature).await;
+        return crate::global::reply(ctx, msg).await;
+    }
+    // A page of a wiki picked from the suggestions.
+    if let Some((wiki, page)) = crate::wiki::parse_key(name.trim()) {
+        let msg = crate::wiki::msgs::page_msg(&ctx.data().wikis, wiki, page).await;
         return crate::global::reply(ctx, msg).await;
     }
     if name.starts_with("igdb:c") || name.starts_with("vndb:c") {
@@ -958,6 +1007,20 @@ pub async fn search_character(
     if ani.is_empty() && prov.is_empty() {
         if source == CharacterSource::Games && !use_games {
             return say_ephemeral(ctx, game_notice(games_on, &providers)).await;
+        }
+        // The owner's wikis come in when the main sources have nothing: shown directly, no hint, no confirmation.
+        if wikis_allowed
+            && source != CharacterSource::AnimeManga
+            && matches!(filter, WorkFilter::None)
+        {
+            let found = ctx
+                .data()
+                .wikis
+                .search(query, Some(crate::wiki::Kind::Character), None)
+                .await;
+            if let Some(msg) = crate::wiki::msgs::show(&ctx.data().wikis, found, query).await {
+                return crate::global::reply(ctx, msg).await;
+            }
         }
         // No character has that name: the member may have typed a game ("Silent Hill"). Search the games and show the
         // roster of the best match (never when every provider failed: that is "unavailable", not "no such game").

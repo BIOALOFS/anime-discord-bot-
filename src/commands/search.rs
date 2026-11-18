@@ -39,6 +39,8 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
         ty,
         mature,
         games_on,
+        // Autocomplete may not wait for a wiki: it reads the local index only.
+        live_wikis: false,
     };
     let src = Sources::of(ctx.data());
     let overrides = overrides(ctx).await;

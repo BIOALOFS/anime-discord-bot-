@@ -89,15 +89,95 @@ pub enum Type {
     RandomCharacter,
 }
 
-/// The game sources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, poise::ChoiceParameter)]
-pub enum GameSource {
-    #[name = "IGDB"]
-    #[name_localized("ar", "ألعاب (IGDB)")]
+/// What the `source` option of `/game` asks for: nothing (every source, the owner's wikis included), one provider,
+/// every wiki (and nothing else) or a single wiki.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceChoice {
+    Default,
     Igdb,
-    #[name = "VNDB"]
-    #[name_localized("ar", "روايات بصرية (VNDB)")]
     Vndb,
+    AllWikis,
+    Wiki(i64),
+}
+
+pub const SOURCE_IGDB: (&str, &str) = ("ألعاب (IGDB)", "IGDB");
+pub const SOURCE_VNDB: (&str, &str) = ("روايات بصرية (VNDB)", "VNDB");
+pub const SOURCE_ALL_WIKIS: (&str, &str) = ("كل الويكيات", "wikis");
+
+impl SourceChoice {
+    /// What the member picked from the suggestions or typed: a value (`IGDB`, `wikis`, `wiki:3`) or its label.
+    pub fn parse(input: Option<&str>, wikis: &[crate::wiki::Source]) -> Self {
+        let Some(t) = input.map(str::trim).filter(|t| !t.is_empty()) else {
+            return Self::Default;
+        };
+        let same = |a: &str| a.eq_ignore_ascii_case(t);
+        if same(SOURCE_IGDB.1) || same(SOURCE_IGDB.0) {
+            return Self::Igdb;
+        }
+        if same(SOURCE_VNDB.1) || same(SOURCE_VNDB.0) {
+            return Self::Vndb;
+        }
+        if same(SOURCE_ALL_WIKIS.1) || same(SOURCE_ALL_WIKIS.0) {
+            return Self::AllWikis;
+        }
+        let by_id = t.strip_prefix("wiki:").and_then(|n| n.parse::<i64>().ok());
+        wikis
+            .iter()
+            .find(|w| Some(w.id) == by_id || same(&w.name))
+            .map_or(Self::Default, |w| Self::Wiki(w.id))
+    }
+
+    pub fn wikis_only(self) -> bool {
+        matches!(self, Self::AllWikis | Self::Wiki(_))
+    }
+
+    /// Do the main providers take part?
+    pub fn providers(self) -> bool {
+        !self.wikis_only()
+    }
+
+    /// Do the wikis take part (every wiki, or the one chosen)?
+    pub fn wikis(self) -> bool {
+        matches!(self, Self::Default | Self::AllWikis | Self::Wiki(_))
+    }
+
+    pub fn only_wiki(self) -> Option<i64> {
+        match self {
+            Self::Wiki(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The provider key `search_games_found` takes.
+    pub fn provider(self) -> Option<&'static str> {
+        match self {
+            Self::Igdb => Some("igdb"),
+            Self::Vndb => Some("vndb"),
+            _ => None,
+        }
+    }
+}
+
+/// The options of the `source` menu: the two providers, "كل الويكيات" and one entry per wiki, within Discord's 25
+/// (further wikis are still reachable through "كل الويكيات"). `(label, value)`.
+pub fn source_options(wikis: &[crate::wiki::Source]) -> Vec<(String, String)> {
+    let mut out = vec![
+        (SOURCE_IGDB.0.to_string(), SOURCE_IGDB.1.to_string()),
+        (SOURCE_VNDB.0.to_string(), SOURCE_VNDB.1.to_string()),
+    ];
+    if !wikis.is_empty() {
+        out.push((
+            SOURCE_ALL_WIKIS.0.to_string(),
+            SOURCE_ALL_WIKIS.1.to_string(),
+        ));
+    }
+    out.extend(
+        wikis
+            .iter()
+            .take(22)
+            .map(|w| (w.name.clone(), format!("wiki:{}", w.id))),
+    );
+    out
 }
 
 /// Everything a category command collected.
@@ -110,7 +190,7 @@ pub struct Opts {
     pub country: Option<String>,
     pub genre: Option<String>,
     pub platform: Option<String>,
-    pub source: Option<GameSource>,
+    pub source: Option<String>,
 }
 
 // ---- option tables -------------------------------------------------------------------------
@@ -304,7 +384,10 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
                     .await;
             }
             let providers = data.providers.clone();
+            let wikis = data.wikis.clone();
+            let wiki_list = wikis.sources().await;
             let src = option_str(ctx, "source");
+            let choice = SourceChoice::parse(src.as_deref(), &wiki_list);
             let items = data
                 .auto
                 .items_scoped(
@@ -314,12 +397,16 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
                     partial,
                     MIN_CHARS,
                     |text| async move {
-                        let found = if src.as_deref() == Some("VNDB") {
-                            providers.search_visual_novels(&text, mature).await
-                        } else {
-                            providers.search_games(&text, mature).await
+                        let found = match choice {
+                            SourceChoice::Vndb => {
+                                providers.search_visual_novels(&text, mature).await
+                            }
+                            c if c.providers() && c != SourceChoice::Vndb => {
+                                providers.search_games(&text, mature).await
+                            }
+                            _ => Vec::new(),
                         };
-                        found
+                        let mut out: Vec<(String, String)> = found
                             .iter()
                             .map(|w| {
                                 (
@@ -330,7 +417,32 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
                                     w.title.clone(),
                                 )
                             })
-                            .collect()
+                            .collect();
+                        // The wikis of the owner, from the local index only (never a live call: three seconds).
+                        if choice.wikis() {
+                            let known: std::collections::HashSet<String> = found
+                                .iter()
+                                .map(|w| crate::wiki::normalize(&w.title))
+                                .collect();
+                            let names: std::collections::HashMap<i64, String> =
+                                wiki_list.iter().map(|w| (w.id, w.name.clone())).collect();
+                            for p in wikis
+                                .suggest(
+                                    &text,
+                                    Some(crate::wiki::Kind::Game),
+                                    choice.only_wiki(),
+                                    10,
+                                )
+                                .await
+                            {
+                                if known.contains(&crate::wiki::normalize(&p.title)) {
+                                    continue;
+                                }
+                                let wiki = names.get(&p.wiki_id).cloned().unwrap_or_default();
+                                out.push((format!("{} ({wiki})", p.title), p.key()));
+                            }
+                        }
+                        out
                     },
                 )
                 .await;
@@ -389,6 +501,22 @@ pub async fn ac_genre(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocomp
         .map(|n| (n, n))
         .collect();
     table_choices(&list, partial)
+}
+
+/// The `source` menu of `/game`: IGDB, VNDB, every wiki and each wiki by name.
+pub async fn ac_source(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    let wikis = ctx.data().wikis.sources().await;
+    let needle = partial.trim().to_lowercase();
+    to_choices(
+        source_options(&wikis)
+            .into_iter()
+            .filter(|(label, value)| {
+                needle.is_empty()
+                    || label.to_lowercase().contains(&needle)
+                    || value.to_lowercase().contains(&needle)
+            })
+            .collect(),
+    )
 }
 
 pub async fn ac_platform(_ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
@@ -704,30 +832,55 @@ async fn run_tmdb(
 async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) -> Result<(), Error> {
     ctx.defer().await?;
     let providers = ctx.data().providers.clone();
+    let wikis = ctx.data().wikis.clone();
+    let wiki_list = wikis.sources().await;
     let (games_on, mature) = fallback::game_flags(ctx).await;
-    if !providers.games_enabled() {
+    if !providers.games_enabled() && wiki_list.is_empty() {
         return say_ephemeral(ctx, i18n::GAMES_UNAVAILABLE).await;
     }
     if !games_on {
         return say_ephemeral(ctx, i18n::GAMES_SERVER_OFF).await;
     }
-    let src = match o.source {
-        Some(GameSource::Igdb) => Some("igdb"),
-        Some(GameSource::Vndb) => Some("vndb"),
-        None => None,
-    };
+    let choice = SourceChoice::parse(o.source.as_deref(), &wiki_list);
+    let src = choice.provider();
     let platform = o
         .platform
         .as_deref()
         .and_then(|p| resolve(PLATFORMS, Some(p)).or_else(|| Some(p.trim().to_string())))
         .filter(|p| !p.is_empty());
+    // A page of a wiki picked from the suggestions opens directly, whatever the type.
+    if let Some((wiki, page)) = name
+        .as_deref()
+        .and_then(|n| crate::wiki::parse_key(n.trim()))
+    {
+        let msg = crate::wiki::msgs::page_msg(&wikis, wiki, page).await;
+        return crate::global::reply(ctx, msg).await;
+    }
     match ty {
         Type::Person => run_person(ctx, Category::Game, name.unwrap_or_default()).await,
         Type::Work => {
             let q = name.unwrap_or_default();
-            let found = providers
-                .search_games_found(&q, platform.as_deref(), mature, src)
-                .await;
+            // The main providers and the wikis are asked together; a slow or failing one never holds back the other.
+            let (found, wiki_found) = futures::join!(
+                async {
+                    if choice.providers() {
+                        providers
+                            .search_games_found(&q, platform.as_deref(), mature, src)
+                            .await
+                    } else {
+                        crate::providers::Found::default()
+                    }
+                },
+                async {
+                    if choice.wikis() {
+                        wikis
+                            .search(&q, Some(crate::wiki::Kind::Game), choice.only_wiki())
+                            .await
+                    } else {
+                        crate::wiki::service::Found::default()
+                    }
+                }
+            );
             let note = found.partial_note();
             let mut all = found.works.clone();
             // An exact title wins over partial matches.
@@ -735,14 +888,33 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                 all = vec![all.remove(exact)];
             }
             all.truncate(10);
-            if all.is_empty() {
-                return say_ephemeral(ctx, found.empty_message(i18n::NO_RESULTS)).await;
+            if !all.is_empty() && choice.providers() {
+                return fallback::show_with_note(ctx, all, note).await;
             }
-            fallback::show_with_note(ctx, all, note).await
+            // The main providers have nothing (or a wiki was asked for): the wiki results are shown directly.
+            if let Some(msg) = crate::wiki::msgs::show(&wikis, wiki_found, &q).await {
+                return crate::global::reply(ctx, msg).await;
+            }
+            say_ephemeral(ctx, found.empty_message(i18n::NO_RESULTS)).await
         }
         Type::Character => {
-            character::search_character(ctx, name.unwrap_or_default(), None, Some("games".into()))
-                .await
+            let q = name.unwrap_or_default();
+            if choice.wikis_only() {
+                let found = wikis
+                    .search(&q, Some(crate::wiki::Kind::Character), choice.only_wiki())
+                    .await;
+                return match crate::wiki::msgs::show(&wikis, found, &q).await {
+                    Some(msg) => crate::global::reply(ctx, msg).await,
+                    None => say_ephemeral(ctx, i18n::NO_RESULTS).await,
+                };
+            }
+            // Only one provider asked for: the wikis stay out of it.
+            let scope = if matches!(choice, SourceChoice::Igdb | SourceChoice::Vndb) {
+                "games-only"
+            } else {
+                "games"
+            };
+            character::search_character(ctx, q, None, Some(scope.into())).await
         }
         Type::RandomWork => {
             let user = ctx.author().id.get() as i64;
@@ -1094,7 +1266,8 @@ pub async fn game(
     #[description = "Source: IGDB games or VNDB visual novels"]
     #[description_localized("ar", "المصدر: ألعاب IGDB أو روايات بصرية VNDB")]
     #[name_localized("ar", "المصدر")]
-    source: Option<GameSource>,
+    #[autocomplete = "ac_source"]
+    source: Option<String>,
 ) -> Result<(), Error> {
     run(
         ctx,

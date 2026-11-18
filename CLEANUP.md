@@ -90,3 +90,10 @@ What was removed and what was merged. Nothing here is reachable from a command a
   column was added.
 - **Not changed on purpose:** the five-minute cache of the `/top` rankings (it is data, not button state).
 
+## Round 11
+- **Added:** `src/wiki/` (parsers, client over a swappable transport, store, service, safety filter, fill, cards, the owner panel), migration 0020 (additive:
+  `wiki_sources`, `wiki_cache`, `wiki_fts`), the `/game` `source` menu (IGDB, VNDB, all wikis, each wiki) replacing the fixed two-value choice (`GameSource`).
+- **Removed:** the `GameSource` choice enum. No Giant Bomb code, variable or text exists anywhere.
+- **Not done on purpose:** wiki pages cannot be added to a profile (they have no stable integer id), and the cards of the interactive game / character views
+  (`FallbackView`, `CharacterView`) are not filled in place, only the cards that the navigation buttons and `/search` open.
+

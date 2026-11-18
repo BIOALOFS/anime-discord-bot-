@@ -93,7 +93,7 @@ pub async fn verify_migrated(
 }
 
 /// Tables that only cache data from elsewhere; they are rebuilt on demand and not user data.
-const CACHE_TABLES: &[&str] = &["character_cache", "media_cache"];
+const CACHE_TABLES: &[&str] = &["character_cache", "media_cache", "wiki_cache"];
 
 /// Row counts of every user-data table (every table but the caches and the migration bookkeeping).
 pub async fn user_data_counts(
@@ -107,7 +107,7 @@ pub async fn user_data_counts(
     let mut out = std::collections::BTreeMap::new();
     for name in names
         .into_iter()
-        .filter(|n| !CACHE_TABLES.contains(&n.as_str()))
+        .filter(|n| !CACHE_TABLES.contains(&n.as_str()) && !n.starts_with("wiki_fts"))
     {
         // Table names come from sqlite_master, never from users.
         let n: i64 = sqlx::query_scalar(&format!(
@@ -762,6 +762,76 @@ mod tests {
         .expect("title");
         assert_eq!(nick, "Nick");
         // the backup was written before the migration and verifies
+        let backups: Vec<_> = std::fs::read_dir(dir.join("backups"))
+            .expect("backups")
+            .flatten()
+            .collect();
+        assert_eq!(backups.len(), 1);
+        super::verify_backup(&backups[0].path())
+            .await
+            .expect("the backup is good");
+    }
+
+    /// The round 11 upgrade (0019 -> 0020, the wiki tables) on a database with member data, through the real startup
+    /// path: verified backup, migration, row counts compared. Nothing existing changes.
+    #[tokio::test]
+    async fn the_wiki_migration_is_additive_and_keeps_member_data() {
+        let dir = temp_dir("round11");
+        let path = dir.join("bot.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("open");
+        let mut old = sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
+            .await
+            .expect("read migrations");
+        let before: Vec<_> = old
+            .migrations
+            .iter()
+            .filter(|m| m.version <= 19)
+            .cloned()
+            .collect();
+        assert!(
+            old.migrations.len() > before.len(),
+            "0020 is the migration under test"
+        );
+        old.migrations = std::borrow::Cow::Owned(before);
+        old.run(&pool).await.expect("migrate to 0019");
+        for sql in [
+            "INSERT INTO users (discord_id) VALUES (7)",
+            "INSERT INTO profiles (user_id, bio) VALUES (7, 'hello')",
+            "INSERT INTO profile_characters (user_id, character_id, position) VALUES (7, 1, 1)",
+            "INSERT INTO reminders (user_id, work_id, title) VALUES (7, 77, 'Reminder')",
+            "INSERT INTO guild_settings (guild_id) VALUES (9)",
+            "INSERT INTO message_sessions (message_id, channel_id, started_at, expires_at, hard_expires_at) VALUES (1, 2, 3, 4, 5)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.expect(sql);
+        }
+        let counts_before = super::user_data_counts(&pool).await.expect("counts");
+        pool.close().await;
+        let pool = super::connect(&url).await.expect("the upgrade runs");
+        let counts_after = super::user_data_counts(&pool).await.expect("counts");
+        for (table, n) in &counts_before {
+            assert_eq!(counts_after.get(table), Some(n), "{table} keeps its rows");
+        }
+        for table in ["wiki_sources", "wiki_cache"] {
+            let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .expect(table);
+            assert_eq!(n, 0, "{table} starts empty");
+        }
+        // the full-text index works on the migrated database
+        sqlx::query("INSERT INTO wiki_cache (wiki_id, page_id, title, normalized_key, fetched_at) VALUES (1, 1, 'Pyramid Head', 'pyramid head', 1)")
+            .execute(&pool)
+            .await
+            .expect("insert");
+        let hits: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM wiki_fts WHERE wiki_fts MATCH '\"pyram\"*'")
+                .fetch_one(&pool)
+                .await
+                .expect("fts");
+        assert_eq!(hits, 1);
+        let wikis_on: bool = crate::wiki::store::global_enabled(&pool).await;
+        assert!(wikis_on, "the kill switch is on by default");
         let backups: Vec<_> = std::fs::read_dir(dir.join("backups"))
             .expect("backups")
             .flatten()

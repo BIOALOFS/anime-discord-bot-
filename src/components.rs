@@ -74,6 +74,10 @@ pub fn is_global_id(id: &str) -> bool {
 
 /// Provider-prefixed key of a work: `anilist:1`, `tmdb-tv:2`, `tmdb-movie:3`, `igdb:4`, `vndb:v5`.
 pub fn is_work_key(key: &str) -> bool {
+    // A page of a wiki is `wiki:{wiki}:{page}`: a game when shown as a work, a character when opened from a roster.
+    if crate::wiki::parse_key(key).is_some() {
+        return true;
+    }
     ["anilist:", "tmdb-tv:", "tmdb-movie:", "igdb:", "vndb:v"]
         .iter()
         .any(|p| {

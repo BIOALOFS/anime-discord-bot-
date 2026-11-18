@@ -27,6 +27,7 @@ mod render;
 mod search;
 mod tmdb;
 mod ui;
+mod wiki;
 
 use poise::serenity_prelude as serenity;
 use sqlx::SqlitePool;
@@ -43,6 +44,8 @@ pub struct Data {
     pub ephemerals: nav::sweeper::Ephemerals,
     /// Processed pictures of the profile (custom pictures, GIFs, banners) kept in memory.
     pub images: commands::profile::imgcache::ImageCache,
+    /// The owner's MediaWiki sources (global for every server).
+    pub wikis: std::sync::Arc<wiki::service::Wikis>,
     pub http: reqwest::Client,
     pub renderer: std::sync::Arc<render::Renderer>,
     pub guilds: std::sync::Arc<guild::GuildStore>,
@@ -62,6 +65,7 @@ impl Data {
             + 'static,
     ) -> Self {
         let pool = db::connect_memory().await;
+        let db_for_wikis = pool.clone();
         let http = reqwest::Client::new();
         Self {
             guilds: std::sync::Arc::new(guild::GuildStore::new(pool.clone())),
@@ -79,6 +83,10 @@ impl Data {
             auto: Default::default(),
             ephemerals: Default::default(),
             images: commands::profile::imgcache::ImageCache::new(8),
+            wikis: std::sync::Arc::new(wiki::service::Wikis::new(
+                db_for_wikis,
+                std::sync::Arc::new(wiki::client::HttpTransport::new(reqwest::Client::new(), 2)),
+            )),
         }
     }
 }
@@ -117,6 +125,18 @@ async fn main() -> anyhow::Result<()> {
     // How long buttons stay active, and the list of ephemeral messages the sweeper looks after.
     nav::init(nav::Lifetimes::from_config(&config));
     let setup_ephemerals = nav::sweeper::Ephemerals::default();
+    // One shared client for every wiki (a descriptive User-Agent is set per request), a rate limit per wiki.
+    let wiki_per_second = std::env::var("WIKI_REQUESTS_PER_SECOND")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(wiki::client::DEFAULT_PER_SECOND);
+    let setup_wikis = std::sync::Arc::new(wiki::service::Wikis::new(
+        pool.clone(),
+        std::sync::Arc::new(wiki::client::HttpTransport::new(
+            feed_web.clone(),
+            wiki_per_second,
+        )),
+    ));
     let image_cache_mb = config
         .image_cache_mb
         .filter(|n| *n > 0)
@@ -145,6 +165,16 @@ async fn main() -> anyhow::Result<()> {
                 }
                 // Greys out the controls of every message whose time is up (also those left from before a restart).
                 nav::sweeper::spawn(ctx.http.clone(), pool.clone(), setup_ephemerals.clone());
+                // Fills the wiki cache a little at a time, so autocomplete has something to suggest.
+                let warm = setup_wikis.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+                    loop {
+                        let n = warm.warm_once().await;
+                        tracing::debug!(pages = n, "wiki cache warmed");
+                        tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+                    }
+                });
                 let cmds = &framework.options().commands;
                 // Registration overwrites the whole list in its scope, so removed commands disappear.
                 match dev_guild {
@@ -181,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
                     images: commands::profile::imgcache::ImageCache::new(
                         image_cache_mb,
                     ),
+                    wikis: setup_wikis,
                 })
             })
         })

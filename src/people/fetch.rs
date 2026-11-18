@@ -11,6 +11,7 @@ pub struct Sources {
     pub anilist: Arc<crate::anilist::SafeAniList>,
     pub tmdb: Arc<Tmdb>,
     pub providers: Arc<Providers>,
+    pub wikis: Arc<crate::wiki::service::Wikis>,
 }
 
 impl Sources {
@@ -19,6 +20,7 @@ impl Sources {
             anilist: data.anilist.clone(),
             tmdb: data.tmdb.clone(),
             providers: data.providers.clone(),
+            wikis: data.wikis.clone(),
         }
     }
 }

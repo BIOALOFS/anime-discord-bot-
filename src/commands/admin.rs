@@ -37,6 +37,8 @@ pub enum Screen {
     Perms,
     Watch,
     Owner,
+    /// The owner's wikis (reached from the owner screen).
+    Wikis,
     Reset,
 }
 
@@ -372,6 +374,8 @@ pub struct AdminView {
     tools: super::admin_ext::Tools,
     /// A card (the backup file) to send privately after a press.
     card: Option<crate::ui::session::CardFollowup>,
+    /// The owner's wiki panel (only ever used by the owner).
+    wikis: crate::wiki::admin::Panel,
 }
 
 impl AdminView {
@@ -496,6 +500,8 @@ pub fn embed_for(screen: Screen, s: &State, guild: i64) -> Emb {
             crate::commands::notify_panel::digest_label(s.digest_hours)
         )),
         Screen::Status | Screen::Daily | Screen::Poll | Screen::Perms | Screen::Watch | Screen::Owner => super::admin_ext::embed(screen, &s.ext),
+        // The wiki panel has its own state and is drawn by `AdminView::render`.
+        Screen::Wikis => e.title(i18n::WIKI_ADMIN_TITLE),
         Screen::Library => e.title("📺 المسلسلات والجدول").description(format!(
             "• منطقة الجدول: **{}**\n• حماية الحرق (إخفاء ملخص العمل خلف ||سبويلر||): {}\n• تصنيف البلدان: الدراما الآسيوية في `/drama` وبقية العالم في `/series`، ويمكنك نقل أي بلد للآخر من القائمة الثانية.\n\nالبلدان المنقولة حاليًا: {}",
             TIMEZONES.iter().find(|(_, tz)| *tz == s.timezone).map_or(s.timezone.as_str(), |(l, _)| *l),
@@ -601,6 +607,7 @@ pub fn components_for(
         | Screen::Perms
         | Screen::Watch
         | Screen::Owner => super::admin_ext::components(screen, &s.ext, enabled),
+        Screen::Wikis => vec![nav(vec![])],
         Screen::Library => vec![
             buttons(vec![
                 toggle(LIB_SPOILER, "حماية الحرق", s.spoiler, enabled),
@@ -799,6 +806,12 @@ impl View for AdminView {
                 title: "إضافة رابط RSS".into(),
                 label: "الرابط | عنوان العمل".into(),
             }),
+            id if self.tools.is_owner && crate::wiki::admin::handles(id) => {
+                crate::wiki::admin::modal_spec(id).map(|(title, label)| ModalSpec {
+                    title: title.into(),
+                    label: label.into(),
+                })
+            }
             "w:new" => Some(ModalSpec {
                 title: "ليلة مشاهدة جديدة".into(),
                 label: "اسم العمل | 2026-11-21 21:00 | وصف اختياري".into(),
@@ -808,6 +821,17 @@ impl View for AdminView {
     }
 
     async fn on_modal(&mut self, id: &str, input: String) -> Outcome {
+        if crate::wiki::admin::handles(id) {
+            if !self.tools.is_owner {
+                self.notice = Some(i18n::WIKI_OWNER_ONLY.to_string());
+                return Outcome::Update;
+            }
+            let text =
+                crate::wiki::admin::modal(&mut self.wikis, &self.tools.wikis, id, input).await;
+            self.wikis.refresh(&self.tools.wikis).await;
+            self.notice = (!text.is_empty()).then_some(text);
+            return Outcome::Update;
+        }
         if id == "w:new" {
             self.notice = Some(
                 super::admin_ext::create_night(
@@ -831,6 +855,13 @@ impl View for AdminView {
     }
 
     fn render(&self, enabled: bool) -> Page {
+        if self.screen == Screen::Wikis {
+            return Page::embed(
+                crate::wiki::admin::embed(&self.wikis).build(),
+                crate::wiki::admin::components(&self.wikis, enabled),
+            )
+            .notice(self.notice.clone());
+        }
         let confirming = self.screen == Screen::Reset
             && self.notice.as_deref() == Some(i18n::ADMIN_CONFIRM_RESET);
         Page::embed(
@@ -947,6 +978,33 @@ impl View for AdminView {
                         adb::set_cooldown_secs(&pool, g, n).await?;
                     }
                 }
+                "go:wikis" => {
+                    if !self.tools.is_owner {
+                        self.notice = Some(i18n::WIKI_OWNER_ONLY.to_string());
+                        return Ok(());
+                    }
+                    self.screen = Screen::Wikis;
+                    self.wikis = Default::default();
+                    self.wikis.refresh(&self.tools.wikis).await;
+                    return Ok(());
+                }
+                id if crate::wiki::admin::handles(id) => {
+                    if !self.tools.is_owner {
+                        self.notice = Some(i18n::WIKI_OWNER_ONLY.to_string());
+                        return Ok(());
+                    }
+                    let text = crate::wiki::admin::press(
+                        &mut self.wikis,
+                        &self.tools.wikis,
+                        self.user,
+                        id,
+                        values,
+                    )
+                    .await;
+                    self.wikis.refresh(&self.tools.wikis).await;
+                    self.notice = (!text.is_empty()).then_some(text);
+                    return Ok(());
+                }
                 "x:ask" => {
                     self.notice = Some(i18n::ADMIN_CONFIRM_RESET.to_string());
                     return Ok(());
@@ -1050,6 +1108,7 @@ pub async fn admin(ctx: Context<'_>) -> Result<(), Error> {
         guild_count: ctx.cache().guild_count(),
         discord: ctx.serenity_context().http.clone(),
         anilist: data.anilist.clone(),
+        wikis: data.wikis.clone(),
     };
     let state = AdminView::load(&pool, &guilds, g, &tools).await?;
     session::run(
@@ -1064,6 +1123,7 @@ pub async fn admin(ctx: Context<'_>) -> Result<(), Error> {
             user: ctx.author().id.get() as i64,
             tools,
             card: None,
+            wikis: Default::default(),
         },
     )
     .await
