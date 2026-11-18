@@ -50,15 +50,16 @@ async fn search_media_allows_adult_only_when_policy_says_so() {
 }
 
 #[tokio::test]
-async fn search_characters_filters_and_ranks_by_favourites() {
+async fn search_characters_filters_and_keeps_the_best_match_first() {
     let api = api(|_, _| Ok(fixture!("search_character.json")["data"].clone()));
     let out = api
         .search_characters("x", 10, ContentPolicy::SAFE)
         .await
         .expect("ok");
-    // Adult-linked, mixed and zero-appearance characters are gone; the rest is ranked by favourites.
+    // Adult-linked, mixed and zero-appearance characters are gone; the rest keeps AniList's best-match order (the
+    // name that was typed is not buried under a more popular character).
     let got: Vec<i64> = out.iter().map(|c| c.id).collect();
-    assert_eq!(got, vec![14, 10]);
+    assert_eq!(got, vec![10, 14]);
 }
 
 #[tokio::test]

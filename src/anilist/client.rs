@@ -47,9 +47,18 @@ fn in_autocomplete() -> bool {
 }
 
 /// Requests per minute reserved for autocomplete, on top of the main budget.
-const AUTOCOMPLETE_PER_MIN: u32 = 20;
+const AUTOCOMPLETE_PER_MIN: u32 = 40;
 /// An autocomplete lookup would rather fail than wait longer than this for a rate-limit pause.
 const AUTOCOMPLETE_MAX_WAIT: Duration = Duration::from_millis(800);
+
+/// Does this answer hold a `Page` whose lists are all empty?
+fn page_is_empty(doc: &Value) -> bool {
+    doc.get("Page").and_then(Value::as_object).is_some_and(|p| {
+        p.values()
+            .filter_map(Value::as_array)
+            .all(|list| list.is_empty())
+    })
+}
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 type JsonCache = Cache<String, Arc<Value>>;
@@ -246,7 +255,14 @@ impl AniListClient {
             })
             .await;
         match result {
-            Ok(v) => Ok(Some(v)),
+            Ok(v) => {
+                // An empty page is never remembered: the next try asks again (a result that is missing now may not be
+                // missing in a minute, and an empty answer must not hide a title for an hour).
+                if matches!(which, Which::Search) && page_is_empty(&v) {
+                    cache.invalidate(&key).await;
+                }
+                Ok(Some(v))
+            }
             Err(e) => match &*e {
                 AniError::NotFound => {
                     self.negative.insert(key, ()).await;

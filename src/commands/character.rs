@@ -878,7 +878,7 @@ pub(crate) async fn character_suggestions(
                             return Vec::new();
                         }
                         let list = if text.chars().count() >= 2 {
-                            api.search_characters(&text, 10, ContentPolicy::SAFE).await
+                            api.search_characters(&text, 25, ContentPolicy::SAFE).await
                         } else {
                             api.popular_characters(10, ContentPolicy::SAFE).await
                         };

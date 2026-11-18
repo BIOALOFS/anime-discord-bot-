@@ -658,13 +658,38 @@ pub async fn search_works(
     kind: MediaKind,
     policy: ContentPolicy,
 ) -> Result<Vec<Media>, crate::anilist::AniError> {
-    api.search_media(text.trim(), kind, 10, policy).await
+    api.search_media(text.trim(), kind, 25, policy).await
 }
+
+/// The part of a search answer that autocomplete remembers in the local index.
+fn to_indexed(list: &[Media]) -> Vec<crate::anilist::index::Indexed> {
+    list.iter()
+        .map(|m| {
+            let mut titles: Vec<String> = [&m.title.romaji, &m.title.english, &m.title.native]
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect();
+            titles.extend(m.synonyms.iter().cloned());
+            crate::anilist::index::Indexed {
+                id: m.id,
+                kind: kind_of(m).key(),
+                label: media_label(m),
+                titles,
+                popularity: m.popularity.unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+/// How long autocomplete waits for AniList before answering with what the local index has.
+const LIVE_WAIT: std::time::Duration = std::time::Duration::from_millis(1800);
 
 /// What autocomplete answers for `q`: the search for two letters or more, the popular works of the kind for an
 /// empty or one-letter input (narrowed to the titles containing the letter when any do).
 pub async fn work_suggestions(
     api: &SafeAniList,
+    pool: &sqlx::SqlitePool,
     kind: MediaKind,
     q: &str,
 ) -> Vec<(String, String)> {
@@ -675,13 +700,44 @@ pub async fn work_suggestions(
             .collect()
     };
     if q.chars().count() >= 2 {
-        return match search_works(api, q, kind, ContentPolicy::SAFE).await {
-            Ok(list) => to_items(list),
-            Err(e) => {
-                tracing::debug!("autocomplete search failed: {e}");
-                Vec::new()
+        // AniList and the local index are asked together: the local list never waits for AniList, AniList never
+        // waits for it, and a slow or failed AniList leaves the local list as the answer.
+        let (live, local) = futures::join!(
+            async {
+                match tokio::time::timeout(
+                    LIVE_WAIT,
+                    search_works(api, q, kind, ContentPolicy::SAFE),
+                )
+                .await
+                {
+                    Ok(Ok(list)) => Some(list),
+                    Ok(Err(e)) => {
+                        tracing::debug!("autocomplete search failed: {e}");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::debug!("autocomplete search timed out");
+                        None
+                    }
+                }
+            },
+            crate::anilist::index::lookup(pool, crate::anilist::index::kinds_for(kind), q, 25)
+        );
+        let live = live.unwrap_or_default();
+        if !live.is_empty() {
+            let (pool, rows) = (pool.clone(), to_indexed(&live));
+            tokio::spawn(async move { crate::anilist::index::record(&pool, &rows).await });
+        }
+        // AniList's best matches first, then what only the index knew, up to 25.
+        let mut out = to_items(live);
+        for (id, label) in local {
+            let value = format!("id:{id}");
+            if !out.iter().any(|(_, v)| *v == value) {
+                out.push((label, value));
             }
-        };
+        }
+        out.truncate(25);
+        return out;
     }
     let popular = match api.popular_media(kind, 10, ContentPolicy::SAFE).await {
         Ok(list) => to_items(list),
@@ -715,6 +771,7 @@ pub async fn media_autocomplete(
     }
     let data = ctx.data();
     let api = data.anilist.clone();
+    let pool = data.db.clone();
     let items = data
         .auto
         .items_scoped(
@@ -723,7 +780,7 @@ pub async fn media_autocomplete(
             "",
             partial,
             0,
-            |q| async move { work_suggestions(&api, kind, &q).await },
+            |q| async move { work_suggestions(&api, &pool, kind, &q).await },
         )
         .await;
     to_choices(items)
@@ -806,6 +863,11 @@ pub async fn run_media_with(
                 .collect::<Vec<_>>()
         }) {
             Ok(mut v) if v.len() == 1 => Mode::Card(Box::new(v.remove(0))),
+            // The shared search asks for 25 (the suggestions); a typed submit lists the best ten.
+            Ok(mut v) if v.len() > 10 => {
+                v.truncate(10);
+                Mode::Pick(v)
+            }
             Ok(v) if v.is_empty() => {
                 // AniList has nothing: try the (opt-in) fallback catalogs for written works.
                 let want = match kind {
@@ -859,7 +921,13 @@ mod suggestion_tests {
     #[tokio::test]
     async fn autocomplete_and_submit_share_one_search_and_one_cache_entry() {
         let (api, searches, _) = counting_api();
-        let suggested = work_suggestions(&api, MediaKind::Anime, "Safe").await;
+        let suggested = work_suggestions(
+            &api,
+            &crate::db::connect_memory().await,
+            MediaKind::Anime,
+            "Safe",
+        )
+        .await;
         assert!(!suggested.is_empty());
         // submit with the same text (different case and spacing) is a cache hit
         let found = search_works(&api, "  safe ", MediaKind::Anime, ContentPolicy::SAFE)
@@ -881,9 +949,21 @@ mod suggestion_tests {
     #[tokio::test]
     async fn empty_and_one_letter_input_show_the_popular_list() {
         let (api, searches, populars) = counting_api();
-        let empty = work_suggestions(&api, MediaKind::Anime, "").await;
+        let empty = work_suggestions(
+            &api,
+            &crate::db::connect_memory().await,
+            MediaKind::Anime,
+            "",
+        )
+        .await;
         assert!(!empty.is_empty());
-        let one = work_suggestions(&api, MediaKind::Anime, "s").await;
+        let one = work_suggestions(
+            &api,
+            &crate::db::connect_memory().await,
+            MediaKind::Anime,
+            "s",
+        )
+        .await;
         assert!(!one.is_empty());
         assert_eq!(
             searches.load(Ordering::SeqCst),
@@ -897,11 +977,149 @@ mod suggestion_tests {
         );
     }
 
+    /// THE root cause of "orv / solo / tog show nothing" on /manga: since the category commands replaced /manhwa, a
+    /// plain /manga asked AniList for Japanese works only (`countryOfOrigin: JP`), and every Korean title was absent.
+    #[tokio::test]
+    async fn a_plain_manga_search_asks_every_origin_and_up_to_25() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let api = SafeAniList::with_fixture(move |_, vars| {
+            s.lock().expect("lock").push(vars.clone());
+            let doc: serde_json::Value = serde_json::from_str(include_str!(
+                "../../tests/fixtures/anilist/search_media.json"
+            ))
+            .expect("fixture");
+            Ok(doc["data"].clone())
+        });
+        let pool = crate::db::connect_memory().await;
+        work_suggestions(&api, &pool, MediaKind::Manga, "orv").await;
+        work_suggestions(&api, &pool, MediaKind::Manhwa, "orv").await;
+        let v = seen.lock().expect("lock").clone();
+        assert!(
+            v[0].get("country").is_none(),
+            "no country on a plain /manga: {:?}",
+            v[0]
+        );
+        assert_eq!(v[0]["perPage"], 25, "a list of up to 25, not ten");
+        assert_eq!(v[1]["country"], "KR", "the manhwa choice still narrows");
+        // the explicit Japanese choice narrows by country, no choice does not
+        let (k, f) = crate::commands::category::anilist_target(
+            crate::commands::category::Category::Manga,
+            &crate::commands::category::Opts::default(),
+        );
+        assert_eq!((k, f.country), (MediaKind::Manga, None));
+        let (_, f) = crate::commands::category::anilist_target(
+            crate::commands::category::Category::Manga,
+            &crate::commands::category::Opts {
+                format: Some("manga".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(f.country.as_deref(), Some("JP"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_live_search_still_answers_from_the_local_index_and_both_empty_is_empty() {
+        let pool = crate::db::connect_memory().await;
+        crate::anilist::index::record(
+            &pool,
+            &[crate::anilist::index::Indexed {
+                id: 105398,
+                kind: "manhwa",
+                label: "Omniscient Reader's Viewpoint (2020 · مانهوا)".into(),
+                titles: vec!["Omniscient Reader's Viewpoint".into(), "ORV".into()],
+                popularity: 5,
+            }],
+        )
+        .await;
+        let down = SafeAniList::with_fixture(|_, _| Err(crate::anilist::AniError::Busy));
+        for q in ["orv", "omni", "omnicient reader"] {
+            let got = work_suggestions(&down, &pool, MediaKind::Manga, q).await;
+            assert_eq!(got.len(), 1, "{q}");
+            assert_eq!(got[0].1, "id:105398");
+        }
+        let empty = crate::db::connect_memory().await;
+        assert!(work_suggestions(&down, &empty, MediaKind::Manga, "orv")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_results_come_first_then_the_index_and_the_index_learns_from_live() {
+        let (api, _, _) = counting_api();
+        let pool = crate::db::connect_memory().await;
+        crate::anilist::index::record(
+            &pool,
+            &[crate::anilist::index::Indexed {
+                id: 999_001,
+                kind: "anime",
+                label: "Safe Extra (anime)".into(),
+                titles: vec!["Safe Extra".into()],
+                popularity: 1,
+            }],
+        )
+        .await;
+        let got = work_suggestions(&api, &pool, MediaKind::Anime, "Safe").await;
+        assert!(got.len() >= 2);
+        assert_ne!(got[0].1, "id:999001", "AniList's best match is first");
+        assert!(
+            got.iter().any(|(_, v)| v == "id:999001"),
+            "the index adds what only it knew"
+        );
+        let ids: std::collections::HashSet<_> = got.iter().map(|(_, v)| v.clone()).collect();
+        assert_eq!(ids.len(), got.len(), "no duplicates");
+        // what AniList answered is remembered for the next time
+        let mut learned = 0;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            learned = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM media_index")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+            if learned > 1 {
+                break;
+            }
+        }
+        assert!(learned > 1, "the index learned from the live answer");
+    }
+
+    #[tokio::test]
+    async fn an_empty_answer_is_never_cached_and_a_full_one_is() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let empty = SafeAniList::with_fixture(move |_, _| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"Page": {"media": []}}))
+        });
+        for _ in 0..3 {
+            let _ = search_works(&empty, "nothing", MediaKind::Anime, ContentPolicy::SAFE).await;
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "an empty page is asked again every time"
+        );
+        let (api, searches, _) = counting_api();
+        for _ in 0..3 {
+            let _ = search_works(&api, "safe", MediaKind::Anime, ContentPolicy::SAFE).await;
+        }
+        assert_eq!(
+            searches.load(Ordering::SeqCst),
+            1,
+            "a real answer keeps its cache entry"
+        );
+    }
+
     #[tokio::test]
     async fn a_failing_search_is_an_empty_answer_not_a_panic() {
         let api = SafeAniList::with_fixture(|_, _| Err(crate::anilist::AniError::Busy));
-        assert!(work_suggestions(&api, MediaKind::Manga, "naruto")
-            .await
-            .is_empty());
+        assert!(work_suggestions(
+            &api,
+            &crate::db::connect_memory().await,
+            MediaKind::Manga,
+            "naruto"
+        )
+        .await
+        .is_empty());
     }
 }

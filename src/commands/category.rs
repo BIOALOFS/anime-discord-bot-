@@ -301,6 +301,11 @@ pub fn anilist_target(cat: Category, o: &Opts) -> (MediaKind, MediaFilter) {
                     f.format = Some("ONE_SHOT".into());
                     MediaKind::Manga
                 }
+                // The Japanese choice narrows by country; no choice searches every origin (manhwa and manhua too).
+                Some("manga") => {
+                    f.country = Some("JP".into());
+                    MediaKind::Manga
+                }
                 _ => MediaKind::Manga,
             };
             (kind, f)
@@ -390,8 +395,10 @@ fn with_wikis(
     mut main: Vec<serenity::AutocompleteChoice>,
     wiki: Vec<serenity::AutocompleteChoice>,
 ) -> Vec<serenity::AutocompleteChoice> {
-    main.truncate(25 - wiki.len().min(5));
-    main.extend(wiki);
+    // The wikis only fill the room the main sources leave: they never shorten or replace the AniList list.
+    main.truncate(25);
+    let room = 25 - main.len();
+    main.extend(wiki.into_iter().take(room.min(5)));
     main
 }
 
@@ -1755,6 +1762,30 @@ mod tests {
                 .iter()
                 .all(|x| seen.insert(x.1.clone()) && x.0.chars().count() <= 100));
         }
+    }
+
+    #[test]
+    fn wikis_only_fill_the_room_the_main_sources_leave() {
+        let name = |x: &serenity::AutocompleteChoice| {
+            serde_json::to_value(x).expect("json")["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let c = |n: &str| serenity::AutocompleteChoice::new(n.to_string(), n.to_string());
+        let main: Vec<_> = (0..25).map(|i| c(&format!("m{i}"))).collect();
+        let wiki: Vec<_> = (0..5).map(|i| c(&format!("w{i}"))).collect();
+        let full = with_wikis(main.clone(), wiki.clone());
+        assert_eq!(full.len(), 25);
+        assert!(
+            full.iter().all(|x| name(x).starts_with('m')),
+            "a full AniList list is untouched"
+        );
+        let some = with_wikis(main[..22].to_vec(), wiki.clone());
+        assert_eq!(some.len(), 25);
+        assert_eq!(name(&some[21]), "m21");
+        assert_eq!(name(&some[22]), "w0");
+        assert_eq!(with_wikis(Vec::new(), wiki).len(), 5);
     }
 
     #[test]

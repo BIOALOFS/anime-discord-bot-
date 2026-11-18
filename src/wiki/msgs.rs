@@ -407,8 +407,8 @@ mod tests {
         search_only.character_category = None;
         assert_eq!(
             labels(&rows(&game_page, &search_only, None, false)),
-            vec!["أضف لبروفايلي", "🔗 Silent Hill Wiki"],
-            "no roster without a character category"
+            vec!["أظهر الشخصيات", "أضف لبروفايلي", "🔗 Silent Hill Wiki"],
+            "the roster is offered either way: from the category, or from the links of the work page"
         );
         assert_eq!(
             json(&rows(&page(Kind::Character), &wiki(), Some("wiki:1:5"), false)[0])["components"]
