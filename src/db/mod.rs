@@ -36,18 +36,161 @@ pub async fn connect(url: &str) -> anyhow::Result<SqlitePool> {
             )
         })?;
     let migrator = sqlx::migrate!("./migrations");
-    if !url.contains(":memory:") {
-        match backup_if_pending(&pool, &path, &migrator).await {
-            Ok(Some(b)) => {
-                tracing::info!(backup = %b.display(), "database backed up before migrating")
-            }
-            Ok(None) => {}
-            // A failed backup must not stop the bot, but it must be visible.
-            Err(e) => tracing::warn!("could not back up the database before migrating: {e:#}"),
-        }
+    if url.contains(":memory:") {
+        migrator.run(&pool).await?;
+        return Ok(pool);
     }
+    // The backup is the safety net of the migration: without a verified one, nothing is migrated.
+    let backup = backup_if_pending(&pool, &path, &migrator)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot back up the database before migrating, so nothing was changed \
+                 (the old version of the bot keeps working with it): {e:#}"
+            )
+        })?;
+    let Some(backup) = backup else {
+        migrator.run(&pool).await?;
+        return Ok(pool);
+    };
+    tracing::info!(backup = %backup.display(), "database backed up and verified before migrating");
+    let before = user_data_counts(&pool).await?;
     migrator.run(&pool).await?;
+    verify_migrated(&pool, &path, &backup, &before).await?;
     Ok(pool)
+}
+
+/// After a migration: no user-data table may have fewer rows than before. If one has, the pool is closed, the
+/// backup is put back and an error says so; the bot then refuses to start on a database that lost anything.
+pub async fn verify_migrated(
+    pool: &SqlitePool,
+    db: &std::path::Path,
+    backup: &std::path::Path,
+    before: &std::collections::BTreeMap<String, i64>,
+) -> anyhow::Result<CountReport> {
+    let after = user_data_counts(pool).await?;
+    let report = compare_counts(before, &after);
+    if let Some(lost) = report.dropped() {
+        tracing::error!(
+            ?lost,
+            "row counts dropped during migration, restoring the backup"
+        );
+        pool.close().await;
+        restore_backup(backup, db)?;
+        anyhow::bail!(
+            "migration lost data in {lost:?}; the backup {} was restored, nothing was changed",
+            backup.display()
+        );
+    }
+    tracing::info!(
+        tables = report.rows.len(),
+        before = report.rows.iter().map(|r| r.1).sum::<i64>(),
+        after = report.rows.iter().map(|r| r.2).sum::<i64>(),
+        backup = %backup.display(),
+        "migration verified: no user-data row count dropped"
+    );
+    Ok(report)
+}
+
+/// Tables that only cache data from elsewhere; they are rebuilt on demand and not user data.
+const CACHE_TABLES: &[&str] = &["character_cache", "media_cache"];
+
+/// Row counts of every user-data table (every table but the caches and the migration bookkeeping).
+pub async fn user_data_counts(
+    pool: &SqlitePool,
+) -> anyhow::Result<std::collections::BTreeMap<String, i64>> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite%' AND substr(name, 1, 5) <> '_sqlx'",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = std::collections::BTreeMap::new();
+    for name in names
+        .into_iter()
+        .filter(|n| !CACHE_TABLES.contains(&n.as_str()))
+    {
+        // Table names come from sqlite_master, never from users.
+        let n: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM \"{}\"",
+            name.replace('"', "\"\"")
+        ))
+        .fetch_one(pool)
+        .await?;
+        out.insert(name, n);
+    }
+    Ok(out)
+}
+
+/// `(table, rows before, rows after)` for every table present both before and after (a table an old migration
+/// dropped on purpose is not a loss of this one).
+#[derive(Debug, PartialEq, Eq)]
+pub struct CountReport {
+    pub rows: Vec<(String, i64, i64)>,
+}
+
+impl CountReport {
+    /// The tables whose count went down, if any.
+    pub fn dropped(&self) -> Option<Vec<String>> {
+        let lost: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|(_, b, a)| a < b)
+            .map(|(t, ..)| t.clone())
+            .collect();
+        (!lost.is_empty()).then_some(lost)
+    }
+}
+
+pub fn compare_counts(
+    before: &std::collections::BTreeMap<String, i64>,
+    after: &std::collections::BTreeMap<String, i64>,
+) -> CountReport {
+    CountReport {
+        rows: before
+            .iter()
+            .filter_map(|(t, b)| after.get(t).map(|a| (t.clone(), *b, *a)))
+            .collect(),
+    }
+}
+
+/// Put a backup back in place of the database (the pool must be closed first).
+pub fn restore_backup(backup: &std::path::Path, db: &std::path::Path) -> anyhow::Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        let mut side = db.as_os_str().to_owned();
+        side.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(side));
+    }
+    std::fs::copy(backup, db).map_err(|e| {
+        anyhow::anyhow!(
+            "could not restore {} over {}: {e}",
+            backup.display(),
+            db.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Open a backup read-only and prove it is usable: `PRAGMA integrity_check` says ok and the key tables can be read.
+pub async fn verify_backup(path: &std::path::Path) -> anyhow::Result<()> {
+    let opts = SqliteConnectOptions::new().filename(path).read_only(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await?;
+    let verdict: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await?;
+    if verdict != "ok" {
+        anyhow::bail!("backup failed its integrity check: {verdict}");
+    }
+    for table in ["users", "profiles", "profile_characters"] {
+        sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("backup table {table} is not readable: {e}"))?;
+    }
+    pool.close().await;
+    Ok(())
 }
 
 pub const BACKUPS_KEPT: usize = 7;
@@ -91,6 +234,9 @@ pub async fn backup_if_pending(
     sqlx::query(&format!("VACUUM INTO '{literal}'"))
         .execute(pool)
         .await?;
+    verify_backup(&target).await.inspect_err(|_| {
+        let _ = std::fs::remove_file(&target);
+    })?;
     prune_backups(&dir, stem, BACKUPS_KEPT)?;
     Ok(Some(target))
 }
@@ -134,6 +280,8 @@ pub async fn connect_memory() -> SqlitePool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::db::{custom, profile as pdb};
     /// The default URL is relative to the working directory and the file is created on demand.
     #[tokio::test]
     async fn relative_default_url_creates_the_database() {
@@ -327,6 +475,191 @@ mod tests {
         sqlx::query("INSERT INTO item_status (user_id, work_key, status) VALUES (7, 'tmdb-tv:1396', 'current')").execute(&pool).await.expect("status");
         drop(pool);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn file_db(tag: &str) -> (std::path::PathBuf, SqlitePool) {
+        let dir = temp_dir(tag);
+        let path = dir.join("bot.db");
+        let pool = super::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .expect("connect");
+        (path, pool)
+    }
+
+    async fn put_user_data(pool: &SqlitePool) {
+        for sql in [
+            "INSERT INTO users (discord_id) VALUES (1), (2)",
+            "INSERT INTO profiles (user_id, bio) VALUES (1, 'a'), (2, 'b')",
+            "INSERT INTO profile_characters (user_id, character_id, position) VALUES (1, 10, 1), (1, 11, 2), (2, 10, 1)",
+            "INSERT INTO reminders (user_id, work_id, title) VALUES (1, 7, 'x')",
+        ] {
+            sqlx::query(sql).execute(pool).await.expect(sql);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_post_migration_check_restores_the_backup_when_a_count_drops() {
+        let (path, pool) = file_db("restore").await;
+        put_user_data(&pool).await;
+        let backup = path.with_file_name("backup.db");
+        let literal = backup.to_string_lossy().replace('\'', "''");
+        sqlx::query(&format!("VACUUM INTO '{literal}'"))
+            .execute(&pool)
+            .await
+            .expect("backup");
+        super::verify_backup(&backup)
+            .await
+            .expect("a good backup verifies");
+        let before = super::user_data_counts(&pool).await.expect("counts");
+        assert_eq!(before["profile_characters"], 3);
+        // an honest migration passes
+        let ok = super::verify_migrated(&pool, &path, &backup, &before)
+            .await
+            .expect("nothing lost");
+        assert!(ok.dropped().is_none());
+        // a migration that lost a row is undone
+        sqlx::query("DELETE FROM profile_characters WHERE user_id = 1 AND character_id = 11")
+            .execute(&pool)
+            .await
+            .expect("simulate the loss");
+        let err = super::verify_migrated(&pool, &path, &backup, &before)
+            .await
+            .expect_err("a drop is an error");
+        assert!(err.to_string().contains("profile_characters"), "{err}");
+        let reopened = super::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .expect("reopen");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM profile_characters")
+            .fetch_one(&reopened)
+            .await
+            .expect("count");
+        assert_eq!(n, 3, "the backup was put back");
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_backup_is_not_trusted() {
+        let dir = temp_dir("badbackup");
+        let bad = dir.join("bad.db");
+        std::fs::write(&bad, b"this is not a database at all, just bytes").expect("write");
+        assert!(super::verify_backup(&bad).await.is_err());
+    }
+
+    #[test]
+    fn counts_only_compare_tables_present_on_both_sides() {
+        use std::collections::BTreeMap;
+        let b: BTreeMap<String, i64> =
+            [("a".into(), 3), ("gone".into(), 9), ("c".into(), 1)].into();
+        let a: BTreeMap<String, i64> = [("a".into(), 3), ("c".into(), 2), ("new".into(), 0)].into();
+        let r = super::compare_counts(&b, &a);
+        assert!(
+            r.dropped().is_none(),
+            "growth and a dropped legacy table are fine"
+        );
+        let a: BTreeMap<String, i64> = [("a".into(), 2), ("c".into(), 2)].into();
+        assert_eq!(
+            super::compare_counts(&b, &a).dropped(),
+            Some(vec!["a".to_string()])
+        );
+    }
+
+    #[test]
+    fn new_migrations_never_delete_or_drop_user_data() {
+        // 0011 and 0012 (earlier rounds, already deployed) dropped retired structures; everything after is additive.
+        let mut checked = 0;
+        for entry in std::fs::read_dir("migrations").expect("dir") {
+            let path = entry.expect("entry").path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let number: u32 = name.get(..4).and_then(|n| n.parse().ok()).unwrap_or(0);
+            if number < 13 {
+                continue;
+            }
+            let sql = std::fs::read_to_string(&path).expect("read").to_lowercase();
+            for bad in ["drop table", "drop column", "delete from", "truncate"] {
+                assert!(
+                    !sql.contains(bad),
+                    "{name} contains `{bad}`: migrations may only add"
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 6);
+    }
+
+    #[tokio::test]
+    async fn editing_and_resetting_one_member_never_touches_another() {
+        let pool = connect_memory().await;
+        for u in [1i64, 2] {
+            pdb::create_profile(&pool, u).await.expect("profile");
+            for c in [10i64, 11] {
+                pdb::add_character(&pool, u, c).await.expect("add");
+            }
+        }
+        let img = custom::NewImage {
+            hash: "h".into(),
+            mime: "image/png".into(),
+            bytes: vec![1, 2, 3],
+            width: 1,
+            height: 1,
+            animated: false,
+        };
+        let mut ids = Vec::new();
+        for u in [1i64, 2] {
+            match custom::store_image(&pool, u, &img, 30)
+                .await
+                .expect("store")
+            {
+                custom::StoreOutcome::Stored(id) | custom::StoreOutcome::Existing(id) => {
+                    ids.push(id)
+                }
+                other => panic!("{other:?}"),
+            }
+            custom::set_character_image(&pool, u, 10, ids[ids.len() - 1])
+                .await
+                .expect("set");
+        }
+        let snapshot = async |p: &SqlitePool| {
+            let rows: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM profile_characters WHERE user_id = 2 AND custom_image_id IS NOT NULL",
+            )
+            .fetch_one(p)
+            .await
+            .expect("count");
+            let imgs = custom::image_count(p, 2).await.expect("images");
+            let items = pdb::list_page(p, 2, None, 0, 100)
+                .await
+                .expect("list")
+                .len();
+            (rows, imgs, items)
+        };
+        let before = snapshot(&pool).await;
+        custom::reset_character(&pool, 1, 10)
+            .await
+            .expect("reset character");
+        pdb::reset_profile(&pool, 1).await.expect("reset profile");
+        assert_eq!(
+            snapshot(&pool).await,
+            before,
+            "member 2 is untouched by member 1's edits"
+        );
+        pdb::delete_user_data(&pool, 1)
+            .await
+            .expect("delete member 1");
+        assert_eq!(
+            snapshot(&pool).await,
+            before,
+            "and by member 1 deleting their data"
+        );
+        assert_eq!(
+            pdb::list_page(&pool, 1, None, 0, 10)
+                .await
+                .expect("list")
+                .len(),
+            0
+        );
     }
 
     #[test]
