@@ -58,7 +58,14 @@ pub fn pick_match<'a>(
 ) -> Option<&'a Page> {
     let strong: Vec<&Page> = pages
         .iter()
-        .filter(|p| p.kind == kind)
+        // `Other` is "any work": a page that is not a character (an anime, a series, a film…).
+        .filter(|p| {
+            if kind == Kind::Other {
+                p.kind != Kind::Character
+            } else {
+                p.kind == kind
+            }
+        })
         .filter(|p| match kind {
             Kind::Character => {
                 super::same_identity(title, parent, &p.title, p.parent_title.as_deref())
@@ -67,7 +74,10 @@ pub fn pick_match<'a>(
                 let t = normalize(super::base_title(title));
                 !t.is_empty() && t == normalize(super::base_title(&p.title))
             }
-            Kind::Other => false,
+            Kind::Other => {
+                let t = normalize(super::base_title(title));
+                !t.is_empty() && t == normalize(super::base_title(&p.title))
+            }
         })
         .collect();
     // The page that gives the most (a picture and a summary) wins; ties keep the wiki order.
@@ -101,17 +111,18 @@ impl<T: Transport + 'static> Wikis<T> {
         self.fills
             .try_get_with(key, async {
                 let now = chrono::Utc::now().timestamp();
+                let only = (kind != Kind::Other).then_some(kind);
                 let mut pages = super::store::by_title(
                     &self.pool,
                     &normalize(super::base_title(title)),
-                    Some(kind),
+                    only,
                     now,
                 )
                 .await
                 .unwrap_or_default();
                 if pick_match(title, parent, kind, &pages).is_none() {
                     pages.extend(
-                        self.search(super::base_title(title), Some(kind), None)
+                        self.search(super::base_title(title), only, None)
                             .await
                             .pages,
                     );
@@ -335,6 +346,24 @@ mod tests {
         assert!(
             pick_match("Silent Hill", None, Kind::Game, &pages).is_none(),
             "a prefix is not a match"
+        );
+    }
+
+    #[test]
+    fn any_work_matches_a_page_that_is_not_a_character_by_its_name() {
+        let pages = vec![
+            page(1, "Frieren", Kind::Character, Some("Frieren"), true),
+            page(2, "Frieren", Kind::Other, None, true),
+            page(3, "Frieren: Beyond Journey's End", Kind::Game, None, false),
+        ];
+        assert_eq!(
+            pick_match("Frieren", None, Kind::Other, &pages).map(|p| p.page_id),
+            Some(2),
+            "never the character page"
+        );
+        assert!(
+            pick_match("Sousou no Frieren", None, Kind::Other, &pages).is_none(),
+            "a different name is no match"
         );
     }
 

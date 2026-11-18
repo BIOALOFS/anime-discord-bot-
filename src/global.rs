@@ -130,8 +130,22 @@ pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
         return match data.anilist.media_by_id(id, ContentPolicy::SAFE).await {
             Ok(Some(m)) => {
                 let kind = kind_of(&m);
+                let mut card = cards::work_card(&m);
+                // A card that lacks a picture or a text may get them from a matching wiki page (empty fields only).
+                if let Some(fill) = data
+                    .wikis
+                    .fill_within(
+                        m.title.main(),
+                        None,
+                        crate::wiki::Kind::Other,
+                        crate::wiki::FILL_BUDGET,
+                    )
+                    .await
+                {
+                    crate::wiki::fill::enrich(&mut card, false, &fill);
+                }
                 Msg::card(
-                    cards::work_card(&m),
+                    card,
                     work_rows(
                         key,
                         m.site_url.as_deref(),
@@ -150,7 +164,19 @@ pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
         let Some(w) = data.tmdb.details(kind, id).await else {
             return Msg::unavailable();
         };
-        let e = tmdb::card::work_embed(&w, data.tmdb.region(), false);
+        let mut e = tmdb::card::work_embed(&w, data.tmdb.region(), false);
+        if let Some(fill) = data
+            .wikis
+            .fill_within(
+                &w.title,
+                None,
+                crate::wiki::Kind::Other,
+                crate::wiki::FILL_BUDGET,
+            )
+            .await
+        {
+            crate::wiki::fill::enrich(&mut e, w.poster.is_some(), &fill);
+        }
         return Msg::card(
             e,
             work_rows(
@@ -209,6 +235,30 @@ pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
     }
 }
 
+/// Add to a roster menu the wiki characters whose series matches the work strongly (cache only), skipping names the
+/// roster already has. A work's roster from AniList, TMDB or a game provider thus also shows what the owner's wikis know.
+async fn add_wiki_characters(data: &Data, work_title: &str, items: &mut Vec<(String, String)>) {
+    let room = 25usize.saturating_sub(items.len());
+    if room == 0 {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp();
+    let found = crate::wiki::store::characters_for_work(&data.db, work_title, now, 50)
+        .await
+        .unwrap_or_default();
+    let known: std::collections::HashSet<String> = items
+        .iter()
+        .map(|(l, _)| crate::wiki::normalize(l))
+        .collect();
+    items.extend(
+        found
+            .into_iter()
+            .filter(|p| !known.contains(&crate::wiki::normalize(&p.title)))
+            .take(room)
+            .map(|p| (crate::ui::embeds::fit(&p.title, 100), p.key())),
+    );
+}
+
 /// One page of the characters of a work (0-based), as a message with a menu of them and page buttons.
 pub async fn roster_msg(data: &Data, key: &str, page: usize, mature: bool) -> Msg {
     if let Some((wiki, game)) = crate::wiki::parse_key(key) {
@@ -232,7 +282,7 @@ pub async fn roster_msg(data: &Data, key: &str, page: usize, mature: bool) -> Ms
         if p.items.is_empty() {
             return Msg::text(i18n::NO_CHARACTERS);
         }
-        let items: Vec<(String, String)> = p
+        let mut items: Vec<(String, String)> = p
             .items
             .iter()
             .map(|(c, _)| {
@@ -242,6 +292,9 @@ pub async fn roster_msg(data: &Data, key: &str, page: usize, mature: bool) -> Ms
                 )
             })
             .collect();
+        if page == 0 {
+            add_wiki_characters(data, m.title.main(), &mut items).await;
+        }
         let mut rows: Vec<_> = components::character_menu(i18n::PICK_CHARACTER_PLACEHOLDER, &items)
             .into_iter()
             .collect();
@@ -263,7 +316,7 @@ pub async fn roster_msg(data: &Data, key: &str, page: usize, mature: bool) -> Ms
             .take(25)
             .map(|c| format!("**{}** — {}", c.display_name(), c.actor))
             .collect();
-        let items: Vec<(String, String)> = w
+        let mut items: Vec<(String, String)> = w
             .cast
             .iter()
             .take(25)
@@ -274,6 +327,7 @@ pub async fn roster_msg(data: &Data, key: &str, page: usize, mature: bool) -> Ms
                 )
             })
             .collect();
+        add_wiki_characters(data, &w.title, &mut items).await;
         let e = Emb::new()
             .title(format!("{} — {}", i18n::TITLE_CHARACTERS, w.title))
             .url(Some(w.url()))
@@ -311,10 +365,13 @@ async fn provider_roster(data: &Data, key: &str, page: usize, mature: bool) -> M
     let page = page.min(pages - 1);
     let slice = &list[page * ROSTER_PAGE..((page + 1) * ROSTER_PAGE).min(list.len())];
     let lines: Vec<String> = slice.iter().map(|c| format!("**{}**", c.title)).collect();
-    let items: Vec<(String, String)> = slice
+    let mut items: Vec<(String, String)> = slice
         .iter()
         .map(|c| (crate::ui::embeds::fit(&c.title, 100), c.id.clone()))
         .collect();
+    if page == 0 {
+        add_wiki_characters(data, &game.title, &mut items).await;
+    }
     let e = Emb::new()
         .title(format!("{} — {}", i18n::TITLE_CHARACTERS, game.title))
         .description(lines.join("\n"))
