@@ -911,6 +911,8 @@ pub async fn search_character(
     if ani.is_empty() && prov.is_empty() {
         let text = if source == CharacterSource::Games && !use_games {
             game_notice(games_on, &providers)
+        } else if use_games && providers.games_unavailable() {
+            i18n::GAMES_DOWN
         } else {
             i18n::NO_RESULTS
         };

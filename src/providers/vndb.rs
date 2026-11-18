@@ -10,8 +10,11 @@ use std::{collections::HashMap, time::Duration};
 use tokio::sync::Semaphore;
 
 const API: &str = "https://api.vndb.org/kana";
-const VN_FIELDS: &str =
-    "title,alttitle,released,rating,devstatus,image.url,image.sexual,tags.category,tags.rating";
+const VN_FIELDS: &str = "title,alttitle,released,rating,devstatus,image.url,image.sexual,image.violence,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating,releases.minage";
+#[cfg(test)]
+pub(super) const VN_FIELDS_FOR_TESTS: &str = VN_FIELDS;
+/// What the verdict of a novel needs (used when characters are vetted through their novels).
+const VERDICT_FIELDS: &str = "image.sexual,image.violence,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating,releases.minage";
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -57,85 +60,126 @@ impl Vndb {
             .map_err(|e| ProviderError::Parse(e.to_string()))
     }
 
-    pub async fn search_vns(&self, query: &str) -> Result<Vec<Work>, ProviderError> {
+    pub async fn search_vns(
+        &self,
+        query: &str,
+        allow_mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
         let doc = self
             .post("vn", json!({"filters": ["search", "=", query], "fields": VN_FIELDS, "sort": "searchrank", "results": 15}))
             .await?;
-        let mut out = parse_vns(&doc);
+        let mut out = parse_vns(&doc, allow_mature);
         out.truncate(10);
         Ok(out)
     }
 
     /// One page (20) of the most voted visual novels.
-    pub async fn popular_vns(&self, page: u32) -> Result<Vec<Work>, ProviderError> {
+    pub async fn popular_vns(
+        &self,
+        page: u32,
+        allow_mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
         let doc = self
             .post("vn", json!({"filters": ["votecount", ">=", 100], "fields": VN_FIELDS, "sort": "votecount", "reverse": true, "results": 20, "page": page.max(1)}))
             .await?;
-        Ok(parse_vns(&doc))
+        Ok(parse_vns(&doc, allow_mature))
     }
 
     /// The characters of one visual novel (`v17`).
-    pub async fn characters_of(&self, vn: &str) -> Result<Vec<Work>, ProviderError> {
+    pub async fn characters_of(
+        &self,
+        vn: &str,
+        allow_mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
         let doc = self
             .post(
                 "character",
                 character_request(json!(["vn", "=", ["id", "=", vn]]), 25),
             )
             .await?;
-        self.vet_characters(&doc).await
+        self.vet_characters(&doc, allow_mature).await
     }
 
-    pub async fn popular_characters(&self, page: u32) -> Result<Vec<Work>, ProviderError> {
+    pub async fn popular_characters(&self, allow_mature: bool) -> Result<Vec<Work>, ProviderError> {
         let doc = self
-            .post(
-                "character",
-                character_request(json!(["id", ">=", "c1"]), 12),
-            )
+            .post("character", {
+                let mut r = character_request(json!(["id", ">=", "c1"]), 40);
+                r["page"] = json!(rand::random_range(1..=40u32));
+                r
+            })
             .await?;
-        let _ = page;
-        self.vet_characters(&doc).await
+        self.vet_characters(&doc, allow_mature).await
     }
 
-    pub async fn vn_by_id(&self, id: &str) -> Result<Option<Work>, ProviderError> {
+    pub async fn vn_by_id(
+        &self,
+        id: &str,
+        allow_mature: bool,
+    ) -> Result<Option<Work>, ProviderError> {
         let doc = self
             .post(
                 "vn",
                 json!({"filters": ["id", "=", id], "fields": VN_FIELDS, "results": 1}),
             )
             .await?;
-        Ok(parse_vns(&doc).into_iter().next())
+        Ok(parse_vns(&doc, allow_mature).into_iter().next())
     }
 
-    pub async fn search_characters(&self, query: &str) -> Result<Vec<Work>, ProviderError> {
+    pub async fn search_characters(
+        &self,
+        query: &str,
+        allow_mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
         let doc = self
             .post(
                 "character",
                 character_request(json!(["search", "=", query]), 12),
             )
             .await?;
-        self.vet_characters(&doc).await
+        self.vet_characters(&doc, allow_mature).await
     }
 
-    pub async fn character_by_id(&self, n: i64) -> Result<Option<Work>, ProviderError> {
+    pub async fn character_by_id(
+        &self,
+        n: i64,
+        allow_mature: bool,
+    ) -> Result<Option<Work>, ProviderError> {
         let doc = self
             .post(
                 "character",
                 character_request(json!(["id", "=", format!("c{n}")]), 1),
             )
             .await?;
-        Ok(self.vet_characters(&doc).await?.into_iter().next())
+        Ok(self
+            .vet_characters(&doc, allow_mature)
+            .await?
+            .into_iter()
+            .next())
     }
 
     /// Characters carry no tags, so the visual novels they appear in are checked in one extra request.
-    async fn vet_characters(&self, doc: &Value) -> Result<Vec<Work>, ProviderError> {
+    async fn vet_characters(
+        &self,
+        doc: &Value,
+        allow_mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
         let ids = character_vn_ids(doc);
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let mut filter = vec![json!("or")];
         filter.extend(ids.iter().map(|id| json!(["id", "=", id])));
-        let vns = self.post("vn", json!({"filters": filter, "fields": "image.sexual,tags.category,tags.rating", "results": 100})).await?;
-        Ok(parse_characters(doc, &vn_verdicts(&vns)))
+        let vns = self
+            .post(
+                "vn",
+                json!({"filters": filter, "fields": VERDICT_FIELDS, "results": 100}),
+            )
+            .await?;
+        Ok(parse_characters(
+            doc,
+            &vn_verdicts(&vns, allow_mature),
+            allow_mature,
+        ))
     }
 }
 
@@ -144,35 +188,65 @@ impl CatalogProvider for Vndb {
         Source::Vndb
     }
     async fn search(&self, query: &str) -> Result<Vec<Work>, ProviderError> {
-        self.search_vns(query).await
+        self.search_vns(query, true).await
     }
 }
 
 fn character_request(filter: Value, results: u32) -> Value {
-    json!({"filters": filter, "fields": "name,original,image.url,image.sexual,vns.id,vns.title", "results": results})
+    json!({"filters": filter, "fields": "name,original,image.url,image.sexual,image.violence,traits.name,traits.group_name,vns.id,vns.title", "results": results})
+}
+
+fn max_flag(v: &Value, key: &str) -> Option<i64> {
+    let mut flags: Vec<i64> = Vec::new();
+    flags.extend(v.pointer(&format!("/image/{key}")).and_then(Value::as_i64));
+    flags.extend(
+        v.get("screenshots")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.get(key).and_then(Value::as_i64)),
+    );
+    flags.into_iter().max()
 }
 
 fn vn_facts(v: &Value) -> VnFacts {
     let tags = v.get("tags").and_then(Value::as_array);
+    let sexual_tag = tags.is_some_and(|t| {
+        t.iter().any(|x| {
+            safety::is_sexual_tag(
+                x.get("category").and_then(Value::as_str),
+                x.get("id").and_then(Value::as_str),
+                x.get("name").and_then(Value::as_str),
+            )
+        })
+    });
     VnFacts {
-        image_sexual: v.pointer("/image/sexual").and_then(Value::as_i64),
-        // Any content tag in the "ero" category counts, whatever its score.
-        sexual_tag: tags.is_some_and(|t| {
-            t.iter()
-                .any(|x| x.get("category").and_then(Value::as_str) == Some("ero"))
-        }),
-        // An empty or absent tag list gives no way to judge the novel.
-        tags_known: tags.is_some_and(|t| !t.is_empty()),
+        // The cover and every screenshot count: the worst one decides.
+        image_sexual: max_flag(v, "sexual"),
+        image_violence: max_flag(v, "violence"),
+        sexual_tag,
+        adult_minage: v
+            .get("releases")
+            .and_then(Value::as_array)
+            .is_some_and(|r| {
+                r.iter().any(|x| {
+                    x.get("minage")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|m| m >= 18)
+                })
+            }),
+        // An empty tag list is a real answer (nothing sexual is tagged); only a missing list gives no verdict.
+        tags_known: tags.is_some(),
     }
 }
 
-pub(super) fn parse_vns(doc: &Value) -> Vec<Work> {
+pub(super) fn parse_vns(doc: &Value, allow_mature: bool) -> Vec<Work> {
     let Some(list) = doc.get("results").and_then(Value::as_array) else {
         return Vec::new();
     };
     list.iter()
         .filter_map(|v| {
-            if !safety::vn_allowed(&vn_facts(v)) {
+            if !safety::vn_allowed(&vn_facts(v), allow_mature) {
                 return None;
             }
             let id = v.get("id")?.as_str()?;
@@ -243,7 +317,7 @@ fn character_vn_ids(doc: &Value) -> Vec<String> {
 }
 
 /// `vn id -> allowed`.
-pub(super) fn vn_verdicts(doc: &Value) -> HashMap<String, bool> {
+pub(super) fn vn_verdicts(doc: &Value, allow_mature: bool) -> HashMap<String, bool> {
     doc.get("results")
         .and_then(Value::as_array)
         .map(|l| {
@@ -251,7 +325,7 @@ pub(super) fn vn_verdicts(doc: &Value) -> HashMap<String, bool> {
                 .filter_map(|v| {
                     Some((
                         v.get("id")?.as_str()?.to_string(),
-                        safety::vn_allowed(&vn_facts(v)),
+                        safety::vn_allowed(&vn_facts(v), allow_mature),
                     ))
                 })
                 .collect()
@@ -259,8 +333,12 @@ pub(super) fn vn_verdicts(doc: &Value) -> HashMap<String, bool> {
         .unwrap_or_default()
 }
 
-/// A character is hidden unless it has a safe picture and every checked appearance is verified safe.
-pub(super) fn parse_characters(doc: &Value, verdicts: &HashMap<String, bool>) -> Vec<Work> {
+/// A character is hidden on a sexual trait or picture, or unless every checked appearance is verified safe.
+pub(super) fn parse_characters(
+    doc: &Value,
+    verdicts: &HashMap<String, bool>,
+    allow_mature: bool,
+) -> Vec<Work> {
     let Some(list) = doc.get("results").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -271,9 +349,20 @@ pub(super) fn parse_characters(doc: &Value, verdicts: &HashMap<String, bool>) ->
                 .and_then(Value::as_array)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
+            let sexual_trait = c.get("traits").and_then(Value::as_array).is_some_and(|t| {
+                t.iter().any(|x| {
+                    safety::is_sexual_trait(
+                        x.get("group_name").and_then(Value::as_str),
+                        x.get("name").and_then(Value::as_str),
+                    )
+                })
+            });
             if !safety::vn_character_allowed(
                 c.pointer("/image/sexual").and_then(Value::as_i64),
+                c.pointer("/image/violence").and_then(Value::as_i64),
+                sexual_trait,
                 vns.len(),
+                allow_mature,
             ) {
                 return None;
             }

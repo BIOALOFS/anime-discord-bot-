@@ -113,7 +113,7 @@ async fn ac_work(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteC
                 },
                 async {
                     if games_on {
-                        providers.search_visual_novels(&q).await
+                        providers.search_visual_novels(&q, mature).await
                     } else {
                         Vec::new()
                     }
@@ -197,7 +197,7 @@ async fn resolve(ctx: Context<'_>, raw: &str) -> Result<Option<Picked>, Error> {
     }
     if games_on {
         let mut found = data.providers.search_games(raw, mature).await;
-        found.extend(data.providers.search_visual_novels(raw).await);
+        found.extend(data.providers.search_visual_novels(raw, mature).await);
         if let Some(w) = found.first() {
             return Ok(Some(Picked::from_work(w)));
         }

@@ -433,6 +433,9 @@ pub const BTN_CHAPTER: &str = "فصل";
 pub const CHAPTER_DIGEST_EXPIRED: &str =
     "انتهت صلاحية هذا الملخص، ستصلك الفصول القادمة في الملخص التالي.";
 
+pub const GAMES_DOWN: &str =
+    "مصدر الألعاب لا يستجيب الآن، فلا أستطيع الحكم على الألعاب بأمان. جرّب بعد قليل.";
+
 #[cfg(test)]
 mod tests {
     /// Constants that are brand names or symbols, not sentences.

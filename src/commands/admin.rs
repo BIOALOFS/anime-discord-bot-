@@ -358,7 +358,7 @@ impl AdminView {
     async fn load(pool: &SqlitePool, guilds: &GuildStore, guild: i64) -> Result<State, Error> {
         Ok(State {
             nsfw: custom::nsfw_mode(pool, guild).await?,
-            mature: custom::mature_games(pool, guild).await?,
+            mature: custom::mature_themes(pool, guild).await?,
             games: custom::games_enabled(pool, guild).await?,
             images: custom::custom_images_enabled(pool, guild).await?,
             upload_admins: adb::upload_admins_only(pool, guild).await?,
@@ -422,7 +422,7 @@ pub fn embed_for(screen: Screen, s: &State, guild: i64) -> Emb {
     match screen {
         Screen::Home => e.title("🛠 لوحة الإدارة").description("اختر قسمًا من الأزرار. كل التغييرات تُحفظ فورًا."),
         Screen::Safety => e.title("🛡 الأمان").description(format!(
-            "• سياسة NSFW: {}\n• عرض الألعاب ذات التصنيف الناضج (M / PEGI 18): {}\n• مصادر الألعاب (IGDB / VNDB): {}\n\nالمحتوى الجنسي مخفي دائمًا مهما كانت الإعدادات.",
+            "• سياسة NSFW: {}\n• المواضيع الناضجة (الرعب والحرب والعنف) في الألعاب والروايات البصرية: {}\n• مصادر الألعاب (IGDB / VNDB): {}\n\nالحكم على الألعاب يعتمد على المحتوى (المواضيع والأنواع والكلمات المفتاحية والعلامات) وليس على التصنيف العمري. المحتوى الجنسي مخفي دائمًا مهما كانت الإعدادات، وإطفاء «المواضيع الناضجة» يخفي أيضًا ألعاب الرعب والحرب والعنف الشديد.",
             yes_no(s.nsfw),
             yes_no(s.mature),
             yes_no(s.games)
@@ -517,7 +517,7 @@ pub fn components_for(
         Screen::Safety => vec![
             buttons(vec![
                 toggle(T_NSFW, "NSFW", s.nsfw, enabled),
-                toggle(T_MATURE, "ألعاب ناضجة", s.mature, enabled),
+                toggle(T_MATURE, "مواضيع ناضجة", s.mature, enabled),
                 toggle(T_GAMES, "الألعاب", s.games, enabled),
             ]),
             nav(vec![]),
@@ -784,7 +784,7 @@ impl View for AdminView {
                 CLOSE => return Ok(()),
                 BACK => self.screen = Screen::Home,
                 T_NSFW => custom::set_nsfw_mode(&pool, g, !self.state.nsfw).await?,
-                T_MATURE => custom::set_mature_games(&pool, g, !self.state.mature).await?,
+                T_MATURE => custom::set_mature_themes(&pool, g, !self.state.mature).await?,
                 T_GAMES => custom::set_games(&pool, g, !self.state.games).await?,
                 N_TOGGLE => feed::set_enabled(&pool, g, !self.state.feed.enabled).await?,
                 N_PING => adb::set_reminder_ping(&pool, g, !self.state.reminder_ping).await?,

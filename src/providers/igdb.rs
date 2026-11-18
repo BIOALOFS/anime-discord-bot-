@@ -16,8 +16,8 @@ use tokio::sync::{Mutex, Semaphore};
 const API: &str = "https://api.igdb.com/v4";
 const TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
 const IMAGE: &str = "https://images.igdb.com/igdb/image/upload/t_cover_big";
-const GAME_FIELDS: &str = "name,url,first_release_date,total_rating,total_rating_count,cover.image_id,genres.name,themes.id,themes.name,age_ratings.category,age_ratings.rating";
-const CHARACTER_FIELDS: &str = "name,url,mug_shot.image_id,games.name,games.total_rating_count,games.themes.id,games.themes.name,games.age_ratings.category,games.age_ratings.rating";
+pub(super) const GAME_FIELDS: &str = "name,summary,url,first_release_date,total_rating,total_rating_count,cover.image_id,genres.name,themes.id,themes.name,keywords.name";
+pub(super) const CHARACTER_FIELDS: &str = "name,url,mug_shot.image_id,games.name,games.total_rating_count,games.genres.name,games.themes.id,games.themes.name,games.keywords.name";
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -120,10 +120,13 @@ impl Igdb {
             if !resp.status().is_success() {
                 return Err(ProviderError::Http(resp.status().to_string()));
             }
-            return resp
+            let doc: Value = resp
                 .json()
                 .await
-                .map_err(|e| ProviderError::Parse(e.to_string()));
+                .map_err(|e| ProviderError::Parse(e.to_string()))?;
+            // An error body is a failure, not an empty answer: nothing may be judged from it.
+            ensure_games(&doc)?;
+            return Ok(doc);
         }
         Err(ProviderError::Http("unauthorized".into()))
     }
@@ -134,7 +137,7 @@ impl Igdb {
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
         let body = format!(
-            "search {}; fields {GAME_FIELDS}; where version_parent = null; limit 25;",
+            "search {}; fields {GAME_FIELDS}; where version_parent = null; limit 50;",
             quote(query)
         );
         let doc = self.query("games", body).await?;
@@ -149,7 +152,7 @@ impl Igdb {
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
         let body = format!(
-            "search {}; fields {GAME_FIELDS}; where version_parent = null & platforms.name ~ *{}*; limit 25;",
+            "search {}; fields {GAME_FIELDS}; where version_parent = null & platforms.name ~ *{}*; limit 50;",
             quote(query),
             quote(platform)
         );
@@ -161,6 +164,7 @@ impl Igdb {
     pub async fn popular_games(
         &self,
         offset: u32,
+        min_votes: u32,
         platform: Option<&str>,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
@@ -168,7 +172,7 @@ impl Igdb {
             .map(|p| format!(" & platforms.name ~ *{}*", quote(p)))
             .unwrap_or_default();
         let body = format!(
-            "fields {GAME_FIELDS}; where version_parent = null & total_rating_count > 25{plat}; sort total_rating_count desc; limit 20; offset {offset};"
+            "fields {GAME_FIELDS}; where version_parent = null & total_rating_count > {min_votes}{plat}; sort total_rating_count desc; limit 40; offset {offset};"
         );
         let doc = self.query("games", body).await?;
         Ok(parse_games(&doc, allow_mature)
@@ -196,7 +200,7 @@ impl Igdb {
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
         let body = format!(
-            "fields {CHARACTER_FIELDS}; where mug_shot != null; limit 20; offset {offset};"
+            "fields {CHARACTER_FIELDS}; where mug_shot != null; limit 40; offset {offset};"
         );
         let doc = self.query("characters", body).await?;
         Ok(parse_characters(&doc, allow_mature)
@@ -224,7 +228,7 @@ impl Igdb {
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
         let body = format!(
-            "search {}; fields {CHARACTER_FIELDS}; limit 25;",
+            "search {}; fields {CHARACTER_FIELDS}; limit 50;",
             quote(query)
         );
         let doc = self.query("characters", body).await?;
@@ -266,20 +270,40 @@ fn rank(mut v: Vec<(Work, u64)>, n: usize) -> Vec<Work> {
     v.into_iter().take(n).map(|(w, _)| w).collect()
 }
 
+fn names(v: &Value, key: &str) -> Vec<String> {
+    arr(v, key)
+        .iter()
+        .filter_map(|x| x.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+/// The content facts of one game: themes, genres and keywords only (age ratings are never read).
 fn facts_of(game: &Value) -> GameFacts {
     let ids: Vec<i64> = arr(game, "themes")
         .iter()
         .filter_map(|t| t.get("id").and_then(Value::as_i64))
         .collect();
-    let names: Vec<String> = arr(game, "themes")
-        .iter()
-        .filter_map(|t| t.get("name").and_then(Value::as_str).map(str::to_string))
-        .collect();
-    let ratings: Vec<(i64, i64)> = arr(game, "age_ratings")
-        .iter()
-        .filter_map(|r| Some((r.get("category")?.as_i64()?, r.get("rating")?.as_i64()?)))
-        .collect();
-    safety::facts_from(&ids, &names, &ratings)
+    safety::game_facts(
+        &ids,
+        &names(game, "themes"),
+        &names(game, "genres"),
+        &names(game, "keywords"),
+    )
+}
+
+/// IGDB reports a bad request as an array of error objects (`status`, `title`, `cause`) instead of games: that is
+/// "the fields were not retrieved", never "no games", and must not be judged.
+pub(super) fn ensure_games(doc: &Value) -> Result<(), ProviderError> {
+    let Some(list) = doc.as_array() else {
+        return Err(ProviderError::Parse("not a list".into()));
+    };
+    if list.iter().any(|g| {
+        g.get("id").is_none()
+            && (g.get("status").is_some() || g.get("cause").is_some() || g.get("message").is_some())
+    }) {
+        return Err(ProviderError::Parse("IGDB error response".into()));
+    }
+    Ok(())
 }
 
 fn arr<'a>(v: &'a Value, key: &str) -> &'a [Value] {
@@ -304,7 +328,7 @@ pub(super) fn parse_games(doc: &Value, allow_mature: bool) -> Vec<(Work, u64)> {
     list.iter()
         .filter_map(|g| {
             let id = g.get("id")?.as_i64()?;
-            // Verdict first: sexual content, AO and (optionally) mature games never get through.
+            // Verdict first: a sexual-content signal never gets through; horror and war only when allowed.
             if !safety::game_allowed(&facts_of(g), allow_mature) {
                 return None;
             }
@@ -347,7 +371,7 @@ pub(super) fn parse_games(doc: &Value, allow_mature: bool) -> Vec<(Work, u64)> {
         .collect()
 }
 
-/// A character is shown only when it has appearances, none of them is erotic/AO, and at least one is allowed.
+/// A character is shown only when it has appearances, none of them carries a sexual signal, and at least one is allowed.
 pub(super) fn parse_characters(doc: &Value, allow_mature: bool) -> Vec<(Work, u64)> {
     let Some(list) = doc.as_array() else {
         return Vec::new();
@@ -357,7 +381,7 @@ pub(super) fn parse_characters(doc: &Value, allow_mature: bool) -> Vec<(Work, u6
             let id = c.get("id")?.as_i64()?;
             let games = arr(c, "games");
             let facts: Vec<GameFacts> = games.iter().map(facts_of).collect();
-            if facts.iter().any(|f| f.erotic || f.esrb_ao) {
+            if facts.iter().any(safety::is_sexual) {
                 return None;
             }
             let mut main: Option<(&Value, u64)> = None;

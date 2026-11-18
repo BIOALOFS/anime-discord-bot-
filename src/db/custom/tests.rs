@@ -131,12 +131,12 @@ async fn server_switches_default_to_safe_values() {
     assert!(games_enabled(&pool, 1).await.expect("g"));
     assert!(!nsfw_mode(&pool, 1).await.expect("n"));
     assert!(
-        mature_games(&pool, 1).await.expect("m"),
-        "mature-rated games are allowed by default"
+        mature_themes(&pool, 1).await.expect("m"),
+        "mature themes are allowed by default"
     );
-    set_mature_games(&pool, 1, false).await.expect("off");
-    assert!(!mature_games(&pool, 1).await.expect("m"));
-    assert!(mature_games(&pool, 2).await.expect("other guild"));
+    set_mature_themes(&pool, 1, false).await.expect("off");
+    assert!(!mature_themes(&pool, 1).await.expect("m"));
+    assert!(mature_themes(&pool, 2).await.expect("other guild"));
     set_custom_images(&pool, 1, true).await.expect("on");
     set_games(&pool, 1, false).await.expect("off");
     assert!(custom_images_enabled(&pool, 1).await.expect("ci"));

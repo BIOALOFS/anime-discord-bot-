@@ -180,11 +180,17 @@ pub struct Providers {
     mangaupdates: MangaUpdates,
     igdb: Option<Igdb>,
     vndb: Vndb,
+    igdb_down: std::sync::atomic::AtomicBool,
+    vndb_down: std::sync::atomic::AtomicBool,
     dex_limit: Limiter,
     mu_limit: Limiter,
     searches: Cache<String, Arc<Vec<Work>>>,
     covers: Cache<String, Arc<Vec<u8>>>,
 }
+
+/// Random picks: `(page spread, IGDB popularity floor)`. Each attempt looks at nearer pages with a lower floor, so a
+/// narrow filter or a sparse page still ends with an allowed game when one exists.
+const RANDOM_ATTEMPTS: [(u32, u32); 4] = [(30, 25), (10, 10), (3, 2), (0, 0)];
 
 fn per_second(n: u32) -> Limiter {
     RateLimiter::direct(Quota::per_second(
@@ -202,6 +208,8 @@ impl Providers {
                 .clone()
                 .map(|(id, secret)| Igdb::new(http.clone(), id, secret)),
             vndb: Vndb::new(http.clone()),
+            igdb_down: std::sync::atomic::AtomicBool::new(false),
+            vndb_down: std::sync::atomic::AtomicBool::new(false),
             http,
             cfg,
             // MangaDex allows about 5 requests/second per IP; stay below it.
@@ -276,7 +284,33 @@ impl Providers {
         .await
     }
 
-    /// Games from IGDB; sexual content is always hidden, mature-rated games only when `allow_mature`.
+    /// Record whether the last call to a provider worked, so an empty answer after a failure is reported as "the
+    /// provider is unavailable" and not as "no games".
+    fn note<T>(&self, igdb: bool, r: Result<T, ProviderError>) -> Result<T, ProviderError> {
+        let flag = if igdb {
+            &self.igdb_down
+        } else {
+            &self.vndb_down
+        };
+        flag.store(r.is_err(), std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = &r {
+            tracing::warn!(
+                provider = if igdb { "igdb" } else { "vndb" },
+                "game provider failed: {e}"
+            );
+        }
+        r
+    }
+
+    /// Did the last request of an enabled game provider fail (so an empty result means "unavailable")?
+    pub fn games_unavailable(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.igdb.is_some() && self.igdb_down.load(Relaxed))
+            || (self.cfg.vndb && self.vndb_down.load(Relaxed))
+    }
+
+    /// Games from IGDB, judged by content: a sexual signal always hides a game; horror and war only when
+    /// `allow_mature` (the `mature-themes` setting) is off. Age ratings play no part.
     pub async fn search_games(&self, query: &str, allow_mature: bool) -> Vec<Work> {
         let (Some(igdb), true) = (&self.igdb, query.trim().chars().count() >= 2) else {
             return Vec::new();
@@ -284,13 +318,8 @@ impl Providers {
         self.cached(
             format!("igdb:g:{allow_mature}:{}", query.trim().to_lowercase()),
             || async {
-                match igdb.search_games(query, allow_mature).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::debug!("igdb game search failed: {e}");
-                        Vec::new()
-                    }
-                }
+                self.note(true, igdb.search_games(query, allow_mature).await)
+                    .unwrap_or_default()
             },
         )
         .await
@@ -313,18 +342,19 @@ impl Providers {
                 query.trim().to_lowercase()
             ),
             || async {
-                igdb.search_games_on(query, platform, allow_mature)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::debug!("igdb platform search failed: {e}");
-                        Vec::new()
-                    })
+                self.note(
+                    true,
+                    igdb.search_games_on(query, platform, allow_mature).await,
+                )
+                .unwrap_or_default()
             },
         )
         .await
     }
 
     /// A random well-known game (optionally on a platform) or visual novel. `source`: `igdb`, `vndb` or `None` for either.
+    /// The pick comes from popularity-sorted pages; a page whose games were all filtered out, or an offset past the end,
+    /// is not a failure: the next attempt looks at a nearer, then the first, page with a lower popularity floor.
     pub async fn random_work(
         &self,
         source: Option<&str>,
@@ -337,26 +367,48 @@ impl Providers {
             (true, true) => rand::random_range(0..2) == 0,
             (a, _) => a,
         };
-        let list = if use_igdb {
-            let offset = rand::random_range(0..30u32) * 20;
-            self.igdb
-                .as_ref()?
-                .popular_games(offset, platform, allow_mature)
-                .await
-                .unwrap_or_default()
-        } else if want_vndb {
-            self.vndb
-                .popular_vns(rand::random_range(1..=15))
-                .await
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        if list.is_empty() {
-            return None;
+        for (spread, floor) in RANDOM_ATTEMPTS {
+            let list = if use_igdb {
+                let offset = rand::random_range(0..=spread) * 40;
+                match self
+                    .igdb
+                    .as_ref()?
+                    .popular_games(offset, floor, platform, allow_mature)
+                    .await
+                {
+                    Ok(l) => {
+                        let _ = self.note(true, Ok::<(), ProviderError>(()));
+                        l
+                    }
+                    Err(e) => {
+                        let _ = self.note::<()>(true, Err(e));
+                        return None;
+                    }
+                }
+            } else if want_vndb {
+                match self
+                    .vndb
+                    .popular_vns(rand::random_range(1..=spread.max(1)), allow_mature)
+                    .await
+                {
+                    Ok(l) => {
+                        let _ = self.note(false, Ok::<(), ProviderError>(()));
+                        l
+                    }
+                    Err(e) => {
+                        let _ = self.note::<()>(false, Err(e));
+                        return None;
+                    }
+                }
+            } else {
+                return None;
+            };
+            if !list.is_empty() {
+                let i = rand::random_range(0..list.len());
+                return list.into_iter().nth(i);
+            }
         }
-        let i = rand::random_range(0..list.len());
-        list.into_iter().nth(i)
+        None
     }
 
     /// The characters of a game or visual novel from its provider key (`igdb:55`, `vndb:v17`).
@@ -367,54 +419,57 @@ impl Providers {
         self.cached(format!("roster:{key}:{allow_mature}"), || async {
             match prefix {
                 "igdb" => match (&self.igdb, tail.parse::<i64>()) {
-                    (Some(igdb), Ok(id)) => igdb
-                        .characters_of(id, allow_mature)
-                        .await
+                    (Some(igdb), Ok(id)) => self
+                        .note(true, igdb.characters_of(id, allow_mature).await)
                         .unwrap_or_default(),
                     _ => Vec::new(),
                 },
-                "vndb" if self.cfg.vndb && tail.starts_with('v') => {
-                    self.vndb.characters_of(tail).await.unwrap_or_default()
-                }
+                "vndb" if self.cfg.vndb && tail.starts_with('v') => self
+                    .note(false, self.vndb.characters_of(tail, allow_mature).await)
+                    .unwrap_or_default(),
                 _ => Vec::new(),
             }
         })
         .await
     }
 
-    /// A random game or visual-novel character.
+    /// A random game or visual-novel character (same widening attempts as `random_work`).
     pub async fn random_character(&self, source: Option<&str>, allow_mature: bool) -> Option<Work> {
         let want_igdb = self.igdb.is_some() && source != Some("vndb");
-        let list = if want_igdb {
-            let offset = rand::random_range(0..100u32) * 20;
-            self.igdb
-                .as_ref()?
-                .popular_characters(offset, allow_mature)
-                .await
-                .unwrap_or_default()
-        } else if self.cfg.vndb {
-            self.vndb.popular_characters(1).await.unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        if list.is_empty() {
-            return None;
+        for (spread, _) in RANDOM_ATTEMPTS {
+            let list = if want_igdb {
+                let offset = rand::random_range(0..=spread) * 40;
+                self.note(
+                    true,
+                    self.igdb
+                        .as_ref()?
+                        .popular_characters(offset, allow_mature)
+                        .await,
+                )
+                .ok()?
+            } else if self.cfg.vndb {
+                self.note(false, self.vndb.popular_characters(allow_mature).await)
+                    .ok()?
+            } else {
+                return None;
+            };
+            if !list.is_empty() {
+                let i = rand::random_range(0..list.len());
+                return list.into_iter().nth(i);
+            }
         }
-        let i = rand::random_range(0..list.len());
-        list.into_iter().nth(i)
+        None
     }
 
-    pub async fn search_visual_novels(&self, query: &str) -> Vec<Work> {
+    pub async fn search_visual_novels(&self, query: &str, allow_mature: bool) -> Vec<Work> {
         if !self.cfg.vndb || query.trim().chars().count() < 2 {
             return Vec::new();
         }
         self.cached(
-            format!("vndb:v:{}", query.trim().to_lowercase()),
+            format!("vndb:v:{allow_mature}:{}", query.trim().to_lowercase()),
             || async {
-                self.vndb.search_vns(query).await.unwrap_or_else(|e| {
-                    tracing::debug!("vndb search failed: {e}");
-                    Vec::new()
-                })
+                self.note(false, self.vndb.search_vns(query, allow_mature).await)
+                    .unwrap_or_default()
             },
         )
         .await
@@ -431,12 +486,8 @@ impl Providers {
                 .cached(
                     format!("igdb:c:{allow_mature}:{}", query.trim().to_lowercase()),
                     || async {
-                        igdb.search_characters(query, allow_mature)
-                            .await
-                            .unwrap_or_else(|e| {
-                                tracing::debug!("igdb character search failed: {e}");
-                                Vec::new()
-                            })
+                        self.note(true, igdb.search_characters(query, allow_mature).await)
+                            .unwrap_or_default()
                     },
                 )
                 .await;
@@ -445,15 +496,13 @@ impl Providers {
         if self.cfg.vndb {
             let found = self
                 .cached(
-                    format!("vndb:c:{}", query.trim().to_lowercase()),
+                    format!("vndb:c:{allow_mature}:{}", query.trim().to_lowercase()),
                     || async {
-                        self.vndb
-                            .search_characters(query)
-                            .await
-                            .unwrap_or_else(|e| {
-                                tracing::debug!("vndb character search failed: {e}");
-                                Vec::new()
-                            })
+                        self.note(
+                            false,
+                            self.vndb.search_characters(query, allow_mature).await,
+                        )
+                        .unwrap_or_default()
                     },
                 )
                 .await;
@@ -468,16 +517,21 @@ impl Providers {
         let (prefix, tail) = key.split_once(':')?;
         match prefix {
             "igdb" => self
-                .igdb
-                .as_ref()?
-                .game_by_id(tail.parse().ok()?, allow_mature)
-                .await
+                .note(
+                    true,
+                    self.igdb
+                        .as_ref()?
+                        .game_by_id(tail.parse().ok()?, allow_mature)
+                        .await,
+                )
                 .ok()
                 .flatten(),
             "vndb"
                 if self.cfg.vndb && tail.starts_with('v') && tail[1..].parse::<u64>().is_ok() =>
             {
-                self.vndb.vn_by_id(tail).await.ok().flatten()
+                self.note(false, self.vndb.vn_by_id(tail, allow_mature).await)
+                    .ok()
+                    .flatten()
             }
             _ => None,
         }
@@ -489,13 +543,16 @@ impl Providers {
         let n: i64 = tail.trim_start_matches('c').parse().ok()?;
         match prefix {
             "igdb" => self
-                .igdb
-                .as_ref()?
-                .character_by_id(n, allow_mature)
-                .await
+                .note(
+                    true,
+                    self.igdb.as_ref()?.character_by_id(n, allow_mature).await,
+                )
                 .ok()
                 .flatten(),
-            "vndb" if self.cfg.vndb => self.vndb.character_by_id(n).await.ok().flatten(),
+            "vndb" if self.cfg.vndb => self
+                .note(false, self.vndb.character_by_id(n, allow_mature).await)
+                .ok()
+                .flatten(),
             _ => None,
         }
     }
