@@ -392,6 +392,10 @@ async fn has_performers(data: &Data, key: &str, mature: bool) -> bool {
 
 /// The card of a character of any source. `value` is an AniList character id, a `tmdb-cast:` key or a provider key.
 pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
+    // A person added to a profile is listed with the characters: its stored id opens the person card.
+    if crate::people::parse_key(value).is_some() {
+        return crate::people::msgs::person_msg(data, value, mature).await;
+    }
     if let Ok(id) = value.parse::<i64>() {
         return match data.anilist.character_by_id(id, ContentPolicy::SAFE).await {
             Ok(CharacterLookup::Found(c)) => {
@@ -588,6 +592,24 @@ async fn add_inner(data: &Data, key: &str, user: i64, mature: bool) -> Result<St
             pdb::add_character(pool, user, cid).await?,
             c.display_name(),
         ));
+    }
+    if crate::people::parse_key(key).is_some() {
+        // A person is added as a character (companies cannot be).
+        if !crate::people::addable(key) {
+            return Ok(i18n::PERSON_NOT_ADDABLE.to_string());
+        }
+        let crate::people::fetch::Card::Found(p) =
+            crate::people::fetch::person(&crate::people::fetch::Sources::of(data), key, mature)
+                .await
+        else {
+            return Ok(i18n::SHOW_WORK_UNAVAILABLE.to_string());
+        };
+        return Ok(
+            match crate::people::profile::add(pool, user, &p, now).await? {
+                Some(outcome) => added_text(outcome, &p.name),
+                None => i18n::PERSON_NOT_ADDABLE.to_string(),
+            },
+        );
     }
     if key.starts_with("igdb:c") || key.starts_with("vndb:c") {
         return match data.providers.character_by_key(key, mature).await {

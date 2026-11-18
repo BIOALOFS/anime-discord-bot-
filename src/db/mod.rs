@@ -153,14 +153,27 @@ pub fn compare_counts(
     }
 }
 
-/// Put a backup back in place of the database (the pool must be closed first).
+/// Put a backup back in place of the database (the pool must be closed first). The copy is written next to the database
+/// and renamed over it, so the database file becomes a new file in one step: nothing that still holds the old one open
+/// can write into the restored data, and a crash leaves either the old or the complete new file.
 pub fn restore_backup(backup: &std::path::Path, db: &std::path::Path) -> anyhow::Result<()> {
+    let mut staged = db.as_os_str().to_owned();
+    staged.push(".restoring");
+    let staged = std::path::PathBuf::from(staged);
+    std::fs::copy(backup, &staged).map_err(|e| {
+        anyhow::anyhow!(
+            "could not copy {} next to {}: {e}",
+            backup.display(),
+            db.display()
+        )
+    })?;
+    // Leftover write-ahead files belong to the data that is being replaced.
     for suffix in ["-wal", "-shm"] {
         let mut side = db.as_os_str().to_owned();
         side.push(suffix);
         let _ = std::fs::remove_file(std::path::PathBuf::from(side));
     }
-    std::fs::copy(backup, db).map_err(|e| {
+    std::fs::rename(&staged, db).map_err(|e| {
         anyhow::anyhow!(
             "could not restore {} over {}: {e}",
             backup.display(),

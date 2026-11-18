@@ -470,6 +470,7 @@ pub fn search_results_for(q: &str) -> String {
     format!("نتائج البحث عن «{q}»")
 }
 pub const SEARCH_NEEDS_NAME: &str = "اكتب اسم عمل أو شخصية أو شخص للبحث.";
+pub const PERSON_NOT_ADDABLE: &str = "الشركات ما تُضاف للبروفايل، فقط الأشخاص.";
 pub const PICK_PERSON_TITLE: &str = "من تقصد؟";
 pub const PICK_PERSON_PLACEHOLDER: &str = "افتح بطاقة شخص…";
 pub const PICK_PERFORMER_PLACEHOLDER: &str = "اختر المؤدي…";

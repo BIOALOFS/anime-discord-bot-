@@ -120,6 +120,10 @@ pub fn person_rows(p: &Person) -> Vec<serenity::CreateActionRow> {
     if !p.credits.is_empty() {
         buttons.push(components::works_button(&p.key));
     }
+    // Actors, voice actors, staff: the same add-to-profile button as a character (companies have none).
+    if super::addable(&p.key) {
+        buttons.push(components::add_button(&p.key));
+    }
     if let Some(u) = p.url.as_deref().filter(|u| u.starts_with("https://")) {
         let credit = super::parse_key(&p.key).map_or("", |(s, _)| s.credit());
         buttons.push(serenity::CreateButton::new_link(u).label(format!("🔗 {credit}")));
@@ -465,7 +469,7 @@ mod tests {
             .iter()
             .map(|b| b["label"].as_str().unwrap_or(""))
             .collect();
-        assert_eq!(labels, vec!["أظهر الأعمال", "🔗 AniList"]);
+        assert_eq!(labels, vec!["أظهر الأعمال", "أضف لبروفايلي", "🔗 AniList"]);
         assert_eq!(
             j["components"][0]["custom_id"],
             "showworks:anilist-staff:95"

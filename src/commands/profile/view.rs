@@ -71,6 +71,10 @@ pub struct ProfileView {
     pub custom: Option<StoredImage>,
     pub banner: Option<Arc<BannerFile>>,
     pub notice: Option<String>,
+    /// For looking up the notable works of a person in the list (people are characters in a profile).
+    pub sources: Option<crate::people::fetch::Sources>,
+    /// Up to three notable works of the shown person (empty for anything else).
+    pub person_works: Vec<String>,
 }
 
 /// First index of the window that contains `index`.
@@ -201,6 +205,8 @@ impl ProfileView {
             custom: None,
             banner: None,
             notice: None,
+            sources: Some(crate::people::fetch::Sources::of(ctx.data())),
+            person_works: Vec::new(),
         }
     }
 
@@ -267,6 +273,7 @@ impl ProfileView {
             }
         }
         self.custom = self.load_custom_image().await;
+        self.person_works = self.load_person_works().await;
         if self.banner.is_none() {
             self.banner = self.prepare_banner().await.map(Arc::new);
         }
@@ -305,6 +312,27 @@ impl ProfileView {
             return None;
         }
         Some(img)
+    }
+
+    /// A person in the list: their three best known works (safety filtered when the card was parsed; cached by the
+    /// sources, so this is cheap after the first time).
+    async fn load_person_works(&self) -> Vec<String> {
+        let (Some(sources), Some(item)) = (&self.sources, self.current()) else {
+            return Vec::new();
+        };
+        let Some(key) = item
+            .character_id()
+            .and_then(crate::people::decode_person_id)
+            .filter(|_| item.visible)
+        else {
+            return Vec::new();
+        };
+        match crate::people::fetch::person(sources, &key, false).await {
+            crate::people::fetch::Card::Found(p) => {
+                p.credits.iter().take(3).map(|c| c.line()).collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// The banner is dropped from a page only when it and the character picture together would not fit one message.
@@ -393,12 +421,21 @@ impl ProfileView {
         if let Some(t) = i.display_title() {
             lines.push(format!("✨ **{t}**"));
         }
+        let is_person = i
+            .character_id()
+            .is_some_and(|id| id >= crate::people::PERSON_ID_BASE);
         if let Some(w) = i.subtitle.as_deref().filter(|w| !w.is_empty()) {
-            lines.push(if i.section == Section::Characters {
+            lines.push(if is_person {
+                // "شخص حقيقي · ممثل": a real person among the characters.
+                format!("🎙️ {w}")
+            } else if i.section == Section::Characters {
                 format!("📺 {w}")
             } else {
                 w.to_string()
             });
+        }
+        if is_person && !self.person_works.is_empty() {
+            lines.push(format!("🎞️ {}", self.person_works.join(" · ")));
         }
         if let Some(d) = &i.custom_description {
             lines.push(format!("📝 {d}"));
@@ -436,7 +473,7 @@ impl ProfileView {
         self.current()
             .filter(|i| i.visible)
             .and_then(|i| i.image_url.clone())
-            .filter(|u| u.starts_with("https://s4.anilist.co/"))
+            .filter(|u| crate::people::profile::image_ok(u))
     }
 
     fn banner_url(&self) -> Option<String> {
@@ -677,6 +714,8 @@ mod tests {
                 bytes: vec![1],
             })),
             notice: None,
+            sources: None,
+            person_works: Vec::new(),
         }
     }
 
@@ -1071,6 +1110,119 @@ mod tests {
             assert!(c.label.chars().count() <= 100 && c.value.chars().count() <= 100);
             assert!(seen.insert(c.value.clone()), "unique");
         }
+    }
+
+    #[tokio::test]
+    async fn people_show_in_the_characters_list_with_a_role_line_and_never_in_a_third_mode() {
+        let mut v = fixture(2).await;
+        let p = crate::people::Person {
+            key: "tmdb-person:17419".into(),
+            name: "Bryan Cranston".into(),
+            roles: vec!["ممثل".into()],
+            image: Some("https://image.tmdb.org/t/p/w500/a.jpg".into()),
+            popularity: Some(4250),
+            ..crate::people::Person::default()
+        };
+        crate::people::profile::add(&v.pool, 1, &p, 10)
+            .await
+            .expect("add");
+        v.load().await.expect("load");
+        assert_eq!(v.counts.0, 3, "the characters count includes the person");
+        assert_eq!(v.total, 3);
+        v.index = 2;
+        v.load().await.expect("load");
+        let text = v.item_text();
+        assert!(
+            text.contains("Bryan Cranston") && text.contains("🎙️ شخص حقيقي · ممثل"),
+            "{text}"
+        );
+        assert!(
+            text.contains("4,250") || text.contains("4250") || text.contains("٤"),
+            "the popularity line: {text}"
+        );
+        assert_eq!(
+            v.item_image().as_deref(),
+            Some("https://image.tmdb.org/t/p/w500/a.jpg")
+        );
+        // the toggle stays two-way: characters <-> works
+        assert_eq!(Section::Characters.other(), Section::Works);
+        assert_eq!(Section::Works.other(), Section::Characters);
+        // the jump menu lists it among the characters, by its stable id
+        let choices = window_choices(&v.window, v.window_start);
+        assert!(choices.iter().any(|c| c.value
+            == crate::people::encode_person_id("tmdb-person:17419")
+                .expect("id")
+                .to_string()));
+        // a person is navigable like any character
+        v.index = 0;
+        v.load().await.expect("load");
+        let again = crate::ui::pagination::apply_nav(
+            crate::ui::pagination::Nav::Last,
+            v.index,
+            v.total as usize,
+        );
+        assert_eq!(again, 2);
+    }
+
+    #[tokio::test]
+    async fn a_tmdb_cast_entry_goes_from_the_button_to_the_profile_and_can_be_edited() {
+        let mut v = fixture(1).await;
+        let cid = crate::tmdb::model::encode_cast_id(crate::tmdb::model::Kind::Tv, 1396, 17419)
+            .expect("cast id");
+        crate::db::profile::upsert_cache(
+            &v.pool,
+            &crate::db::profile::CacheRow {
+                character_id: cid,
+                name_romaji: "Walter White".into(),
+                name_native: None,
+                image_url: Some("https://image.tmdb.org/t/p/w500/w.jpg".into()),
+                is_safe: true,
+                main_work: Some("Breaking Bad".into()),
+                main_work_url: None,
+                favourites: None,
+                fetched_at: 5,
+            },
+        )
+        .await
+        .expect("cache");
+        assert_eq!(
+            crate::db::profile::add_character(&v.pool, 1, cid)
+                .await
+                .expect("add"),
+            crate::db::profile::AddOutcome::Added(2)
+        );
+        v.load().await.expect("load");
+        v.index = 1;
+        v.load().await.expect("load");
+        let text = v.item_text();
+        assert!(
+            text.contains("Walter White") && text.contains("📺 Breaking Bad"),
+            "{text}"
+        );
+        assert_eq!(
+            v.item_image().as_deref(),
+            Some("https://image.tmdb.org/t/p/w500/w.jpg")
+        );
+        // editable: a nickname and a custom picture work like on any character
+        crate::db::custom::set_title(&v.pool, 1, cid, Some("Heisenberg"))
+            .await
+            .expect("title");
+        set_image(&v, cid, 1, true, 50).await;
+        v.load().await.expect("load");
+        assert!(v.item_text().contains("Heisenberg"));
+        assert!(v.custom.is_some(), "the custom picture (a GIF) is used");
+        // it opens from lists by its cast key
+        assert_eq!(
+            crate::commands::top::character_key(cid),
+            "tmdb-cast:tv:1396:17419"
+        );
+        assert_eq!(
+            crate::commands::top::character_key(
+                crate::people::encode_person_id("anilist-staff:95").expect("id")
+            ),
+            "anilist-staff:95",
+            "a person opens by its person key"
+        );
     }
 
     fn group_first(group: usize) -> String {

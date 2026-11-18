@@ -6,6 +6,7 @@ pub mod anilist;
 pub mod fetch;
 pub mod igdb;
 pub mod msgs;
+pub mod profile;
 pub mod tmdb;
 pub mod vndb;
 
@@ -55,6 +56,51 @@ pub fn parse_key(key: &str) -> Option<(PSource, String)> {
     };
     Some((source, id.to_string()))
 }
+
+/// People live in the integer character tables of the profile (they are treated as characters there) above this base,
+/// clear of AniList ids, the provider characters (1e12, 2e12) and the TMDB cast entries (3e12 and up to about 3.3e14).
+pub const PERSON_ID_BASE: i64 = 1_000_000_000_000_000;
+
+/// The integer id of a person for the profile tables. IGDB companies are not people and cannot be added.
+pub fn encode_person_id(key: &str) -> Option<i64> {
+    let (source, id) = parse_key(key)?;
+    let n: i64 = id.trim_start_matches('s').parse().ok()?;
+    let slot = match source {
+        PSource::AniList => 1,
+        PSource::Tmdb => 2,
+        PSource::Vndb => 3,
+        PSource::Igdb => return None,
+    };
+    (0..PERSON_ID_BASE)
+        .contains(&n)
+        .then_some(slot * PERSON_ID_BASE + n)
+}
+
+/// The person key of a stored id (`None` for anything that is not a person).
+pub fn decode_person_id(id: i64) -> Option<String> {
+    let (slot, n) = (id / PERSON_ID_BASE, id % PERSON_ID_BASE);
+    match slot {
+        1 => Some(PSource::AniList.key(n)),
+        2 => Some(PSource::Tmdb.key(n)),
+        3 => Some(PSource::Vndb.key(format!("s{n}"))),
+        _ => None,
+    }
+}
+
+/// Can this person be added to a profile?
+pub fn addable(key: &str) -> bool {
+    encode_person_id(key).is_some()
+}
+
+/// The small line that marks a person among the characters: "شخص حقيقي · ممثل".
+pub fn role_line(roles: &[String]) -> String {
+    match roles.first() {
+        Some(r) => format!("{PERSON_MARK} · {r}"),
+        None => PERSON_MARK.to_string(),
+    }
+}
+
+pub const PERSON_MARK: &str = "شخص حقيقي";
 
 /// A search result or crew member: enough to list and to open the card.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,6 +349,45 @@ mod tests {
             assert!(parse_key(&s.key(5)).is_some());
         }
         assert!(parse_key(&PSource::Vndb.key("s5")).is_some());
+    }
+
+    #[test]
+    fn person_ids_round_trip_and_never_collide_with_other_character_ids() {
+        for key in ["anilist-staff:95", "tmdb-person:17419", "vndb-staff:s42"] {
+            let id = encode_person_id(key).expect(key);
+            assert!(id >= PERSON_ID_BASE, "{key}");
+            assert_eq!(decode_person_id(id).as_deref(), Some(key));
+        }
+        assert_eq!(
+            encode_person_id("igdb-company:5"),
+            None,
+            "companies are not people"
+        );
+        assert!(!addable("igdb-company:5") && addable("tmdb-person:1"));
+        assert_eq!(encode_person_id("anilist:5"), None);
+        // the three providers get different ids for the same number
+        let ids: std::collections::HashSet<i64> =
+            ["anilist-staff:7", "tmdb-person:7", "vndb-staff:s7"]
+                .iter()
+                .filter_map(|k| encode_person_id(k))
+                .collect();
+        assert_eq!(ids.len(), 3);
+        // AniList characters, provider characters and TMDB cast entries are all below the person range
+        let top_cast = crate::tmdb::model::encode_cast_id(
+            crate::tmdb::model::Kind::Movie,
+            (1 << 22) - 1,
+            (1 << 25) - 1,
+        )
+        .expect("cast id");
+        assert!(top_cast < PERSON_ID_BASE);
+        assert_eq!(decode_person_id(1234), None);
+        assert_eq!(decode_person_id(top_cast), None);
+    }
+
+    #[test]
+    fn the_role_line_marks_a_real_person() {
+        assert_eq!(role_line(&["ممثل".to_string()]), "شخص حقيقي · ممثل");
+        assert_eq!(role_line(&[]), "شخص حقيقي");
     }
 
     #[test]

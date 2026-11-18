@@ -329,15 +329,23 @@ pub async fn own_or_reply(ctx: Context<'_>, input: &str) -> Result<Option<(i64, 
     }
 }
 
+/// The label of one of my characters in a list: people carry their role ("👤 Name · شخص حقيقي · ممثل").
+pub fn own_label(id: i64, name: &str, sub: Option<&str>) -> String {
+    match (id >= crate::people::PERSON_ID_BASE, sub) {
+        (true, Some(role)) => fit(&format!("👤 {name} · {role}"), 100),
+        _ => fit(name, 100),
+    }
+}
+
 /// Autocomplete over the caller's own favourites (values are `id:123`).
 pub async fn ac_own(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     if !crate::guild::autocomplete_allowed(ctx).await {
         return Vec::new();
     }
-    match db::search_own(&ctx.data().db, uid(ctx), partial, 25).await {
+    match db::search_own_labelled(&ctx.data().db, uid(ctx), partial, 25).await {
         Ok(hits) => to_choices(
             hits.into_iter()
-                .map(|(id, name)| (fit(&name, 100), format!("id:{id}")))
+                .map(|(id, name, sub)| (own_label(id, &name, sub.as_deref()), format!("id:{id}")))
                 .collect(),
         ),
         Err(_) => Vec::new(),
