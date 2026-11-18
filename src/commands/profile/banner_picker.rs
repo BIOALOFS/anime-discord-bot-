@@ -240,7 +240,12 @@ impl View for Confirm {
                         Some(&BannerSpec::Image(img).encode()),
                     )
                     .await?;
-                    Ok(i18n::BANNER_SET.to_string())
+                    Ok(crate::features::badges::announce(
+                        &self.pool,
+                        self.user,
+                        i18n::BANNER_SET.to_string(),
+                    )
+                    .await)
                 }
                 .await;
                 self.done = Some(result.unwrap_or_else(|e| {

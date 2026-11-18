@@ -121,13 +121,16 @@ impl Tmdb {
             ttl.secs()
         );
         if let Some(hit) = self.cache.get(&key).await {
+            crate::ops::stats::bump("cache", "hit");
             return Some(hit);
         }
+        crate::ops::stats::bump("cache", "miss");
         if self.negative.get(&key).await.is_some() {
             return None;
         }
         for attempt in 0..2 {
             self.limit.until_ready().await;
+            crate::ops::stats::bump("api", "tmdb");
             let mut req = self
                 .http
                 .get(format!("{API}{path}"))
@@ -157,6 +160,7 @@ impl Tmdb {
                 return None;
             }
             let doc: Value = resp.json().await.ok()?;
+            crate::ops::health::ok("tmdb");
             let doc = Arc::new(doc);
             // Entries live for the cache's maximum; short TTL classes expire by being re-keyed on a time bucket.
             self.cache.insert(key, doc.clone()).await;
@@ -235,6 +239,20 @@ impl Tmdb {
         q.push(("vote_count.gte", "20".into()));
         q.push(("b", Self::bucket(Ttl::Lists)));
         self.get(path, &q, Ttl::Lists)
+            .await
+            .map(|d| model::parse_list(&d, kind))
+            .unwrap_or_default()
+    }
+
+    /// What TMDB recommends after a show or film (the "because you liked it" list), most relevant first.
+    pub async fn recommendations(&self, kind: Kind, id: i64) -> Vec<Work> {
+        let path = if kind == Kind::Tv {
+            format!("/tv/{id}/recommendations")
+        } else {
+            format!("/movie/{id}/recommendations")
+        };
+        let q = [("page", "1".to_string()), ("b", Self::bucket(Ttl::Lists))];
+        self.get(&path, &q, Ttl::Lists)
             .await
             .map(|d| model::parse_list(&d, kind))
             .unwrap_or_default()

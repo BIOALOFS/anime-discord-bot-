@@ -44,6 +44,7 @@ impl ChapterSource for MangaUpdates {
                 crate::http_log::failed("mangaupdates", "releases", resp).await,
             ));
         }
+        crate::ops::health::ok("mangaupdates");
         let doc: Value = resp
             .json()
             .await

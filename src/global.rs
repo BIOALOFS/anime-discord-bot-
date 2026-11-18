@@ -428,6 +428,10 @@ pub async fn remind(data: &Data, key: &str, user: i64, guild: Option<i64>) -> St
 /// Add a work or a character to the member's profile (or say it is already there).
 pub async fn add(data: &Data, key: &str, user: i64, mature: bool) -> String {
     match add_inner(data, key, user, mature).await {
+        // A newly earned badge is announced in the same private answer (nothing when the item was already there).
+        Ok(t) if t.starts_with("أضفتُ") || t == i18n::WORK_ADDED => {
+            crate::features::badges::announce(&data.db, user, t).await
+        }
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("add to profile failed: {e:#}");

@@ -46,6 +46,9 @@ pub struct Config {
     pub igdb_client_id: Option<String>,
     #[serde(default)]
     pub igdb_client_secret: Option<Secret>,
+    /// Optional: the Discord user id of the owner (otherwise the application owner is used).
+    #[serde(default)]
+    pub owner_id: Option<u64>,
     /// VNDB (visual novels) needs no key; set `ENABLE_VNDB=false` to switch it off.
     #[serde(default = "d_true", deserialize_with = "opt_bool_true")]
     pub enable_vndb: bool,
@@ -242,6 +245,7 @@ impl Config {
             enable_fallback_providers: false,
             igdb_client_id: None,
             igdb_client_secret: None,
+            owner_id: None,
             enable_vndb: false,
             tmdb_api_key: None,
             tmdb_read_token: None,

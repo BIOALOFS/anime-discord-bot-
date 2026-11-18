@@ -213,6 +213,22 @@ pub async fn denial(
 }
 
 pub async fn command_check(ctx: crate::error::Context<'_>) -> Result<bool, crate::error::Error> {
+    let data = ctx.data();
+    // Maintenance mode: everyone but the owner gets a polite answer. Counted as a use only when it runs.
+    if !crate::ops::maintenance_allows(
+        data.ops.maintenance(),
+        data.ops.is_owner(ctx.author().id.get()),
+    ) {
+        ctx.send(
+            poise::CreateReply::default()
+                .content(crate::i18n::MAINTENANCE)
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(false);
+    }
+    crate::ops::stats::bump("command", &ctx.command().qualified_name);
+    crate::ops::stats::note_user(ctx.author().id.get());
     if is_exempt(&ctx.command().qualified_name) {
         return Ok(true);
     }

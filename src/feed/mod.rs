@@ -156,6 +156,8 @@ pub struct Feed {
     pub tmdb: Arc<crate::tmdb::Tmdb>,
     /// Unix time of the last TMDB reminder pass (every 30 minutes).
     pub last_tmdb_poll: std::sync::atomic::AtomicI64,
+    /// Owner state, statistics and backups.
+    pub ops: Arc<crate::ops::Ops>,
 }
 
 /// Run until `shutdown` flips to true. Never panics the process: every error is logged and retried.
@@ -178,6 +180,8 @@ pub async fn run(feed: Feed, mut shutdown: watch::Receiver<bool>) {
 
 async fn tick(f: &Feed) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
+    // The optional features (daily posts, the weekly poll, watch nights): each is off until a server switches it on.
+    crate::features::scheduler::tick(f, now).await;
     let guilds = feed::active_guilds(&f.pool).await?;
     // Reminders reuse the same batched fetch: no AniList call per reminder, and none at all when nothing needs it.
     if !guilds.is_empty() || reminders::any(&f.pool).await? {
@@ -222,6 +226,13 @@ async fn tick(f: &Feed) -> anyhow::Result<()> {
             tracing::warn!("tmdb reminders failed (will retry): {e:#}");
         }
     }
+    // Housekeeping: usage counters are written out, old rows and old announcements are dropped, and the daily backup runs.
+    if let Err(e) = crate::ops::stats::flush(&f.pool).await {
+        tracing::warn!("could not write the usage counters: {e}");
+    }
+    let day = crate::ops::stats::today();
+    let _ = crate::ops::stats::prune(&f.pool, &day).await;
+    crate::ops::backup::daily(&f.ops, &f.pool, now).await;
     feed::prune_posted(&f.pool, now - 2 * 86_400).await?;
     Ok(())
 }

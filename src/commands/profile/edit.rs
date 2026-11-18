@@ -610,6 +610,11 @@ pub async fn edit(
         begin_private(ctx).await?;
         return private_reply(ctx, i18n::PROFILE_PICK_ACTION).await;
     }
+    // Editing may be limited to some roles (the "edit" permission of /admin); admins always may.
+    if let Some(text) = crate::features::perms::denied(ctx, "edit").await {
+        begin_private(ctx).await?;
+        return private_reply(ctx, text).await;
+    }
     match (target, action) {
         ("profile", "banner") => {
             profile_banner(ctx, value.as_deref().or(text.as_deref()), image).await

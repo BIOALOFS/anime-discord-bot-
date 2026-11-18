@@ -106,6 +106,7 @@ impl Igdb {
                 .await
                 .map_err(|_| ProviderError::NotConfigured)?;
             self.limit.until_ready().await;
+            crate::ops::stats::bump("api", "igdb");
             let resp = self
                 .http
                 .post(format!("{API}/{endpoint}"))
@@ -131,6 +132,7 @@ impl Igdb {
                 .map_err(|e| ProviderError::Parse(e.to_string()))?;
             // An error body is a failure, not an empty answer: nothing may be judged from it.
             ensure_games(&doc)?;
+            crate::ops::health::ok("igdb");
             return Ok(doc);
         }
         Err(ProviderError::Http("unauthorized".into()))

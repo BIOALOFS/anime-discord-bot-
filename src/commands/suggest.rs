@@ -248,6 +248,9 @@ pub async fn add(
     let Some(guild_id) = ctx.guild_id().map(|g| g.get() as i64) else {
         return say_ephemeral(ctx, i18n::SERVER_ONLY).await;
     };
+    if let Some(text) = crate::features::perms::denied(ctx, "suggest").await {
+        return say_ephemeral(ctx, &text).await;
+    }
     if reason.chars().count() > MAX_REASON {
         return say_ephemeral(ctx, i18n::SUGGEST_REASON_LONG).await;
     }
@@ -293,7 +296,14 @@ pub async fn add(
                 current: Some(current),
                 covers: [None, None],
                 can_reroll: false,
-                header: Some(i18n::SUGGEST_ADDED.to_string()),
+                header: Some(
+                    crate::features::badges::announce(
+                        pool,
+                        ctx.author().id.get() as i64,
+                        i18n::SUGGEST_ADDED.to_string(),
+                    )
+                    .await,
+                ),
                 notice: None,
                 card: None,
             };

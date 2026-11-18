@@ -85,6 +85,77 @@ pub async fn handle(
     Ok(())
 }
 
+/// Answer a button with a short private message.
+async fn private(
+    ctx: &serenity::Context,
+    i: &serenity::ComponentInteraction,
+    text: &str,
+) -> Result<(), Error> {
+    let r = serenity::CreateInteractionResponseMessage::new()
+        .content(text)
+        .ephemeral(true);
+    Ok(
+        i.create_response(ctx, serenity::CreateInteractionResponse::Message(r))
+            .await?,
+    )
+}
+
+/// A vote in the weekly poll: one per member, changeable; the message is updated with the live counts.
+async fn poll_vote(
+    ctx: &serenity::Context,
+    i: &serenity::ComponentInteraction,
+    data: &Data,
+    poll: i64,
+    option: usize,
+) -> Result<(), Error> {
+    use crate::features::poll;
+    let now = chrono::Utc::now().timestamp();
+    if poll::vote(&data.db, poll, i.user.id.get() as i64, option, now).await?
+        == poll::Voted::Refused
+    {
+        return private(ctx, i, i18n::POLL_CLOSED).await;
+    }
+    let Some(p) = poll::get(&data.db, poll).await? else {
+        return private(ctx, i, i18n::POLL_CLOSED).await;
+    };
+    let counts = poll::counts(&data.db, &p).await?;
+    let r = serenity::CreateInteractionResponseMessage::new()
+        .embed(poll::embed(&p.options, &counts, p.closes_at, p.closed).build())
+        .components(vec![poll::buttons(poll, &p.options, p.closed)]);
+    Ok(
+        i.create_response(ctx, serenity::CreateInteractionResponse::UpdateMessage(r))
+            .await?,
+    )
+}
+
+/// "سأحضر" / "لن أحضر" on a watch-night announcement.
+async fn watch_rsvp(
+    ctx: &serenity::Context,
+    i: &serenity::ComponentInteraction,
+    data: &Data,
+    night: i64,
+    going: bool,
+) -> Result<(), Error> {
+    use crate::features::watch;
+    let now = chrono::Utc::now().timestamp();
+    if watch::rsvp(&data.db, night, i.user.id.get() as i64, going, now).await?
+        == watch::Rsvp::Closed
+    {
+        return private(ctx, i, i18n::WATCH_STARTED).await;
+    }
+    let Some(n) = watch::get(&data.db, night).await? else {
+        return private(ctx, i, i18n::WATCH_STARTED).await;
+    };
+    let counts = watch::counts(&data.db, night).await?;
+    let r = serenity::CreateInteractionResponseMessage::new()
+        .embed(watch::embed(&n, counts).build())
+        .components(watch::rows(&n, false));
+    Ok(
+        i.create_response(ctx, serenity::CreateInteractionResponse::UpdateMessage(r))
+            .await?,
+    )
+}
+
 /// "المزيد" under a chapter digest: the next lines as a new message (the digest itself stays as it is).
 async fn digest_more(
     ctx: &serenity::Context,

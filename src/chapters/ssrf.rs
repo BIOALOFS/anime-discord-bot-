@@ -127,6 +127,7 @@ pub async fn fetch_feed(raw: &str) -> Option<String> {
     if resp.content_length().is_some_and(|n| n as usize > MAX_BODY) {
         return None;
     }
+    crate::ops::health::ok("rss");
     let mut body: Vec<u8> = Vec::new();
     while let Some(chunk) = resp.chunk().await.ok()? {
         body.extend_from_slice(&chunk);

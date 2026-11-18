@@ -88,7 +88,12 @@ pub fn excerpt(body: &str) -> String {
 pub async fn failed(provider: &str, endpoint: &str, resp: reqwest::Response) -> String {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    tracing::warn!(provider, endpoint, status = status.as_u16(), body = %excerpt(&body), "provider answered with an error");
+    let shown = excerpt(&body);
+    tracing::warn!(provider, endpoint, status = status.as_u16(), body = %shown, "provider answered with an error");
+    crate::ops::health::err(
+        provider,
+        &format!("{} {endpoint}: {shown}", status.as_u16()),
+    );
     status.to_string()
 }
 

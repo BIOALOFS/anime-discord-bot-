@@ -64,7 +64,14 @@ pub(super) async fn add_work(ctx: Context<'_>, value: &str) -> Result<(), Error>
             works::upsert_media_cache(&pool, &media_cache_row(&m, now())).await?;
             let key = works::work_key(m.id);
             let text = match works::add_work(&pool, uid(ctx), &key, kind_of(&m).key()).await? {
-                AddOutcome::Added(pos) => i18n::added_character(m.title.main(), pos),
+                AddOutcome::Added(pos) => {
+                    crate::features::badges::announce(
+                        &pool,
+                        uid(ctx),
+                        i18n::added_character(m.title.main(), pos),
+                    )
+                    .await
+                }
                 AddOutcome::Duplicate => i18n::WORK_ALREADY.to_string(),
             };
             private_reply(ctx, text).await
@@ -139,6 +146,10 @@ async fn upload_gate(ctx: Context<'_>) -> Result<Option<i64>, Error> {
         private_reply(ctx, i18n::GUILD_ONLY).await?;
         return Ok(None);
     };
+    if let Some(text) = crate::features::perms::denied(ctx, "upload").await {
+        private_reply(ctx, text).await?;
+        return Ok(None);
+    }
     let (pool, user) = (pool(ctx), uid(ctx));
     if !custom::custom_images_enabled(&pool, guild).await? {
         private_reply(ctx, i18n::CUSTOM_IMAGES_OFF).await?;

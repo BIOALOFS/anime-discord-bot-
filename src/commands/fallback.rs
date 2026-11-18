@@ -96,7 +96,12 @@ async fn add_inner(pool: &SqlitePool, user: i64, w: &Work) -> Result<Whisper, Er
                     })
                 });
                 Whisper {
-                    text: i18n::added_character(&w.title, pos),
+                    text: crate::features::badges::announce(
+                        pool,
+                        user,
+                        i18n::added_character(&w.title, pos),
+                    )
+                    .await,
                     undo: Some(undo),
                 }
             }
@@ -135,7 +140,8 @@ async fn add_inner(pool: &SqlitePool, user: i64, w: &Work) -> Result<Whisper, Er
                 })
             });
             Whisper {
-                text: i18n::WORK_ADDED.to_string(),
+                text: crate::features::badges::announce(pool, user, i18n::WORK_ADDED.to_string())
+                    .await,
                 undo: Some(undo),
             }
         }

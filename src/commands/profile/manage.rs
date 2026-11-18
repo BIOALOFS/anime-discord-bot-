@@ -32,7 +32,14 @@ pub(super) async fn fail_private(ctx: Context<'_>, e: AniError) -> Result<(), Er
 pub async fn add_and_cache(pool: &SqlitePool, user: i64, c: &Character) -> Result<String, Error> {
     db::upsert_cache(pool, &cache_row(c, now())).await?;
     Ok(match db::add_character(pool, user, c.id).await? {
-        AddOutcome::Added(pos) => i18n::added_character(c.display_name(), pos),
+        AddOutcome::Added(pos) => {
+            crate::features::badges::announce(
+                pool,
+                user,
+                i18n::added_character(c.display_name(), pos),
+            )
+            .await
+        }
         AddOutcome::Duplicate => i18n::ALREADY_ADDED.to_string(),
     })
 }

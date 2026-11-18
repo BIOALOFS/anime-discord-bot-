@@ -3,6 +3,7 @@
 
 mod actions;
 mod banner_picker;
+mod compare;
 mod edit;
 pub use edit::edit;
 mod imaging;
@@ -188,7 +189,14 @@ pub async fn profile(
     #[name_localized("ar", "القيمة")]
     #[autocomplete = "ac_value"]
     value: Option<String>,
+    #[description = "Compare your taste with another member"]
+    #[description_localized("ar", "قارن ذوقك مع ذوق عضو آخر")]
+    #[name_localized("ar", "مقارنة")]
+    compare: Option<serenity::User>,
 ) -> Result<(), Error> {
+    if let Some(other) = compare {
+        return compare::run(ctx, other).await;
+    }
     let action = action.as_deref().map(str::trim).unwrap_or("view");
     match action {
         "" | "view" => show(ctx, user).await,

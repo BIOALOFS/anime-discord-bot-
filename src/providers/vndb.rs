@@ -102,6 +102,7 @@ impl Vndb {
             .await
             .map_err(|_| ProviderError::NotConfigured)?;
         self.limit.until_ready().await;
+        crate::ops::stats::bump("api", "vndb");
         let resp = self
             .http
             .post(format!("{API}/{endpoint}"))
@@ -124,6 +125,7 @@ impl Vndb {
                 crate::http_log::failed("vndb", endpoint, resp).await,
             ));
         }
+        crate::ops::health::ok("vndb");
         resp.json()
             .await
             .map_err(|e| ProviderError::Parse(e.to_string()))
