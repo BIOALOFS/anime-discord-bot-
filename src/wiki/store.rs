@@ -10,7 +10,7 @@ pub const PAGE_TTL_SECS: i64 = 7 * 24 * 3600;
 
 const SOURCE_COLUMNS: &str =
     "id, name, host, api_url, lang, license_name, license_url, character_category, \
-    game_category, enabled, added_by, created_at, last_checked_at, last_error";
+    work_category, kind_hint, enabled, added_by, created_at, last_checked_at, last_error";
 
 // ---- sources ---------------------------------------------------------------------------------------
 
@@ -42,7 +42,8 @@ pub struct NewSource {
     pub license_name: Option<String>,
     pub license_url: Option<String>,
     pub character_category: Option<String>,
-    pub game_category: Option<String>,
+    pub work_category: Option<String>,
+    pub kind_hint: Option<String>,
     pub added_by: Option<i64>,
 }
 
@@ -64,8 +65,8 @@ pub async fn insert(pool: &SqlitePool, n: &NewSource) -> Result<Added> {
         return Ok(Added::Duplicate(id));
     }
     let r = sqlx::query(
-        "INSERT INTO wiki_sources (name, host, api_url, lang, license_name, license_url, character_category, game_category, enabled, added_by) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)",
+        "INSERT INTO wiki_sources (name, host, api_url, lang, license_name, license_url, character_category, work_category, game_category, kind_hint, enabled, added_by) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, 1, ?10)",
     )
     .bind(&n.name)
     .bind(&n.host)
@@ -74,7 +75,8 @@ pub async fn insert(pool: &SqlitePool, n: &NewSource) -> Result<Added> {
     .bind(&n.license_name)
     .bind(&n.license_url)
     .bind(&n.character_category)
-    .bind(&n.game_category)
+    .bind(&n.work_category)
+    .bind(&n.kind_hint)
     .bind(n.added_by)
     .execute(pool)
     .await?;
@@ -86,13 +88,13 @@ pub async fn update(
     id: i64,
     name: &str,
     character_category: Option<&str>,
-    game_category: Option<&str>,
+    work_category: Option<&str>,
 ) -> Result<bool> {
-    let r = sqlx::query("UPDATE wiki_sources SET name = ?2, character_category = ?3, game_category = ?4 WHERE id = ?1")
+    let r = sqlx::query("UPDATE wiki_sources SET name = ?2, character_category = ?3, work_category = ?4, game_category = ?4 WHERE id = ?1")
         .bind(id)
         .bind(name)
         .bind(character_category)
-        .bind(game_category)
+        .bind(work_category)
         .execute(pool)
         .await?;
     Ok(r.rows_affected() > 0)
@@ -247,7 +249,7 @@ pub async fn suggest(
     let rows = sqlx::query(&format!(
         "SELECT {PAGE_COLUMNS} FROM wiki_fts f JOIN wiki_cache c ON c.rowid = f.rowid \
          JOIN wiki_sources s ON s.id = c.wiki_id AND s.enabled = 1 \
-         WHERE wiki_fts MATCH ?1 AND c.fetched_at > ?2 AND (?3 IS NULL OR c.kind = ?3) AND (?4 IS NULL OR c.wiki_id = ?4) \
+         WHERE wiki_fts MATCH ?1 AND c.fetched_at > ?2 AND (?3 IS NULL OR c.kind = ?3 OR (?3 = 'work' AND c.kind IN ('game','anime','manga','novel','series','movie','work'))) AND (?4 IS NULL OR c.wiki_id = ?4) \
          ORDER BY (c.normalized_key = ?5) DESC, (c.normalized_key LIKE ?6) DESC, length(c.title) LIMIT ?7"
     ))
     .bind(query)
@@ -271,7 +273,7 @@ pub async fn by_title(
 ) -> Result<Vec<Page>> {
     let rows = sqlx::query(&format!(
         "SELECT {PAGE_COLUMNS} FROM wiki_cache c JOIN wiki_sources s ON s.id = c.wiki_id AND s.enabled = 1 \
-         WHERE c.normalized_key = ?1 AND c.fetched_at > ?2 AND (?3 IS NULL OR c.kind = ?3) ORDER BY c.wiki_id, c.page_id"
+         WHERE c.normalized_key = ?1 AND c.fetched_at > ?2 AND (?3 IS NULL OR c.kind = ?3 OR (?3 = 'work' AND c.kind IN ('game','anime','manga','novel','series','movie','work'))) ORDER BY c.wiki_id, c.page_id"
     ))
     .bind(normalized_title)
     .bind(now - PAGE_TTL_SECS)
@@ -364,7 +366,8 @@ mod tests {
             license_name: Some("CC BY-SA".into()),
             license_url: Some("https://creativecommons.org/licenses/by-sa/3.0/".into()),
             character_category: Some("Category:Characters".into()),
-            game_category: None,
+            work_category: None,
+            kind_hint: None,
             added_by: Some(1),
         }
     }
@@ -429,7 +432,7 @@ mod tests {
             (
                 w.name.as_str(),
                 w.character_category.as_deref(),
-                w.game_category.as_deref()
+                w.work_category.as_deref()
             ),
             ("Renamed", Some("Category:Cast"), Some("Category:Games"))
         );

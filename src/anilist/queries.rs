@@ -8,7 +8,7 @@ macro_rules! with_media_fragment {
             $body,
             " fragment M on Media { id title { romaji english native } description(asHtml: false) \
              coverImage { large extraLarge color } bannerImage averageScore popularity episodes chapters \
-             duration source status season seasonYear format genres isAdult siteUrl countryOfOrigin volumes startDate { year } externalLinks { url site type } \
+             duration source status season seasonYear format genres isAdult siteUrl countryOfOrigin volumes startDate { year } synonyms externalLinks { url site type } \
              studios(isMain: true) { nodes { name } } nextAiringEpisode { airingAt episode } \
              trailer { id site } staff(perPage: 3, sort: [RELEVANCE]) { edges { role node { name { full } } } } }"
         )

@@ -117,6 +117,9 @@ pub struct Media {
     pub external_links: Vec<ExternalLink>,
     pub volumes: Option<i32>,
     pub start_date: Option<StartDate>,
+    /// Other names the work is known by ("ORV"): they count in the local index.
+    #[serde(default)]
+    pub synonyms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

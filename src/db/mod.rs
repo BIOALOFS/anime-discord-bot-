@@ -93,7 +93,12 @@ pub async fn verify_migrated(
 }
 
 /// Tables that only cache data from elsewhere; they are rebuilt on demand and not user data.
-const CACHE_TABLES: &[&str] = &["character_cache", "media_cache", "wiki_cache"];
+const CACHE_TABLES: &[&str] = &[
+    "character_cache",
+    "media_cache",
+    "wiki_cache",
+    "media_index",
+];
 
 /// Row counts of every user-data table (every table but the caches and the migration bookkeeping).
 pub async fn user_data_counts(
@@ -876,6 +881,75 @@ mod tests {
         for (table, n) in &counts_before {
             assert_eq!(counts_after.get(table), Some(n), "{table} keeps its rows");
         }
+        let backups: Vec<_> = std::fs::read_dir(dir.join("backups"))
+            .expect("backups")
+            .flatten()
+            .collect();
+        assert_eq!(backups.len(), 1);
+        super::verify_backup(&backups[0].path())
+            .await
+            .expect("the backup is good");
+    }
+
+    /// The round 11.2/11.3 upgrade (0021 -> 0023, universal wikis and the media index) on a database that already holds wiki data and member
+    /// items: backup verified, row counts equal, the snapshot table starts empty.
+    #[tokio::test]
+    async fn the_universal_wiki_and_index_migrations_are_additive_and_keep_member_data() {
+        let dir = temp_dir("round113");
+        let path = dir.join("bot.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("open");
+        let mut old = sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
+            .await
+            .expect("read migrations");
+        let before: Vec<_> = old
+            .migrations
+            .iter()
+            .filter(|m| m.version <= 21)
+            .cloned()
+            .collect();
+        assert!(
+            old.migrations.len() > before.len(),
+            "0022 and 0023 are under test"
+        );
+        old.migrations = std::borrow::Cow::Owned(before);
+        old.run(&pool).await.expect("migrate to 0021");
+        for sql in [
+            "INSERT INTO users (discord_id) VALUES (7)",
+            "INSERT INTO profiles (user_id, bio) VALUES (7, 'hello')",
+            "INSERT INTO profile_characters (user_id, character_id, position) VALUES (7, 1, 1)",
+            "INSERT INTO wiki_sources (name, host, api_url, lang, character_category, game_category) VALUES ('W', 'w.example.com', 'https://w.example.com/api.php', 'en', 'Category:Characters', 'Category:Games')",
+        ] {
+            sqlx::query(sql).execute(&pool).await.expect(sql);
+        }
+        let counts_before = super::user_data_counts(&pool).await.expect("counts");
+        pool.close().await;
+        let pool = super::connect(&url).await.expect("the upgrade runs");
+        let counts_after = super::user_data_counts(&pool).await.expect("counts");
+        for (table, n) in &counts_before {
+            assert_eq!(counts_after.get(table), Some(n), "{table} keeps its rows");
+        }
+        // a wiki saved with only the old game column keeps its category in the new generic one
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM media_index")
+            .fetch_one(&pool)
+            .await
+            .expect("media_index exists");
+        assert_eq!(n, 0);
+        let (work, game): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT work_category, game_category FROM wiki_sources")
+                .fetch_one(&pool)
+                .await
+                .expect("wiki row");
+        assert_eq!(
+            work.as_deref(),
+            Some("Category:Games"),
+            "copied into the generic column"
+        );
+        assert_eq!(
+            game.as_deref(),
+            Some("Category:Games"),
+            "the old column is kept"
+        );
         let backups: Vec<_> = std::fs::read_dir(dir.join("backups"))
             .expect("backups")
             .flatten()

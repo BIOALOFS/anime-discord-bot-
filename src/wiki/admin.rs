@@ -107,7 +107,7 @@ pub fn embed(p: &Panel) -> Emb {
                 pending
                     .games
                     .clone()
-                    .or_else(|| found(&d.detection.game))
+                    .or_else(|| found(&d.detection.work))
                     .unwrap_or_else(|| "بحث فقط".into())
             ),
         ];
@@ -323,7 +323,7 @@ async fn press_inner<T: Transport + 'static>(
             let games = pending
                 .games
                 .clone()
-                .or_else(|| d.detection.game.as_ref().map(|c| c.0.clone()));
+                .or_else(|| d.detection.work.as_ref().map(|c| c.0.clone()));
             match w
                 .save(d, None, chars.as_deref(), games.as_deref(), user)
                 .await
@@ -433,7 +433,7 @@ async fn modal_inner<T: Transport + 'static>(
                 return i18n::WIKI_NO_SELECTION.to_string();
             };
             let (chars, games) = if id == CHAR_CAT {
-                (category, s.game_category.clone())
+                (category, s.work_category.clone())
             } else {
                 (s.character_category.clone(), category)
             };
@@ -454,7 +454,7 @@ async fn modal_inner<T: Transport + 'static>(
                 s.id,
                 &name,
                 s.character_category.as_deref(),
-                s.game_category.as_deref(),
+                s.work_category.as_deref(),
             )
             .await;
             w.invalidate().await;
@@ -625,13 +625,13 @@ mod tests {
             .to_string();
         assert!(text.contains("بحث فقط"));
         // confirming with nothing found still saves (search-only), as the owner chose
-        p.pending.as_mut().expect("pending").preview.detection.game = None;
+        p.pending.as_mut().expect("pending").preview.detection.work = None;
         press(&mut p, &w, 1, CONFIRM, &[]).await;
         let saved = &w.sources().await[0];
         assert_eq!(
             (
                 saved.character_category.clone(),
-                saved.game_category.clone()
+                saved.work_category.clone()
             ),
             (None, None)
         );

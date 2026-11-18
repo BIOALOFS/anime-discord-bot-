@@ -96,6 +96,31 @@ pub fn parse_allcategories(doc: &Value) -> Vec<(String, u64)> {
         .unwrap_or_default()
 }
 
+/// `prop=links` of one page: the titles it links to (main namespace only, subpages and drafts dropped).
+pub fn parse_links(doc: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for page in doc
+        .pointer("/query/pages")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        for l in page
+            .get("links")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            if let Some(t) = l.get("title").and_then(Value::as_str) {
+                if title_ok(t) && !out.iter().any(|o| o == t) {
+                    out.push(t.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// `prop=categoryinfo`: `(category title, pages)` for the categories that exist.
 pub fn parse_categoryinfo(doc: &Value) -> Vec<(String, u64)> {
     doc.pointer("/query/pages")
@@ -125,15 +150,39 @@ pub fn pick_category(counts: &[(String, u64)]) -> Option<(String, u64)> {
 /// The titles tried for the characters of a wiki (before the `allcategories` prefix search).
 pub const CHARACTER_CATEGORIES: &[&str] = &[
     "Category:Characters",
-    "Category:Playable characters",
     "Category:Main characters",
+    "Category:Supporting characters",
+    "Category:Antagonists",
+    "Category:Playable characters",
     "Category:Non-playable characters",
     "Category:Heroes",
     "Category:Villains",
 ];
 
-/// The titles tried for the games of a wiki.
-pub const GAME_CATEGORIES: &[&str] = &["Category:Games", "Category:Video games"];
+/// The titles tried for the works of a wiki (of any medium). Episodes, chapters, images, templates and hubs are not
+/// works (see `plausible_category`).
+pub const WORK_CATEGORIES: &[&str] = &[
+    "Category:Games",
+    "Category:Video games",
+    "Category:Anime",
+    "Category:Manga",
+    "Category:Manhwa",
+    "Category:Manhua",
+    "Category:Webtoon",
+    "Category:Novels",
+    "Category:Light novels",
+    "Category:Series",
+    "Category:TV series",
+    "Category:Films",
+    "Category:Movies",
+    "Category:Dramas",
+];
+
+/// Prefixes of `allcategories` scanned for more candidates.
+pub const CHARACTER_PREFIXES: &[&str] = &["Char", "Person", "Cast"];
+pub const WORK_PREFIXES: &[&str] = &[
+    "Game", "Anime", "Manga", "Manhwa", "Novel", "Series", "Film", "Movie", "Drama",
+];
 
 /// A category name as the owner may type it ("Characters" or "Category:Characters").
 pub fn category_title(input: &str) -> String {
@@ -181,6 +230,10 @@ pub fn plausible_category(title: &str) -> bool {
         " cleanup",
         " pages ",
         " wanted ",
+        " episode",
+        " chapter",
+        " volumes",
+        " seasons",
     ];
     !BAD.iter().any(|b| t.contains(b))
 }
@@ -355,8 +408,57 @@ pub fn infer_parent(title: &str, categories: &[String]) -> Option<String> {
     super::title_qualifier(title).map(str::to_string)
 }
 
-/// What a page is: a character when it is in the wiki's character category (or any category that names characters), a
-/// game when it is in the game category, otherwise something else.
+/// The medium a work page belongs to: the wiki's manual hint, then the page's own categories ("Manhwa", "Light novels",
+/// "Silent Hill games"), then the name of the wiki's work category; unknown stays `Work` (never assumed a game).
+pub fn work_kind(w: &Source, categories: &[String]) -> Kind {
+    if let Some(k) = w
+        .kind_hint
+        .as_deref()
+        .map(Kind::from_key)
+        .filter(|k| k.is_work())
+    {
+        return k;
+    }
+    categories
+        .iter()
+        .find_map(|c| category_medium(c))
+        .or_else(|| {
+            w.work_category
+                .as_deref()
+                .and_then(|c| category_medium(c.strip_prefix("Category:").unwrap_or(c)))
+        })
+        .unwrap_or(Kind::Work)
+}
+
+/// The medium a category name ends with: "Manhwa", "Silent Hill games", "Light novels"; none for "Characters" or "Tropes".
+fn category_medium(category: &str) -> Option<Kind> {
+    let n = normalize(category);
+    let words: Vec<&str> = n.split(' ').collect();
+    let last = words.last().copied()?;
+    let two = words
+        .len()
+        .checked_sub(2)
+        .map(|i| words[i..].join(" "))
+        .unwrap_or_default();
+    Kind::medium_of(&two).or_else(|| Kind::medium_of(last))
+}
+
+/// The medium of a whole wiki, from its manual hint or the name of its work category (none for a mixed wiki).
+pub fn wiki_medium(w: &Source) -> Option<Kind> {
+    w.kind_hint
+        .as_deref()
+        .map(Kind::from_key)
+        .filter(|k| k.is_work())
+        .or_else(|| {
+            w.work_category
+                .as_deref()
+                .and_then(|c| category_medium(c.strip_prefix("Category:").unwrap_or(c)))
+        })
+}
+
+/// What a page is: a work when it is in the wiki's work category (its medium from `work_kind`), a character when it is
+/// in the character category or any category that names characters, a work of a known medium when one of its
+/// categories says so, otherwise something else.
 pub fn classify(w: &Source, categories: &[String]) -> Kind {
     let norm: Vec<String> = categories.iter().map(|c| normalize(c)).collect();
     let in_cat = |wanted: &Option<String>| {
@@ -365,8 +467,8 @@ pub fn classify(w: &Source, categories: &[String]) -> Kind {
             .map(|c| normalize(c.strip_prefix("Category:").unwrap_or(c)))
             .is_some_and(|c| !c.is_empty() && norm.contains(&c))
     };
-    if in_cat(&w.game_category) {
-        return Kind::Game;
+    if in_cat(&w.work_category) {
+        return work_kind(w, categories);
     }
     if in_cat(&w.character_category)
         || norm.iter().any(|c| {
@@ -375,15 +477,18 @@ pub fn classify(w: &Source, categories: &[String]) -> Kind {
                 || c.ends_with(" character")
                 || c.ends_with(" enemies")
                 || c.ends_with(" bosses")
+                || c.ends_with(" protagonists")
+                || c.ends_with(" antagonists")
         })
     {
         return Kind::Character;
     }
-    if norm
+    // A category that names a medium ("Video games", "Manhwa") makes the page a work of that medium.
+    if categories
         .iter()
-        .any(|c| c == "games" || c == "video games" || c.ends_with(" games"))
+        .any(|c| plausible_category(c) && category_medium(c).is_some())
     {
-        return Kind::Game;
+        return work_kind(w, categories);
     }
     Kind::Other
 }
@@ -403,7 +508,8 @@ mod tests {
             license_name: None,
             license_url: None,
             character_category: Some("Category:Characters".into()),
-            game_category: Some("Category:Games".into()),
+            work_category: Some("Category:Games".into()),
+            kind_hint: None,
             enabled: true,
             added_by: None,
             created_at: 0,

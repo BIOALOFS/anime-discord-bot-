@@ -21,11 +21,17 @@ pub fn page_url(host: &str, title: &str) -> String {
     u.to_string()
 }
 
-/// "Silent Hill Wiki · CC BY-SA 3.0": what the footer says when wiki data is used.
+/// "Silent Hill Wiki (en) · CC BY-SA 3.0": what the footer says when wiki data is used.
 pub fn credit(w: &Source) -> String {
+    let lang = w.lang.trim();
+    let name = if lang.is_empty() {
+        w.name.clone()
+    } else {
+        format!("{} ({})", w.name, lang.to_lowercase())
+    };
     match &w.license_name {
-        Some(l) => format!("{} · {l}", w.name),
-        None => w.name.clone(),
+        Some(l) => format!("{name} · {l}"),
+        None => name,
     }
 }
 
@@ -33,6 +39,9 @@ pub fn credit(w: &Source) -> String {
 /// there is no rating or popularity line.
 pub fn card(p: &Page, w: &Source) -> Emb {
     let mut lines = Vec::new();
+    if let Some(m) = i18n::wiki_medium_label(p.kind) {
+        lines.push(format!("🏷️ {m}"));
+    }
     if let Some(parent) = &p.parent_title {
         lines.push(format!("📚 {parent}"));
     }
@@ -56,7 +65,7 @@ async fn game_key(wikis: &Wikis, p: &Page) -> Option<String> {
     let parent = p.parent_title.as_deref()?;
     let norm = super::normalize(super::base_title(parent));
     let now = chrono::Utc::now().timestamp();
-    super::store::by_title(&wikis.pool, &norm, Some(Kind::Game), now)
+    super::store::by_title(&wikis.pool, &norm, Some(Kind::Work), now)
         .await
         .ok()?
         .into_iter()
@@ -87,18 +96,17 @@ pub fn rows(
             );
             buttons.push(crate::global::add_button_for(&p.key(), in_profile));
         }
-        Kind::Game => {
-            if w.character_category.is_some() {
-                // The crew button is not offered: a wiki has no crew list.
-                buttons.extend(
-                    components::standard_actions(components::ItemKind::Work, Some(&p.key()))
-                        .into_iter()
-                        .take(1),
-                );
-            }
+        k if k.is_work() => {
+            // The characters button is always offered: the characters come from the wiki's category, or from the links
+            // of the work page. The crew button is not offered: a wiki has no crew list.
+            buttons.extend(
+                components::standard_actions(components::ItemKind::Work, Some(&p.key()))
+                    .into_iter()
+                    .take(1),
+            );
             buttons.push(crate::global::add_button_for(&p.key(), in_profile));
         }
-        Kind::Other => {}
+        _ => {}
     }
     buttons.push(
         serenity::CreateButton::new_link(page_url(&w.host, &p.title))
@@ -300,7 +308,8 @@ mod tests {
             license_name: Some("CC BY-SA 3.0".into()),
             license_url: Some("https://creativecommons.org/licenses/by-sa/3.0/".into()),
             character_category: Some("Category:Characters".into()),
-            game_category: None,
+            work_category: None,
+            kind_hint: None,
             enabled: true,
             added_by: None,
             created_at: 0,
@@ -347,7 +356,7 @@ mod tests {
             text.contains("📚 Silent Hill 2") && text.contains("A monster"),
             "{text}"
         );
-        assert_eq!(e["footer"]["text"], "Silent Hill Wiki · CC BY-SA 3.0");
+        assert_eq!(e["footer"]["text"], "Silent Hill Wiki (en) · CC BY-SA 3.0");
         assert_eq!(e["url"], "https://silenthill.fandom.com/wiki/Pyramid_Head");
         assert_eq!(
             e["image"]["url"],
@@ -398,8 +407,8 @@ mod tests {
         search_only.character_category = None;
         assert_eq!(
             labels(&rows(&game_page, &search_only, None, false)),
-            vec!["أضف لبروفايلي", "🔗 Silent Hill Wiki"],
-            "no roster without a character category"
+            vec!["أظهر الشخصيات", "أضف لبروفايلي", "🔗 Silent Hill Wiki"],
+            "the roster is offered either way: from the category, or from the links of the work page"
         );
         assert_eq!(
             json(&rows(&page(Kind::Character), &wiki(), Some("wiki:1:5"), false)[0])["components"]

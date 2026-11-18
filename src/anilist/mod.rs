@@ -1,6 +1,7 @@
 //! AniList access. `client` (raw transport) is private to this module; callers use `SafeAniList`.
 
 mod client;
+pub mod index;
 pub mod models;
 mod queries;
 mod safe;

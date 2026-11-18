@@ -545,11 +545,14 @@ pub async fn gather(
                         popularity: 0,
                         parent: pg.parent_title.clone(),
                     }),
-                    crate::wiki::Kind::Game if want_works => Some(Entry {
+                    k if k.is_work() && want_works => Some(Entry {
                         group: Group::Work,
                         key: pg.key(),
                         name: pg.title.clone(),
-                        tail: format!("عمل · {} · {wiki}", i18n::KIND_GAME),
+                        tail: match i18n::wiki_medium_label(k) {
+                            Some(m) => format!("عمل · {m} · {wiki}"),
+                            None => format!("عمل · {wiki}"),
+                        },
                         popularity: 0,
                         parent: None,
                     }),

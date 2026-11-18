@@ -184,6 +184,15 @@ pub const UPLOAD_BANNED: &str =
     "مُنعتَ من رفع الصور في هذا السيرفر، تواصل مع المشرفين إن كان هذا خطأً.";
 pub const IMAGE_REQUIRED: &str = "أرفق الصورة في خيار `image` لو سمحت.";
 pub const IMAGE_TOO_LARGE: &str = "الصورة كبيرة جدًا (الحد 3 ميغابايت).";
+pub const IMAGE_URL_REQUIRED: &str = "اكتب رابط الصورة في خيار «النص» لو سمحت (يبدأ بـ https).";
+pub const IMAGE_URL_UNSAFE: &str = "هذا الرابط غير مقبول. لازم يبدأ بـ https ويكون موقعًا عامًا، وليس عنوانًا داخليًا ولا يحتوي على اسم مستخدم أو منفذ غريب.";
+pub const IMAGE_URL_NOT_IMAGE: &str =
+    "الرابط لا يشير إلى صورة صالحة. المسموح: PNG وJPG وWebP وGIF (وGIF يُؤخذ منه الإطار الأول).";
+pub const IMAGE_URL_TOO_LARGE: &str = "الصورة كبيرة جدًا. الحد 8 ميغابايت، أو جرّب رفعها مباشرة.";
+pub const IMAGE_URL_FAILED: &str = "تعذّر تحميل الصورة من هذا الرابط. جرّب رابطًا آخر أو ارفع الصورة مباشرة. صورتك القديمة بقيت كما هي.";
+pub const IMAGE_URL_SLOW_DOWN: &str = "كثرت الطلبات. انتظر دقيقة ثم جرّب مرة أخرى.";
+pub const IMAGE_URL_BUSY: &str = "البوت مشغول بتحميل صور الآن. جرّب بعد قليل.";
+pub const IMAGE_URL_BLOCKED: &str = "هذا الرابط أو الصورة لا يناسب البروفايل.";
 pub const IMAGE_INVALID: &str = "ملف الصورة غير صالح. المسموح: PNG وJPG وWebP وGIF.";
 pub const IMAGE_LIMIT: &str = "وصلت إلى الحد الأقصى للصور المخصصة (30). احذف بعضها أولًا.";
 pub const IMAGE_DOWNLOAD_FAILED: &str = "لم أستطع تحميل الصورة. جرّب مرة أخرى.";
@@ -542,6 +551,20 @@ pub fn wiki_preview_found(n: u64, samples: &[String]) -> String {
 }
 pub fn wiki_connection_failed(why: &str) -> String {
     format!("❌ تعذّر الاتصال بالويكي: {why}")
+}
+
+/// The word for the medium of a wiki work; none when the categories do not say (the series name is shown as written).
+pub fn wiki_medium_label(k: crate::wiki::Kind) -> Option<&'static str> {
+    use crate::wiki::Kind;
+    match k {
+        Kind::Game => Some(KIND_GAME),
+        Kind::Anime => Some(KIND_ANIME),
+        Kind::Manga => Some(KIND_MANGA),
+        Kind::Novel => Some(KIND_NOVEL),
+        Kind::Series => Some(KIND_SERIES),
+        Kind::Movie => Some(KIND_MOVIE),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

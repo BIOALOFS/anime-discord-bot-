@@ -65,7 +65,6 @@ impl MediaKind {
 
     fn country(self) -> Option<&'static str> {
         match self {
-            Self::Manga => Some("JP"),
             Self::Manhwa => Some("KR"),
             Self::Manhua => Some("CN"),
             _ => None,
@@ -285,7 +284,7 @@ impl SafeAniList {
         policy: ContentPolicy,
     ) -> Result<Vec<Media>, AniError> {
         let vars = adult_vars(
-            kind_vars(json!({"search": query, "perPage": per_page.min(10)}), kind),
+            kind_vars(json!({"search": query, "perPage": per_page.min(25)}), kind),
             policy,
         );
         let key = format!(
@@ -709,7 +708,7 @@ impl SafeAniList {
         policy: ContentPolicy,
     ) -> Result<Vec<Character>, AniError> {
         let key = format!("sc:{}:{per_page}", query.to_lowercase());
-        let vars = json!({"search": query, "perPage": per_page.min(10)});
+        let vars = json!({"search": query, "perPage": per_page.min(25)});
         let list: Vec<Character> = match self
             .client
             .get(Which::Search, key, queries::SEARCH_CHARACTER, vars)
@@ -718,9 +717,8 @@ impl SafeAniList {
             Some(doc) => parse(&doc, "/Page/characters")?,
             None => Vec::new(),
         };
-        let mut out = self.visible(list, policy).await;
-        out.sort_by_key(|c| std::cmp::Reverse(c.favourites.unwrap_or(0)));
-        Ok(out)
+        // AniList's own order (best text match first) is kept: re-sorting by popularity buried the name that was typed.
+        Ok(self.visible(list, policy).await)
     }
 
     pub async fn character_by_id(
