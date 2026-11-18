@@ -549,6 +549,10 @@ fn custom_name(img: &StoredImage) -> String {
 }
 
 impl View for ProfileView {
+    fn class(&self) -> crate::nav::Class {
+        crate::nav::Class::Profile
+    }
+
     fn render(&self, enabled: bool) -> Page {
         self.main_page(enabled)
     }

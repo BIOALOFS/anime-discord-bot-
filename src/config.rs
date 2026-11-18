@@ -38,6 +38,20 @@ pub struct Config {
     pub cache_ttl_negative_secs: u64,
     #[serde(default = "d_cooldown")]
     pub command_cooldown_secs: u64,
+    /// How long the buttons and menus of a message stay active (see `nav::Lifetimes`). Blank means the default.
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_default_secs: Option<u64>,
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_profile_secs: Option<u64>,
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_notification_secs: Option<u64>,
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_max_secs: Option<u64>,
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub view_timeout_profile_max_secs: Option<u64>,
+    /// Size of the in-memory cache of processed custom pictures and banners (megabytes).
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub image_cache_mb: Option<u64>,
     /// MangaDex / MangaUpdates fallback for works AniList lacks. Off unless explicitly enabled.
     #[serde(default, deserialize_with = "opt_bool")]
     pub enable_fallback_providers: bool,
@@ -93,7 +107,7 @@ fn d_details() -> u64 {
     21_600
 }
 fn d_profile() -> u64 {
-    900
+    30
 }
 fn d_airing() -> u64 {
     300
@@ -238,10 +252,16 @@ impl Config {
             anilist_rate_limit_per_min: 6000,
             cache_ttl_search_secs: 60,
             cache_ttl_details_secs: 60,
-            cache_ttl_profile_secs: 60,
+            cache_ttl_profile_secs: 30,
             cache_ttl_airing_secs: 60,
             cache_ttl_negative_secs: 60,
             command_cooldown_secs: 0,
+            view_timeout_default_secs: None,
+            view_timeout_profile_secs: None,
+            view_timeout_notification_secs: None,
+            view_timeout_max_secs: None,
+            view_timeout_profile_max_secs: None,
+            image_cache_mb: None,
             enable_fallback_providers: false,
             igdb_client_id: None,
             igdb_client_secret: None,

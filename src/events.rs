@@ -1,16 +1,8 @@
 //! Gateway events that are not tied to a command session: the "show the work" button and menu of notification
 //! messages. A press always sends a NEW message; the notification itself is never edited.
 
-use crate::{
-    anilist::ContentPolicy, error::Error, feed::parse_show_work, guild, i18n, ui::cards, Data,
-};
+use crate::{error::Error, feed::parse_show_work, i18n, Data};
 use poise::serenity_prelude as serenity;
-
-/// Should the card be sent as an ephemeral message? Only where the server restricts the bot to one channel and
-/// this is another one (members other than admins would be answered there against the rule).
-pub fn card_is_ephemeral(bot_channel: Option<i64>, channel: i64, is_admin: bool) -> bool {
-    matches!(bot_channel, Some(main) if main != channel && !is_admin)
-}
 
 pub async fn handle(
     ctx: &serenity::Context,
@@ -39,56 +31,50 @@ pub async fn handle(
     if let Some((night, going)) = crate::features::watch::parse_rsvp(&i.data.custom_id) {
         return watch_rsvp(ctx, i, data, night, going).await;
     }
-    let press = crate::components::parse(&i.data.custom_id, &values);
-    let work = match &press {
-        Some(_) => None,
+    // Old notification buttons (`shownotif:`) ask for an AniList work.
+    let (id, vals) = match crate::components::parse(&i.data.custom_id, &values) {
+        Some(_) => (i.data.custom_id.clone(), values.clone()),
         None => match parse_show_work(&i.data.custom_id, &values) {
-            Some(w) => Some(w),
-            None => return Ok(()),
+            Some(w) => (
+                crate::components::show_work_id(&format!("anilist:{w}")),
+                Vec::new(),
+            ),
+            None => {
+                // Not one of the navigation buttons. A running session (or a short-lived collector such as the
+                // undo button) answers its own presses; a press nobody answered is a stale one (a message from
+                // before a restart): acknowledge it quietly after a moment, so nothing shows as a failure.
+                if !crate::nav::live::is_live(i.message.id.get() as i64) {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let _ = i
+                        .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
+                        .await;
+                }
+                return Ok(());
+            }
         },
     };
-    let admin = guild::is_admin(i.member.as_ref().and_then(|m| m.permissions));
-    let bot_channel = match i.guild_id {
-        Some(g) => data
-            .guilds
-            .settings(g.get() as i64)
-            .await
-            .ok()
-            .and_then(|s| s.command_channel.filter(|_| s.channel_exists)),
-        None => None,
-    };
-    let ephemeral = card_is_ephemeral(bot_channel, i.channel_id.get() as i64, admin);
-    if let Some(press) = press {
-        return crate::global::handle(ctx, i, data, press, ephemeral).await;
-    }
-    let Some(work) = work else { return Ok(()) };
-    // A new (deferred) message: this is what keeps the notification untouched.
-    let defer = serenity::CreateInteractionResponse::Defer(
-        serenity::CreateInteractionResponseMessage::new().ephemeral(ephemeral),
+    // Only a notification is shared by the whole server: a press on it opens a private view for the presser and never
+    // edits it. A running session answers its own presses; anything else (a message from before a restart, a session
+    // that ended) is a stale press: acknowledged, nothing else.
+    let mid = i.message.id.get() as i64;
+    let notification = matches!(
+        crate::nav::store::get(&data.db, mid).await,
+        Ok(Some(row)) if row.kind == "notification"
     );
-    i.create_response(ctx, defer).await?;
-    let followup = match data.anilist.media_by_id(work, ContentPolicy::SAFE).await {
-        Ok(Some(m)) => {
-            let mut row = Vec::new();
-            if let Some(u) = &m.site_url {
-                row.push(
-                    serenity::CreateButton::new_link(u).label(format!("🔗 {}", i18n::BTN_ANILIST)),
-                );
-            }
-            let mut f = serenity::CreateInteractionResponseFollowup::new()
-                .embed(cards::work_card(&m).build())
-                .ephemeral(ephemeral);
-            if !row.is_empty() {
-                f = f.components(vec![serenity::CreateActionRow::Buttons(row)]);
-            }
-            f
+    match crate::nav::event_route(crate::nav::live::is_live(mid), notification) {
+        crate::nav::EventRoute::Session => Ok(()),
+        crate::nav::EventRoute::Private => {
+            crate::nav::private::open(ctx.clone(), data.clone(), i.clone(), id, vals).await;
+            Ok(())
         }
-        _ => serenity::CreateInteractionResponseFollowup::new()
-            .content(i18n::SHOW_WORK_UNAVAILABLE)
-            .ephemeral(true),
-    };
-    i.create_followup(ctx, followup).await?;
-    Ok(())
+        crate::nav::EventRoute::Stale => {
+            tracing::debug!(message = %i.message.id, "stale press ignored");
+            let _ = i
+                .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
+                .await;
+            Ok(())
+        }
+    }
 }
 
 /// Answer a button with a short private message.
@@ -213,20 +199,6 @@ mod tests {
         assert_eq!(parse_show_work(SHOW_WORK_PICK, &[]), None);
         assert_eq!(parse_show_work("shownotif:abc", &[]), None);
         assert_eq!(parse_show_work("close", &[]), None);
-    }
-
-    #[test]
-    fn the_card_is_public_unless_the_server_restricts_the_channel() {
-        assert!(!card_is_ephemeral(None, 5, false), "no restriction");
-        assert!(
-            !card_is_ephemeral(Some(5), 5, false),
-            "the bot channel itself"
-        );
-        assert!(
-            card_is_ephemeral(Some(5), 6, false),
-            "another channel of a restricted server"
-        );
-        assert!(!card_is_ephemeral(Some(5), 6, true), "admins may bypass");
     }
 
     #[test]

@@ -80,8 +80,9 @@ async fn close_polls(f: &Feed, now: i64) -> anyhow::Result<()> {
         if !rows.is_empty() {
             msg = msg.components(rows);
         }
-        if let Err(e) = channel(p.channel).send_message(&f.http, msg).await {
-            tracing::debug!("could not post the poll result: {e}");
+        match channel(p.channel).send_message(&f.http, msg).await {
+            Ok(sent) => crate::nav::register_notification(&f.pool, &sent).await,
+            Err(e) => tracing::debug!("could not post the poll result: {e}"),
         }
     }
     Ok(())
