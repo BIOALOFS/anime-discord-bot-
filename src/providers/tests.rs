@@ -136,101 +136,251 @@ fn image_sniffing() {
     assert!(!looks_like_image(b"<html>"));
 }
 
-// ---- IGDB / VNDB safety fixtures ----
+// ---- IGDB / VNDB safety fixtures (content based: themes, genres, keywords, tags, image flags) ----
 
 fn igdb_game(
     id: i64,
     name: &str,
     themes: serde_json::Value,
-    ratings: serde_json::Value,
+    genres: serde_json::Value,
+    keywords: serde_json::Value,
 ) -> serde_json::Value {
     json!({"id": id, "name": name, "url": format!("https://www.igdb.com/games/g{id}"), "total_rating_count": 100,
-           "cover": {"image_id": "co1abc"}, "themes": themes, "age_ratings": ratings})
+           "cover": {"image_id": "co1abc"}, "themes": themes, "genres": genres, "keywords": keywords})
 }
 
 fn ids(v: &[(Work, u64)]) -> Vec<String> {
     v.iter().map(|(w, _)| w.id.clone()).collect()
 }
 
+fn allowed_ids(doc: &serde_json::Value, mature: bool) -> Vec<String> {
+    ids(&igdb::parse_games(doc, mature))
+}
+
 #[test]
-fn igdb_hides_erotic_theme_and_ao_but_not_violent_m_rated_games() {
+fn igdb_erotic_theme_is_hidden() {
+    let doc = json!([igdb_game(
+        1,
+        "Erotic Game",
+        json!([{"id": 42, "name": "Erotic"}]),
+        json!([]),
+        json!([])
+    )]);
+    assert!(allowed_ids(&doc, true).is_empty());
+    // By name too, in case an id is missing from the response.
+    let doc = json!([igdb_game(
+        2,
+        "Erotic By Name",
+        json!([{"name": "Erotic"}]),
+        json!([]),
+        json!([])
+    )]);
+    assert!(allowed_ids(&doc, true).is_empty());
+}
+
+#[test]
+fn igdb_blacklisted_keywords_and_adult_genres_are_hidden() {
     let doc = json!([
         igdb_game(
             1,
-            "Erotic Game",
-            json!([{"id": 42, "name": "Erotic"}]),
-            json!([{"category": 1, "rating": 10}])
+            "Hentai Tagged",
+            json!([]),
+            json!([]),
+            json!([{"name": "Hentai"}])
         ),
         igdb_game(
             2,
-            "AO Game",
+            "Porn Part",
             json!([]),
-            json!([{"category": 1, "rating": 12}])
+            json!([]),
+            json!([{"name": "interactive porn"}])
         ),
+        igdb_game(
+            3,
+            "Exact Sex",
+            json!([]),
+            json!([]),
+            json!([{"name": "Sex"}])
+        ),
+        igdb_game(
+            4,
+            "Adult Genre",
+            json!([]),
+            json!([{"name": "Adult"}]),
+            json!([])
+        ),
+        igdb_game(
+            5,
+            "Fine",
+            json!([]),
+            json!([{"name": "Adventure"}]),
+            json!([{"name": "sexuality education"}, {"name": "essex county"}])
+        ),
+    ]);
+    assert_eq!(
+        allowed_ids(&doc, true),
+        vec!["igdb:5"],
+        "only whole-word and listed terms hide a game"
+    );
+}
+
+#[test]
+fn igdb_a_game_without_any_age_rating_and_with_clean_themes_is_allowed() {
+    // The response carries no age_ratings at all, and none is ever read.
+    let doc = json!([igdb_game(
+        7,
+        "Unrated Indie",
+        json!([{"id": 31, "name": "Drama"}]),
+        json!([{"name": "Puzzle"}]),
+        json!([])
+    )]);
+    assert_eq!(allowed_ids(&doc, true), vec!["igdb:7"]);
+    assert_eq!(allowed_ids(&doc, false), vec!["igdb:7"]);
+}
+
+#[test]
+fn igdb_age_ratings_play_no_part_in_the_decision() {
+    // An AO / PEGI 18 / CERO Z game with clean content is allowed; an "E for everyone" game with an erotic theme is not.
+    let mut ao = igdb_game(1, "Rated AO but clean", json!([]), json!([]), json!([]));
+    ao["age_ratings"] = json!([{"category": 1, "rating": 12}, {"category": 2, "rating": 5}, {"category": 3, "rating": 5}]);
+    let mut kids = igdb_game(
+        2,
+        "Rated E but erotic",
+        json!([{"id": 42, "name": "Erotic"}]),
+        json!([]),
+        json!([]),
+    );
+    kids["age_ratings"] = json!([{"category": 1, "rating": 8}]);
+    assert_eq!(allowed_ids(&json!([ao, kids]), true), vec!["igdb:1"]);
+}
+
+#[test]
+fn igdb_silent_hill_is_allowed_and_mature_themes_off_hides_horror_and_war() {
+    let doc = json!([
         igdb_game(
             3,
             "Silent Hill 2",
             json!([{"id": 19, "name": "Horror"}]),
-            json!([{"category": 1, "rating": 11}, {"category": 2, "rating": 5}])
+            json!([{"name": "Adventure"}]),
+            json!([{"name": "survival horror"}])
         ),
         igdb_game(
             4,
-            "Teen Game",
+            "War Game",
+            json!([{"id": 39, "name": "Warfare"}]),
             json!([]),
-            json!([{"category": 1, "rating": 10}])
+            json!([])
         ),
-        igdb_game(5, "Unrated Game", json!([]), json!([])),
+        igdb_game(
+            5,
+            "Keyword Only",
+            json!([]),
+            json!([]),
+            json!([{"name": "Psychological Horror"}])
+        ),
+        igdb_game(
+            6,
+            "Teen Game",
+            json!([{"id": 1, "name": "Action"}]),
+            json!([]),
+            json!([])
+        ),
     ]);
     assert_eq!(
-        ids(&igdb::parse_games(&doc, true)),
-        vec!["igdb:3", "igdb:4"],
-        "erotic, AO and unrated are hidden; M/PEGI 18 horror stays"
+        allowed_ids(&doc, true),
+        vec!["igdb:3", "igdb:4", "igdb:5", "igdb:6"],
+        "violent and horror games are allowed by default"
     );
     assert_eq!(
-        ids(&igdb::parse_games(&doc, false)),
-        vec!["igdb:4"],
-        "mature-games off also hides M/PEGI 18"
+        allowed_ids(&doc, false),
+        vec!["igdb:6"],
+        "mature-themes off hides Horror, Warfare and survival-horror keywords"
     );
-    let w = &igdb::parse_games(&doc, true)[1].0;
-    assert_eq!(
-        w.cover_url.as_deref(),
-        Some("https://images.igdb.com/igdb/image/upload/t_cover_big/co1abc.jpg")
-    );
-    assert!(cover_host_allowed(w.cover_url.as_deref().unwrap_or("")));
 }
 
 #[test]
-fn igdb_cero_z_counts_as_mature_and_odd_image_ids_are_dropped() {
+fn igdb_sexual_content_is_hidden_whatever_mature_themes_says() {
     let doc = json!([igdb_game(
-        7,
-        "Z Game",
+        1,
+        "Erotic Horror",
+        json!([{"id": 42}, {"id": 19}]),
         json!([]),
-        json!([{"category": 3, "rating": 5}])
+        json!([])
     )]);
-    assert_eq!(igdb::parse_games(&doc, true).len(), 1);
-    assert!(igdb::parse_games(&doc, false).is_empty());
-    let mut bad = igdb_game(8, "Odd", json!([]), json!([{"category": 1, "rating": 10}]));
+    assert!(allowed_ids(&doc, true).is_empty() && allowed_ids(&doc, false).is_empty());
+}
+
+#[test]
+fn igdb_queries_always_ask_for_the_content_fields_and_never_for_age_ratings() {
+    for fields in [igdb::GAME_FIELDS, igdb::CHARACTER_FIELDS] {
+        for needed in ["themes.id", "themes.name", "genres.name", "keywords.name"] {
+            assert!(fields.contains(needed), "{needed} missing from {fields}");
+        }
+        assert!(
+            !fields.contains("age_rating"),
+            "age ratings must not be requested"
+        );
+    }
+    assert!(igdb::GAME_FIELDS.contains("name") && igdb::GAME_FIELDS.contains("summary"));
+}
+
+#[test]
+fn igdb_an_error_response_is_a_failure_not_an_empty_list() {
+    let err = json!([{"title": "Syntax Error", "status": 400, "cause": "bad field"}]);
+    assert!(
+        igdb::ensure_games(&err).is_err(),
+        "nothing may be judged from an error body"
+    );
+    assert!(
+        igdb::ensure_games(&json!({"message": "x"})).is_err(),
+        "not a list"
+    );
+    assert!(
+        igdb::ensure_games(&json!([])).is_ok(),
+        "an empty list is a real answer"
+    );
+    assert!(
+        igdb::ensure_games(&json!([igdb_game(1, "G", json!([]), json!([]), json!([]))])).is_ok()
+    );
+}
+
+#[test]
+fn igdb_odd_image_ids_are_dropped_and_covers_are_allow_listed() {
+    let mut bad = igdb_game(8, "Odd", json!([]), json!([]), json!([]));
     bad["cover"]["image_id"] = json!("../evil");
     assert_eq!(igdb::parse_games(&json!([bad]), true)[0].0.cover_url, None);
+    let ok = igdb::parse_games(
+        &json!([igdb_game(9, "Fine", json!([]), json!([]), json!([]))]),
+        true,
+    );
+    assert!(cover_host_allowed(
+        ok[0].0.cover_url.as_deref().unwrap_or("")
+    ));
 }
 
 #[test]
-fn igdb_characters_follow_their_games() {
-    let g_ok = json!({"name": "Super Mario Bros.", "total_rating_count": 900, "themes": [], "age_ratings": [{"category": 1, "rating": 8}]});
-    let g_bad = json!({"name": "Bad", "total_rating_count": 5, "themes": [{"id": 42}], "age_ratings": [{"category": 1, "rating": 10}]});
-    let g_none =
-        json!({"name": "Unrated", "total_rating_count": 5, "themes": [], "age_ratings": []});
+fn igdb_characters_follow_their_games_content() {
+    let clean = |name: &str| json!({"name": name, "total_rating_count": 900, "themes": [], "genres": [], "keywords": []});
+    let erotic = json!({"name": "Bad", "total_rating_count": 5, "themes": [{"id": 42}]});
+    let keyword =
+        json!({"name": "Tagged", "total_rating_count": 5, "keywords": [{"name": "hentai"}]});
+    let horror = json!({"name": "Silent Hill 2", "total_rating_count": 50, "themes": [{"id": 19, "name": "Horror"}]});
     let doc = json!([
-        {"id": 1, "name": "Mario", "games": [g_ok.clone()], "mug_shot": {"image_id": "m1"}},
-        {"id": 2, "name": "Tainted", "games": [g_ok.clone(), g_bad]},
+        {"id": 1, "name": "Mario", "games": [clean("Super Mario Bros.")], "mug_shot": {"image_id": "m1"}},
+        {"id": 2, "name": "Tainted", "games": [clean("Fine"), erotic]},
         {"id": 3, "name": "Nobody", "games": []},
-        {"id": 4, "name": "Only Unrated", "games": [g_none.clone()]},
-        {"id": 5, "name": "Mixed", "games": [g_none, g_ok]},
+        {"id": 4, "name": "Tagged", "games": [keyword]},
+        {"id": 5, "name": "James", "games": [horror]},
     ]);
     let found = igdb::parse_characters(&doc, true);
     assert_eq!(ids(&found), vec!["igdb:c1", "igdb:c5"]);
     assert_eq!(found[0].0.subtitle.as_deref(), Some("Super Mario Bros."));
     assert_eq!(found[0].0.character_id(), Some(2_000_000_000_001));
+    assert_eq!(
+        ids(&igdb::parse_characters(&doc, false)),
+        vec!["igdb:c1"],
+        "mature-themes off hides a horror-only character"
+    );
 }
 
 #[test]
@@ -243,25 +393,43 @@ fn igdb_queries_are_escaped() {
     );
 }
 
+#[test]
+fn random_attempts_widen_toward_the_first_page_with_a_lower_floor() {
+    let a = RANDOM_ATTEMPTS;
+    assert!(
+        a.windows(2).all(|w| w[0].0 > w[1].0 && w[0].1 > w[1].1),
+        "each attempt looks nearer with a lower popularity floor"
+    );
+    assert_eq!(
+        a[a.len() - 1],
+        (0, 0),
+        "the last attempt is the first page of anything"
+    );
+}
+
 fn vn(id: &str, tags: serde_json::Value, sexual: serde_json::Value) -> serde_json::Value {
     json!({"id": id, "title": format!("VN {id}"), "alttitle": "原題", "released": "2016-05-01", "rating": 82.0,
-           "image": {"url": "https://t.vndb.org/cv/aa/1.jpg", "sexual": sexual}, "tags": tags})
+           "image": {"url": "https://t.vndb.org/cv/aa/1.jpg", "sexual": sexual, "violence": 0}, "tags": tags})
+}
+
+fn vn_ids(doc: &serde_json::Value, mature: bool) -> Vec<String> {
+    vndb::parse_vns(doc, mature)
+        .iter()
+        .map(|w| w.id.clone())
+        .collect()
 }
 
 #[test]
-fn vndb_hides_erotic_tags_flagged_images_and_unknown_verdicts() {
+fn vndb_ero_tags_are_hidden_and_a_clean_item_is_allowed() {
     let doc = json!({"results": [
-        vn("v1", json!([{"category": "cont", "rating": 2.0}]), json!(0)),
-        vn("v2", json!([{"category": "ero", "rating": 1.0}]), json!(0)),
-        vn("v3", json!([{"category": "cont", "rating": 2.0}]), json!(2)),
+        vn("v1", json!([{"id": "g1", "name": "School Life", "category": "cont", "rating": 2.0}]), json!(0)),
+        vn("v2", json!([{"id": "g2", "name": "Whatever", "category": "ero", "rating": 1.0}]), json!(0)),
+        vn("v3", json!([{"id": "g3", "name": "Sexual Content", "category": "cont"}]), json!(0)),
         vn("v4", json!([]), json!(0)),
         {"id": "v5", "title": "No tags field"},
     ]});
-    let found = vndb::parse_vns(&doc);
-    assert_eq!(
-        found.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
-        vec!["vndb:v1"]
-    );
+    assert_eq!(vn_ids(&doc, true), vec!["vndb:v1", "vndb:v4"], "ero category or name hides; empty tags is a real (clean) answer; a missing tag list gives no verdict");
+    let found = vndb::parse_vns(&doc, true);
     assert_eq!(found[0].year, Some(2016));
     assert_eq!(found[0].url.as_deref(), Some("https://vndb.org/v1"));
     assert!((found[0].rating.unwrap_or(0.0) - 8.2).abs() < 0.01);
@@ -271,26 +439,99 @@ fn vndb_hides_erotic_tags_flagged_images_and_unknown_verdicts() {
 }
 
 #[test]
-fn vndb_characters_need_a_safe_picture_and_verified_novels() {
+fn vndb_an_image_above_safe_hides_the_novel_whether_cover_or_screenshot() {
+    let mut suggestive = vn("v1", json!([]), json!(1));
+    let mut shot = vn("v2", json!([]), json!(0));
+    shot["screenshots"] = json!([{"sexual": 0, "violence": 0}, {"sexual": 2, "violence": 0}]);
+    let clean = vn("v3", json!([]), json!(0));
+    suggestive["screenshots"] = json!([]);
+    let doc = json!({"results": [suggestive, shot, clean]});
+    assert_eq!(vn_ids(&doc, true), vec!["vndb:v3"]);
+}
+
+#[test]
+fn vndb_violence_is_allowed_unless_mature_themes_is_off() {
+    let mut brutal = vn(
+        "v1",
+        json!([{"category": "cont", "name": "Gore"}]),
+        json!(0),
+    );
+    brutal["image"]["violence"] = json!(2);
+    let mut shot = vn("v2", json!([]), json!(0));
+    shot["screenshots"] = json!([{"sexual": 0, "violence": 2}]);
+    let mild = vn("v3", json!([]), json!(0));
+    let doc = json!({"results": [brutal, shot, mild]});
+    assert_eq!(
+        vn_ids(&doc, true),
+        vec!["vndb:v1", "vndb:v2", "vndb:v3"],
+        "dark themes are allowed by default"
+    );
+    assert_eq!(
+        vn_ids(&doc, false),
+        vec!["vndb:v3"],
+        "mature-themes off hides high violence"
+    );
+}
+
+#[test]
+fn vndb_an_adult_minimum_age_alone_does_not_hide_but_with_sexual_tags_it_does() {
+    let mut dark = vn(
+        "v1",
+        json!([{"category": "cont", "name": "Dark"}]),
+        json!(0),
+    );
+    dark["releases"] = json!([{"minage": 18}]);
+    let mut ero = vn("v2", json!([{"category": "ero", "name": "x"}]), json!(0));
+    ero["releases"] = json!([{"minage": 18}]);
+    assert_eq!(
+        vn_ids(&json!({"results": [dark, ero]}), true),
+        vec!["vndb:v1"]
+    );
+}
+
+#[test]
+fn vndb_characters_need_a_clean_picture_traits_and_verified_novels() {
     let chars = json!({"results": [
-        {"id": "c1", "name": "Ok", "original": "名", "image": {"url": "https://t.vndb.org/ch/a/1.jpg", "sexual": 0}, "vns": [{"id": "v1", "title": "VN v1"}]},
+        {"id": "c1", "name": "Ok", "original": "名", "image": {"url": "https://t.vndb.org/ch/a/1.jpg", "sexual": 0, "violence": 0}, "vns": [{"id": "v1", "title": "VN v1"}]},
         {"id": "c2", "name": "Flagged picture", "image": {"sexual": 2}, "vns": [{"id": "v1", "title": "x"}]},
         {"id": "c3", "name": "Erotic novel", "image": {"sexual": 0}, "vns": [{"id": "v2", "title": "x"}]},
         {"id": "c4", "name": "No novels", "image": {"sexual": 0}, "vns": []},
         {"id": "c5", "name": "Unchecked novel", "image": {"sexual": 0}, "vns": [{"id": "v9", "title": "x"}]},
+        {"id": "c6", "name": "Sexual trait", "image": {"sexual": 0}, "traits": [{"name": "Whatever", "group_name": "Sexual Traits"}], "vns": [{"id": "v1", "title": "x"}]},
+        {"id": "c7", "name": "Harmless traits", "image": {"sexual": 0}, "traits": [{"name": "Tall", "group_name": "Body"}], "vns": [{"id": "v1", "title": "x"}]},
+        {"id": "c8", "name": "Brutal picture", "image": {"sexual": 0, "violence": 2}, "vns": [{"id": "v1", "title": "x"}]},
     ]});
     let vns = json!({"results": [
         vn("v1", json!([{"category": "cont", "rating": 1.0}]), json!(0)),
         vn("v2", json!([{"category": "ero", "rating": 1.0}]), json!(0)),
     ]});
-    let verdicts = vndb::vn_verdicts(&vns);
-    let found = vndb::parse_characters(&chars, &verdicts);
+    let found = |mature: bool| -> Vec<String> {
+        let verdicts = vndb::vn_verdicts(&vns, mature);
+        vndb::parse_characters(&chars, &verdicts, mature)
+            .iter()
+            .map(|w| w.id.clone())
+            .collect()
+    };
+    assert_eq!(found(true), vec!["vndb:c1", "vndb:c7", "vndb:c8"]);
     assert_eq!(
-        found.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
-        vec!["vndb:c1"]
+        found(false),
+        vec!["vndb:c1", "vndb:c7"],
+        "mature-themes off also hides a brutal picture"
     );
-    assert_eq!(found[0].subtitle.as_deref(), Some("VN v1"));
-    assert_eq!(found[0].character_id(), Some(1_000_000_000_001));
+    let first = vndb::parse_characters(&chars, &vndb::vn_verdicts(&vns, true), true);
+    assert_eq!(first[0].subtitle.as_deref(), Some("VN v1"));
+    assert_eq!(first[0].character_id(), Some(1_000_000_000_001));
+}
+
+#[test]
+fn vndb_requests_ask_for_the_tags_images_and_release_ages_the_verdict_needs() {
+    assert!(
+        vndb::VN_FIELDS_FOR_TESTS.contains("tags.category")
+            && vndb::VN_FIELDS_FOR_TESTS.contains("image.sexual")
+            && vndb::VN_FIELDS_FOR_TESTS.contains("screenshots.sexual")
+            && vndb::VN_FIELDS_FOR_TESTS.contains("releases.minage")
+            && vndb::VN_FIELDS_FOR_TESTS.contains("image.violence")
+    );
 }
 
 #[test]

@@ -127,12 +127,19 @@ their works and characters can be added to profiles like any other. Pictures are
 * **VNDB** (visual novels and characters) uses the public HTTP API v2 ("Kana", `https://api.vndb.org/kana`), no key.
   The bot paces requests below ~200 per 5 minutes and caches results; footer: "Data from VNDB". The data is under the
   VNDB data license (<https://vndb.org/d17>).
-* Missing credentials disable the provider automatically. Per server: `/admin` → Safety
-  switches game sources on/off (default on) and the mature-games toggle (default on) hides M / PEGI 18 / CERO Z games when off.
-* **Safety:** only sexual content is blocked. IGDB: theme "Erotic" and ESRB AO are hidden. VNDB: any sexual-content ("ero")
-  tag or a suggestive/explicit image flag is hidden. Violent or horror games (for example Silent Hill, M / PEGI 18) stay
-  visible unless `mature-games` is off. An item without a reliable verdict (no age rating on IGDB, no tags on VNDB) is hidden.
-  Game characters are shown only if their games pass.
+* Missing credentials disable the provider automatically. Per server: `/admin` → Safety switches game sources on/off
+  (default on) and **`mature-themes`** (default on).
+* **Safety is judged by content, never by age rating** (IGDB age ratings are unreliable, so they are not even requested):
+  * IGDB: every query asks for `themes`, `genres` and `keywords`. A game is hidden only on a positive sexual signal: theme
+    *Erotic* (42), a keyword from the blacklist in `providers/safety.rs` (`EXPLICIT_KEYWORD_PARTS` / `EXPLICIT_KEYWORDS_EXACT`,
+    easy to extend) or an adult genre. A game with no age rating and clean content is shown; violent and horror games (Silent
+    Hill) are shown. With `mature-themes` off, themes Horror (19) and Warfare (39) and survival-horror keywords are hidden too.
+  * VNDB: hidden on a sexual-content tag (category `ero`, ids in `SEXUAL_TAG_IDS`, or a name in `SEXUAL_TAG_NAMES`), on a cover
+    or screenshot flagged above safe, or on an 18+ release together with sexual tags. Characters are hidden on explicitly
+    sexual traits or a flagged picture. Violence and dark themes stay visible unless `mature-themes` is off (then brutal
+    images are hidden).
+  * An empty theme/keyword/tag list is a real answer (nothing sexual is tagged). If a request fails, or IGDB answers with an
+    error instead of games, nothing is judged or shown and the bot says the source is unavailable.
 * Not verifiable offline: these APIs were unreachable from the development sandbox, so parsing and safety are covered by
   fixture tests only.
 

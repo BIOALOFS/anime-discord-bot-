@@ -306,7 +306,7 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
                     |q| async move {
                         let text = q.rsplit('|').next().unwrap_or("").to_string();
                         let found = if src.as_deref() == Some("VNDB") {
-                            providers.search_visual_novels(&text).await
+                            providers.search_visual_novels(&text, mature).await
                         } else {
                             providers.search_games(&text, mature).await
                         };
@@ -623,7 +623,7 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                     if src == Some("igdb") || platform.is_some() {
                         Vec::new()
                     } else {
-                        providers.search_visual_novels(&q).await
+                        providers.search_visual_novels(&q, mature).await
                     }
                 }
             );
@@ -634,7 +634,7 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
             }
             all.truncate(10);
             if all.is_empty() {
-                return say_ephemeral(ctx, i18n::NO_RESULTS).await;
+                return say_ephemeral(ctx, empty_reason(&providers, i18n::NO_RESULTS)).await;
             }
             fallback::show(ctx, all).await
         }
@@ -647,7 +647,7 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
             .await
         {
             Some(w) => fallback::show(ctx, vec![w]).await,
-            None => say_ephemeral(ctx, i18n::RANDOM_FAILED).await,
+            None => say_ephemeral(ctx, empty_reason(&providers, i18n::RANDOM_FAILED)).await,
         },
         Type::RandomCharacter => match providers.random_character(src, mature).await {
             Some(w) => {
@@ -668,8 +668,20 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                 view.load_cover().await;
                 session::run(ctx, view).await
             }
-            None => say_ephemeral(ctx, i18n::RANDOM_FAILED).await,
+            None => say_ephemeral(ctx, empty_reason(&providers, i18n::RANDOM_FAILED)).await,
         },
+    }
+}
+
+/// An empty game answer after a failed request is "the source is unavailable", not "nothing found".
+pub fn empty_reason(
+    providers: &crate::providers::Providers,
+    nothing: &'static str,
+) -> &'static str {
+    if providers.games_unavailable() {
+        i18n::GAMES_DOWN
+    } else {
+        nothing
     }
 }
 

@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 pub const BTN_PROVIDER_ADD: &str = "provider_add";
 
-/// Per-server switches for game sources: `(games on, mature games on)`. Outside a server both default on.
+/// Per-server switches for game sources: `(games on, mature themes allowed)`. Outside a server both default on.
 pub async fn game_flags(ctx: Context<'_>) -> (bool, bool) {
     let Some(g) = ctx.guild_id() else {
         return (true, true);
@@ -31,7 +31,7 @@ pub async fn game_flags(ctx: Context<'_>) -> (bool, bool) {
         crate::db::custom::games_enabled(pool, g)
             .await
             .unwrap_or(true),
-        crate::db::custom::mature_games(pool, g)
+        crate::db::custom::mature_themes(pool, g)
             .await
             .unwrap_or(true),
     )

@@ -307,7 +307,7 @@ pub async fn is_banned(pool: &SqlitePool, guild: i64, user: i64) -> Result<bool>
 
 async fn flag(pool: &SqlitePool, guild: i64, column: &'static str) -> Result<bool> {
     // `column` is one of our own constants. A missing row means the column default.
-    let default = matches!(column, "games" | "mature_games");
+    let default = matches!(column, "games" | "mature_themes");
     let v: Option<bool> = sqlx::query_scalar(&format!(
         "SELECT {column} FROM guild_settings WHERE guild_id = ?1"
     ))
@@ -345,12 +345,13 @@ pub async fn games_enabled(pool: &SqlitePool, guild: i64) -> Result<bool> {
 pub async fn set_games(pool: &SqlitePool, guild: i64, on: bool) -> Result<()> {
     set_flag(pool, guild, "games", on).await
 }
-/// Whether mature-rated (violent/horror) games may be shown. Sexual content is hidden regardless.
-pub async fn mature_games(pool: &SqlitePool, guild: i64) -> Result<bool> {
-    flag(pool, guild, "mature_games").await
+/// `mature-themes`: whether games and visual novels with horror or war themes (violence) may be shown. On by default.
+/// Sexual content is hidden regardless, and age ratings are never consulted.
+pub async fn mature_themes(pool: &SqlitePool, guild: i64) -> Result<bool> {
+    flag(pool, guild, "mature_themes").await
 }
-pub async fn set_mature_games(pool: &SqlitePool, guild: i64, on: bool) -> Result<()> {
-    set_flag(pool, guild, "mature_games", on).await
+pub async fn set_mature_themes(pool: &SqlitePool, guild: i64, on: bool) -> Result<()> {
+    set_flag(pool, guild, "mature_themes", on).await
 }
 pub async fn nsfw_mode(pool: &SqlitePool, guild: i64) -> Result<bool> {
     flag(pool, guild, "nsfw_mode").await
