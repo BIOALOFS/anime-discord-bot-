@@ -68,11 +68,13 @@ pub struct ProfileView {
     /// The page (window of 25) that contains `index`.
     pub window: Vec<Item>,
     pub window_start: usize,
-    pub custom: Option<StoredImage>,
+    pub custom: Option<Arc<StoredImage>>,
     pub banner: Option<Arc<BannerFile>>,
     pub notice: Option<String>,
     /// For looking up the notable works of a person in the list (people are characters in a profile).
     pub sources: Option<crate::people::fetch::Sources>,
+    /// Processed pictures kept in memory, shared by every profile view.
+    pub images: super::imgcache::ImageCache,
     /// Up to three notable works of the shown person (empty for anything else).
     pub person_works: Vec<String>,
 }
@@ -206,6 +208,7 @@ impl ProfileView {
             banner: None,
             notice: None,
             sources: Some(crate::people::fetch::Sources::of(ctx.data())),
+            images: ctx.data().images.clone(),
             person_works: Vec::new(),
         }
     }
@@ -277,31 +280,23 @@ impl ProfileView {
         if self.banner.is_none() {
             self.banner = self.prepare_banner().await.map(Arc::new);
         }
+        self.prefetch();
         Ok(())
     }
 
     /// The current character's own picture. A missing row, an unreadable one or one too big for a message all fall
     /// back to the provider picture, with a warning in the log, so that the page itself always renders.
-    async fn load_custom_image(&self) -> Option<StoredImage> {
+    async fn load_custom_image(&self) -> Option<Arc<StoredImage>> {
         let item = self
             .current()
             .filter(|i| i.section == Section::Characters && i.visible)?;
         let id = item.character_id()?;
-        item.custom_image_id?;
-        let img = match custom::image_of_character(&self.pool, self.owner, id).await {
-            Ok(Some(img)) => img,
-            Ok(None) => {
-                tracing::warn!(
-                    "custom image of character {id} is missing; using the provider image"
-                );
-                return None;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "custom image of character {id} is unreadable ({e}); using the provider image"
-                );
-                return None;
-            }
+        let Some(image_id) = item.custom_image_id else {
+            return None;
+        };
+        let Some(img) = self.images.get(&self.pool, image_id).await else {
+            tracing::warn!("custom image of character {id} is missing; using the provider image");
+            return None;
         };
         if img.bytes.is_empty() || img.bytes.len() > MAX_ATTACH_BYTES {
             tracing::warn!(
@@ -312,6 +307,39 @@ impl ProfileView {
             return None;
         }
         Some(img)
+    }
+
+    /// Warm what the neighbours of the shown item need (their pictures, and the card of a person) in the background,
+    /// so the next click on ◀ or ▶ finds it in memory.
+    pub fn prefetch(&self) {
+        let neighbours: Vec<&Item> = [self.index.checked_sub(1), Some(self.index + 1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|i| self.window.get(i.checked_sub(self.window_start)?))
+            .filter(|i| i.visible && i.section == Section::Characters)
+            .collect();
+        let images: Vec<i64> = neighbours
+            .iter()
+            .filter_map(|i| i.custom_image_id)
+            .collect();
+        let people: Vec<String> = neighbours
+            .iter()
+            .filter_map(|i| i.character_id().and_then(crate::people::decode_person_id))
+            .collect();
+        if images.is_empty() && people.is_empty() {
+            return;
+        }
+        let (cache, pool, sources) = (self.images.clone(), self.pool.clone(), self.sources.clone());
+        tokio::spawn(async move {
+            for id in images {
+                let _ = cache.get(&pool, id).await;
+            }
+            if let Some(s) = sources {
+                for key in people {
+                    let _ = crate::people::fetch::person(&s, &key, false).await;
+                }
+            }
+        });
     }
 
     /// A person in the list: their three best known works (safety filtered when the card was parsed; cached by the
@@ -348,11 +376,11 @@ impl ProfileView {
     pub async fn prepare_banner(&self) -> Option<BannerFile> {
         let spec = BannerSpec::parse(self.profile.banner.as_deref());
         if let BannerSpec::Image(id) = &spec {
-            if let Ok(Some(img)) = custom::get_image(&self.pool, *id).await {
+            if let Some(img) = self.images.get(&self.pool, *id).await {
                 let ext = if img.animated { "gif" } else { "png" };
                 return Some(BannerFile {
                     name: format!("{BANNER_NAME}.{ext}"),
-                    bytes: img.bytes,
+                    bytes: img.bytes.clone(),
                 });
             }
         }
@@ -715,6 +743,7 @@ mod tests {
             })),
             notice: None,
             sources: None,
+            images: crate::commands::profile::imgcache::ImageCache::new(8),
             person_works: Vec::new(),
         }
     }
@@ -1222,6 +1251,41 @@ mod tests {
             ),
             "anilist-staff:95",
             "a person opens by its person key"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_neighbours_pictures_are_warmed_in_the_background() {
+        let mut v = fixture(6).await;
+        set_image(&v, 2, 1, false, 100).await;
+        set_image(&v, 4, 2, true, 100).await;
+        set_image(&v, 6, 3, false, 100).await;
+        v.index = 2; // item 3 on screen: its neighbours are items 2 and 4
+        v.load().await.expect("load");
+        let image_of = |c: i64| {
+            let pool = v.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT custom_image_id FROM profile_characters WHERE user_id = 1 AND character_id = ?1")
+                    .bind(c)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("image id")
+            }
+        };
+        let (i2, i4, i6) = (image_of(2).await, image_of(4).await, image_of(6).await);
+        let mut warm = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            v.images.settle().await;
+            if v.images.contains(i2).await && v.images.contains(i4).await {
+                warm = true;
+                break;
+            }
+        }
+        assert!(warm, "both neighbours are in memory");
+        assert!(
+            !v.images.contains(i6).await,
+            "an item further away is not prefetched"
         );
     }
 

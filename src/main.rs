@@ -41,6 +41,8 @@ pub struct Data {
     pub auto: std::sync::Arc<ui::autocomplete::AutoState>,
     /// Ephemeral messages that are still active (their components are greyed out at the end of their lifetime).
     pub ephemerals: nav::sweeper::Ephemerals,
+    /// Processed pictures of the profile (custom pictures, GIFs, banners) kept in memory.
+    pub images: commands::profile::imgcache::ImageCache,
     pub http: reqwest::Client,
     pub renderer: std::sync::Arc<render::Renderer>,
     pub guilds: std::sync::Arc<guild::GuildStore>,
@@ -76,6 +78,7 @@ impl Data {
             anilist: std::sync::Arc::new(anilist::SafeAniList::with_fixture(fetch)),
             auto: Default::default(),
             ephemerals: Default::default(),
+            images: commands::profile::imgcache::ImageCache::new(8),
         }
     }
 }
@@ -114,6 +117,10 @@ async fn main() -> anyhow::Result<()> {
     // How long buttons stay active, and the list of ephemeral messages the sweeper looks after.
     nav::init(nav::Lifetimes::from_config(&config));
     let setup_ephemerals = nav::sweeper::Ephemerals::default();
+    let image_cache_mb = config
+        .image_cache_mb
+        .filter(|n| *n > 0)
+        .unwrap_or(commands::profile::imgcache::DEFAULT_MB);
     let feed_ops = ops_state.clone();
 
     let framework = poise::Framework::builder()
@@ -171,6 +178,9 @@ async fn main() -> anyhow::Result<()> {
                     anilist,
                     auto: Default::default(),
                     ephemerals: setup_ephemerals,
+                    images: commands::profile::imgcache::ImageCache::new(
+                        image_cache_mb,
+                    ),
                 })
             })
         })

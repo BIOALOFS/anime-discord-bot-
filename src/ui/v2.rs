@@ -103,10 +103,87 @@ pub fn payload(components: Vec<Value>, files: &[CreateAttachment]) -> Value {
     json!({"flags": IS_COMPONENTS_V2, "components": components, "attachments": attachments})
 }
 
+/// What was already uploaded to a message: file name to `(attachment id, digest of its bytes)`.
+pub type Known = std::collections::HashMap<String, (u64, u64)>;
+
+/// A cheap digest of a file's bytes (to tell an unchanged picture from a changed one with the same name).
+pub fn digest(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
+/// Like `payload`, but a file whose name and bytes are already attached to the message is referenced by its attachment
+/// id instead of being uploaded again (a banner of several megabytes is not re-sent on every click). Returns the body
+/// and the files that really have to be uploaded.
+pub fn payload_reusing(
+    components: Vec<Value>,
+    files: &[CreateAttachment],
+    known: &Known,
+) -> (Value, Vec<CreateAttachment>) {
+    let mut attachments = Vec::new();
+    let mut upload = Vec::new();
+    for f in files {
+        match known.get(&f.filename) {
+            Some((id, d)) if *d == digest(&f.data) => {
+                attachments.push(json!({"id": id.to_string()}))
+            }
+            _ => {
+                attachments.push(json!({"id": upload.len(), "filename": f.filename}));
+                upload.push(f.clone());
+            }
+        }
+    }
+    (
+        json!({"flags": IS_COMPONENTS_V2, "components": components, "attachments": attachments}),
+        upload,
+    )
+}
+
+/// The attachments of a message Discord just returned, as `Known` (matched to the files of the page by name).
+pub fn known_from(sent: &[(String, u64)], files: &[CreateAttachment]) -> Known {
+    files
+        .iter()
+        .filter_map(|f| {
+            let (_, id) = sent.iter().find(|(n, _)| *n == f.filename)?;
+            Some((f.filename.clone(), (*id, digest(&f.data))))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use poise::serenity_prelude as serenity;
+
+    #[test]
+    fn an_unchanged_file_is_referenced_by_id_and_a_changed_or_new_one_is_uploaded() {
+        let banner = CreateAttachment::bytes(vec![1; 100], "banner.gif");
+        let pic = CreateAttachment::bytes(vec![2; 10], "custom-5.png");
+        let known = known_from(
+            &[("banner.gif".into(), 777), ("custom-5.png".into(), 888)],
+            &[banner.clone(), pic.clone()],
+        );
+        // same banner, a different picture: only the picture is uploaded
+        let pic2 = CreateAttachment::bytes(vec![3; 10], "custom-6.png");
+        let (body, upload) = payload_reusing(vec![], &[banner.clone(), pic2.clone()], &known);
+        assert_eq!(upload.len(), 1);
+        assert_eq!(upload[0].filename, "custom-6.png");
+        assert_eq!(body["attachments"][0], json!({"id": "777"}));
+        assert_eq!(
+            body["attachments"][1],
+            json!({"id": 0, "filename": "custom-6.png"})
+        );
+        // the same name with other bytes is a new file
+        let changed = CreateAttachment::bytes(vec![9; 100], "banner.gif");
+        let (body, upload) = payload_reusing(vec![], &[changed], &known);
+        assert_eq!(upload.len(), 1);
+        assert_eq!(body["attachments"][0]["filename"], "banner.gif");
+        // nothing known: everything is uploaded, numbered from 0
+        let (_, upload) = payload_reusing(vec![], &[banner, pic], &Known::new());
+        assert_eq!(upload.len(), 2);
+    }
 
     fn sample() -> Vec<Value> {
         let buttons = CreateActionRow::Buttons(vec![

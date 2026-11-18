@@ -265,9 +265,10 @@ async fn send_page(
     i: &serenity::ComponentInteraction,
     page: Page,
     use_v2: bool,
+    known: &mut super::v2::Known,
 ) -> bool {
     if use_v2 && page.v2.is_some() {
-        edit_v2(sctx, &i.token, &page).await.is_ok()
+        edit_v2(sctx, &i.token, &page, known).await.is_ok()
     } else {
         i.edit_response(sctx, page.into_edit()).await.is_ok()
     }
@@ -325,12 +326,12 @@ async fn disable_shown(
     }
 }
 
-/// Send a page as Components V2 through the original (deferred) response; returns the message id.
+/// Send a page as Components V2 through the original (deferred) response; returns the message id and what is attached.
 async fn present_v2(
     ctx: Context<'_>,
     page: &Page,
     ephemeral: bool,
-) -> Result<serenity::MessageId, String> {
+) -> Result<(serenity::MessageId, super::v2::Known), String> {
     let Context::Application(app) = ctx else {
         return Err("not an application command".into());
     };
@@ -348,19 +349,49 @@ async fn present_v2(
         .edit_original_interaction_response(&app.interaction.token, &payload, page.files.clone())
         .await
         .map_err(|e| e.to_string())?;
-    Ok(msg.id)
+    let sent: Vec<(String, u64)> = msg
+        .attachments
+        .iter()
+        .map(|a| (a.filename.clone(), a.id.get()))
+        .collect();
+    Ok((msg.id, super::v2::known_from(&sent, &page.files)))
 }
 
-/// Edit the message a component sits on with a V2 page (the interaction was acknowledged first).
-async fn edit_v2(sctx: &serenity::Context, token: &str, page: &Page) -> Result<(), String> {
+/// Edit the message a component sits on with a V2 page (the interaction was acknowledged first). Files that are
+/// already attached and unchanged are not uploaded again; if Discord refuses that, everything is sent once more.
+async fn edit_v2(
+    sctx: &serenity::Context,
+    token: &str,
+    page: &Page,
+    known: &mut super::v2::Known,
+) -> Result<(), String> {
     let comps = page.v2.clone().ok_or("no V2 body")?;
     super::v2::validate(&comps)?;
-    let payload = super::v2::payload(comps, &page.files);
-    sctx.http
-        .edit_original_interaction_response(token, &payload, page.files.clone())
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let (payload, upload) = super::v2::payload_reusing(comps.clone(), &page.files, known);
+    let reused = upload.len() < page.files.len();
+    let first = sctx
+        .http
+        .edit_original_interaction_response(token, &payload, upload)
+        .await;
+    let msg = match first {
+        Ok(m) => m,
+        Err(e) if reused => {
+            tracing::debug!("reusing attachments failed ({e}); uploading them again");
+            let payload = super::v2::payload(comps, &page.files);
+            sctx.http
+                .edit_original_interaction_response(token, &payload, page.files.clone())
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let sent: Vec<(String, u64)> = msg
+        .attachments
+        .iter()
+        .map(|a| (a.filename.clone(), a.id.get()))
+        .collect();
+    *known = super::v2::known_from(&sent, &page.files);
+    Ok(())
 }
 
 async fn send_card(
@@ -444,9 +475,13 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
     let mut use_v2 = first.v2.is_some() && matches!(ctx, Context::Application(_));
     let mut message_id = None;
     let mut legacy_handle = None;
+    let mut known = super::v2::Known::new();
     if use_v2 {
         match present_v2(ctx, &first, view.ephemeral()).await {
-            Ok(id) => message_id = Some(id),
+            Ok((id, k)) => {
+                message_id = Some(id);
+                known = k;
+            }
             Err(e) => {
                 tracing::warn!("Components V2 refused, using embeds: {e}");
                 use_v2 = false;
@@ -547,7 +582,7 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
                     Step::Show(msg) => {
                         let page = page_of(*msg, navstate.has_back());
                         shown = Shown::of(&page, false);
-                        if !send_page(sctx, &i, page, false).await {
+                        if !send_page(sctx, &i, page, false, &mut known).await {
                             tracing::debug!("could not edit message");
                             break;
                         }
@@ -555,7 +590,7 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
                     Step::Root => {
                         let page = view.render(true);
                         shown = Shown::of(&page, false);
-                        if !send_page(sctx, &i, page, false).await {
+                        if !send_page(sctx, &i, page, false, &mut known).await {
                             break;
                         }
                     }
@@ -576,7 +611,9 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
                             // Ticks have no interaction token of their own: use the command's.
                             match ctx {
                                 Context::Application(app) => {
-                                    edit_v2(sctx, &app.interaction.token, &page).await.is_ok()
+                                    edit_v2(sctx, &app.interaction.token, &page, &mut known)
+                                        .await
+                                        .is_ok()
                                 }
                                 _ => false,
                             }
@@ -648,7 +685,7 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
                 let page = view.render(outcome != Outcome::Close);
                 shown = Shown::of(&page, use_v2);
                 let sent = if use_v2 && page.v2.is_some() {
-                    edit_v2(sctx, &answer.interaction.token, &page)
+                    edit_v2(sctx, &answer.interaction.token, &page, &mut known)
                         .await
                         .is_ok()
                 } else {
@@ -690,7 +727,7 @@ pub async fn run<V: View>(ctx: Context<'_>, mut view: V) -> Result<(), Error> {
         if outcome != Outcome::Keep {
             let page = view.render(outcome != Outcome::Close);
             shown = Shown::of(&page, use_v2);
-            if !send_page(sctx, &i, page, use_v2).await {
+            if !send_page(sctx, &i, page, use_v2, &mut known).await {
                 // e.g. the message was deleted: stop quietly.
                 tracing::debug!("could not edit message");
                 nav_finish(data, msg_i, ephemeral).await;
