@@ -239,6 +239,8 @@ pub struct RawPage {
     pub categories: Vec<String>,
     pub disambiguation: bool,
     pub redirects_from: Vec<String>,
+    /// The infobox "Series" (the parent work as the wiki writes it), when the page has one.
+    pub series: Option<String>,
 }
 
 /// `prop=extracts|pageimages|categories|pageprops` for a batch of titles. Missing pages, other namespaces, subpages
@@ -301,6 +303,10 @@ pub fn parse_details(doc: &Value) -> Vec<RawPage> {
                             })
                             .unwrap_or_default(),
                         disambiguation: p.pointer("/pageprops/disambiguation").is_some(),
+                        series: p
+                            .pointer("/revisions/0/slots/main/content")
+                            .and_then(Value::as_str)
+                            .and_then(super::clean::series),
                     })
                 })
                 .filter(|p| !p.disambiguation)

@@ -313,7 +313,9 @@ impl<T: Transport> Api<T> {
                     api_url,
                     vec![
                         p("action", "query"),
-                        p("prop", "extracts|pageimages|categories|pageprops"),
+                        p("prop", "extracts|pageimages|categories|pageprops|revisions"),
+                        p("rvprop", "content"),
+                        p("rvslots", "main"),
                         p("exintro", "1"),
                         p("explaintext", "1"),
                         p("exsentences", "4"),

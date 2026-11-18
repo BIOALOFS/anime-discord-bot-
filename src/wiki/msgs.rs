@@ -34,7 +34,7 @@ pub fn credit(w: &Source) -> String {
 pub fn card(p: &Page, w: &Source) -> Emb {
     let mut lines = Vec::new();
     if let Some(parent) = &p.parent_title {
-        lines.push(format!("🎮 {parent}"));
+        lines.push(format!("📚 {parent}"));
     }
     if let Some(e) = &p.extract {
         lines.push(fit(e, 700));
@@ -257,7 +257,7 @@ mod tests {
         let e = json(&card(&page(Kind::Character), &wiki()).build());
         let text = e["description"].as_str().unwrap_or("");
         assert!(
-            text.contains("🎮 Silent Hill 2") && text.contains("A monster"),
+            text.contains("📚 Silent Hill 2") && text.contains("A monster"),
             "{text}"
         );
         assert_eq!(e["footer"]["text"], "Silent Hill Wiki · CC BY-SA 3.0");
