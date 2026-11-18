@@ -41,6 +41,9 @@ const BANNER_NAME: &str = "banner";
 const DEFAULT_ACCENT: u32 = 0x3DB4F2;
 
 /// The banner picture and the file name it is attached under (a GIF keeps its extension so it animates).
+/// Everything attached to one message edit must stay under Discord's upload limit (10 MB on the smallest tier).
+pub const MAX_ATTACH_BYTES: usize = 9 * 1024 * 1024;
+
 pub struct BannerFile {
     pub name: String,
     pub bytes: Vec<u8>,
@@ -263,23 +266,54 @@ impl ProfileView {
                     .flatten();
             }
         }
-        self.custom = match self
-            .current()
-            .filter(|i| i.section == Section::Characters && i.visible)
-        {
-            Some(i) => match i.character_id() {
-                Some(id) => custom::image_of_character(&self.pool, self.owner, id)
-                    .await
-                    .ok()
-                    .flatten(),
-                None => None,
-            },
-            None => None,
-        };
+        self.custom = self.load_custom_image().await;
         if self.banner.is_none() {
             self.banner = self.prepare_banner().await.map(Arc::new);
         }
         Ok(())
+    }
+
+    /// The current character's own picture. A missing row, an unreadable one or one too big for a message all fall
+    /// back to the provider picture, with a warning in the log, so that the page itself always renders.
+    async fn load_custom_image(&self) -> Option<StoredImage> {
+        let item = self
+            .current()
+            .filter(|i| i.section == Section::Characters && i.visible)?;
+        let id = item.character_id()?;
+        item.custom_image_id?;
+        let img = match custom::image_of_character(&self.pool, self.owner, id).await {
+            Ok(Some(img)) => img,
+            Ok(None) => {
+                tracing::warn!(
+                    "custom image of character {id} is missing; using the provider image"
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "custom image of character {id} is unreadable ({e}); using the provider image"
+                );
+                return None;
+            }
+        };
+        if img.bytes.is_empty() || img.bytes.len() > MAX_ATTACH_BYTES {
+            tracing::warn!(
+                "custom image {} of character {id} is empty or too large ({} bytes); using the provider image",
+                img.id,
+                img.bytes.len()
+            );
+            return None;
+        }
+        Some(img)
+    }
+
+    /// The banner is dropped from a page only when it and the character picture together would not fit one message.
+    fn show_banner(&self) -> bool {
+        match (&self.banner, &self.custom) {
+            (Some(b), Some(c)) => b.bytes.len() + c.bytes.len() <= MAX_ATTACH_BYTES,
+            (Some(_), None) => true,
+            _ => false,
+        }
     }
 
     /// An uploaded banner is attached as stored (a GIF stays animated); presets and colours are drawn.
@@ -408,6 +442,7 @@ impl ProfileView {
     fn banner_url(&self) -> Option<String> {
         self.banner
             .as_ref()
+            .filter(|_| self.show_banner())
             .map(|b| format!("attachment://{}", b.name))
     }
 
@@ -446,7 +481,7 @@ impl ProfileView {
         card.image = self.item_image();
         card.footer = None;
         let mut out = Vec::new();
-        if self.banner.is_some() {
+        if self.banner_url().is_some() {
             out.push(banner.build());
         }
         out.push(card.build());
@@ -479,7 +514,7 @@ impl ProfileView {
 
     fn files(&self) -> Vec<serenity::CreateAttachment> {
         let mut files = Vec::new();
-        if let Some(b) = &self.banner {
+        if let Some(b) = self.banner.as_ref().filter(|_| self.show_banner()) {
             files.push(serenity::CreateAttachment::bytes(
                 b.bytes.clone(),
                 b.name.clone(),
@@ -834,6 +869,203 @@ mod tests {
                 o.iter().any(|c| c.value == GROUP_NEXT),
                 (group + 1) * PAGES_PER_GROUP < pages
             );
+        }
+    }
+
+    async fn fixture(n: i64) -> ProfileView {
+        let mut v = sample_view().await;
+        v.banner = None;
+        crate::db::profile::create_profile(&v.pool, 1)
+            .await
+            .expect("profile");
+        for id in 1..=n {
+            crate::db::profile::add_character(&v.pool, 1, id)
+                .await
+                .expect("add");
+            crate::db::profile::upsert_cache(
+                &v.pool,
+                &crate::db::profile::CacheRow {
+                    character_id: id,
+                    name_romaji: format!("Character {id}"),
+                    name_native: None,
+                    image_url: Some(format!("https://s4.anilist.co/file/{id}.png")),
+                    is_safe: true,
+                    main_work: Some("Work".into()),
+                    main_work_url: None,
+                    favourites: None,
+                    fetched_at: crate::commands::profile::util::now(),
+                },
+            )
+            .await
+            .expect("cache");
+        }
+        v.load().await.expect("load");
+        v
+    }
+
+    async fn set_image(v: &ProfileView, character: i64, tag: u8, animated: bool, size: usize) {
+        let img = custom::NewImage {
+            hash: format!("hash-{character}-{tag}"),
+            mime: if animated { "image/gif" } else { "image/png" }.into(),
+            bytes: vec![tag; size],
+            width: 10,
+            height: 10,
+            animated,
+        };
+        let id = match custom::store_image(&v.pool, 1, &img, 50)
+            .await
+            .expect("store")
+        {
+            custom::StoreOutcome::Stored(id) | custom::StoreOutcome::Existing(id) => id,
+            other => panic!("{other:?}"),
+        };
+        custom::set_character_image(&v.pool, 1, character, id)
+            .await
+            .expect("set");
+    }
+
+    async fn order(v: &ProfileView) -> Vec<i64> {
+        pdb::list_page(&v.pool, 1, None, 0, 100)
+            .await
+            .expect("list")
+            .iter()
+            .map(|e| e.character_id)
+            .collect()
+    }
+
+    async fn goes(v: &mut ProfileView, id: &str, values: &[&str]) -> String {
+        let values: Vec<String> = values.iter().map(|s| s.to_string()).collect();
+        v.on_interaction(id, &values).await;
+        assert!(v.notice.is_none(), "{id}: {:?}", v.notice);
+        v.current().map(|i| i.key.clone()).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn editing_a_picture_keeps_every_item_reachable_from_every_control() {
+        let mut v = fixture(30).await;
+        let before = order(&v).await;
+        set_image(&v, 3, 1, false, 100).await;
+        set_image(&v, 4, 2, true, 100).await;
+        set_image(&v, 27, 3, false, 100).await;
+        // a picture whose row is gone, and one that is empty
+        sqlx::query("UPDATE profile_characters SET custom_image_id = 9999 WHERE character_id = 5")
+            .execute(&v.pool)
+            .await
+            .ok();
+        set_image(&v, 6, 4, false, 0).await;
+        // re-editing the same character replaces the picture without moving it
+        set_image(&v, 3, 9, true, 200).await;
+        assert_eq!(order(&v).await, before, "an edit never reorders");
+        v.index = 0;
+        v.load().await.expect("load");
+
+        for step in 1..30 {
+            let key = goes(&mut v, crate::ui::pagination::NAV_NEXT, &[]).await;
+            assert_eq!(key, (step + 1).to_string(), "▶ reaches item {}", step + 1);
+            // the page always renders; at most the banner and the current picture are attached
+            let page = v.main_page(true);
+            assert!(page.files.len() <= 2, "item {key}: {}", page.files.len());
+            assert!(v.v2_body(true).len() == 1);
+        }
+        assert_eq!(
+            goes(&mut v, crate::ui::pagination::NAV_FIRST, &[]).await,
+            "1"
+        );
+        assert_eq!(
+            goes(&mut v, crate::ui::pagination::NAV_LAST, &[]).await,
+            "30"
+        );
+        for want in (1..30).rev() {
+            assert_eq!(
+                goes(&mut v, crate::ui::pagination::NAV_PREV, &[]).await,
+                want.to_string()
+            );
+        }
+        // jump select: every item of both pages, including the edited ones
+        for target in [3, 4, 5, 6] {
+            v.index = 0;
+            v.load().await.expect("load");
+            assert_eq!(
+                goes(&mut v, ITEM_ID, &[&target.to_string()]).await,
+                target.to_string()
+            );
+        }
+        assert_eq!(goes(&mut v, PAGE_ID, &["1"]).await, "26");
+        assert_eq!(goes(&mut v, ITEM_ID, &["27"]).await, "27");
+        assert!(
+            v.custom.is_some(),
+            "the edited picture is shown on its own item"
+        );
+        assert_eq!(goes(&mut v, PAGE_ID, &["0"]).await, "1");
+        // the mode toggle there and back
+        goes(&mut v, MODE_ID, &[]).await;
+        assert_eq!(v.section, Section::Works);
+        goes(&mut v, MODE_ID, &[]).await;
+        assert_eq!(v.section, Section::Characters);
+        assert_eq!(order(&v).await, before);
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_empty_picture_falls_back_to_the_provider_image() {
+        let mut v = fixture(3).await;
+        sqlx::query("UPDATE profile_characters SET custom_image_id = 9999 WHERE character_id = 1")
+            .execute(&v.pool)
+            .await
+            .ok();
+        v.load().await.expect("load");
+        assert!(v.custom.is_none());
+        assert_eq!(
+            v.item_image().as_deref(),
+            Some("https://s4.anilist.co/file/1.png")
+        );
+        set_image(&v, 2, 1, false, 0).await;
+        goes(&mut v, crate::ui::pagination::NAV_NEXT, &[]).await;
+        assert!(v.custom.is_none(), "an empty file is not used");
+    }
+
+    #[tokio::test]
+    async fn the_banner_yields_when_it_and_the_picture_do_not_fit_one_message() {
+        let mut v = fixture(2).await;
+        set_image(&v, 1, 1, true, 3 * 1024 * 1024).await;
+        v.banner = Some(Arc::new(BannerFile {
+            name: "banner.gif".into(),
+            bytes: vec![0; 7 * 1024 * 1024],
+        }));
+        v.load().await.expect("load");
+        let page = v.main_page(true);
+        assert_eq!(
+            page.files.len(),
+            1,
+            "only the character picture is attached"
+        );
+        assert!(v.banner_url().is_none());
+        goes(&mut v, crate::ui::pagination::NAV_NEXT, &[]).await;
+        assert_eq!(
+            v.main_page(true).files.len(),
+            1,
+            "the banner is back on other items"
+        );
+        assert!(v.banner_url().is_some());
+    }
+
+    #[tokio::test]
+    async fn dropdown_values_are_stable_unique_and_within_limits() {
+        let mut v = fixture(30).await;
+        let before: Vec<String> = window_choices(&v.window, v.window_start)
+            .iter()
+            .map(|c| c.value.clone())
+            .collect();
+        set_image(&v, 3, 1, false, 100).await;
+        v.load().await.expect("load");
+        let after = window_choices(&v.window, v.window_start);
+        assert_eq!(
+            after.iter().map(|c| c.value.clone()).collect::<Vec<_>>(),
+            before
+        );
+        let mut seen = std::collections::HashSet::new();
+        for c in &after {
+            assert!(c.label.chars().count() <= 100 && c.value.chars().count() <= 100);
+            assert!(seen.insert(c.value.clone()), "unique");
         }
     }
 

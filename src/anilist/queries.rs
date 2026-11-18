@@ -30,6 +30,12 @@ pub const SEARCH_MEDIA: &str = with_media_fragment!(
      Page(perPage: $perPage) { media(search: $search, type: $type, countryOfOrigin: $country, format_in: $formatIn, isAdult: $isAdult, genre_not_in: $genreNotIn, sort: [SEARCH_MATCH]) { ...M } } }"
 );
 
+/// The most popular works of a kind: what autocomplete shows before anything (or only one letter) is typed.
+pub const POPULAR_MEDIA: &str = with_media_fragment!(
+    "query($type: MediaType, $country: CountryCode, $formatIn: [MediaFormat], $perPage: Int, $isAdult: Boolean, $genreNotIn: [String]) { \
+     Page(perPage: $perPage) { media(type: $type, countryOfOrigin: $country, format_in: $formatIn, isAdult: $isAdult, genre_not_in: $genreNotIn, sort: [POPULARITY_DESC]) { ...M } } }"
+);
+
 pub const MEDIA_BY_ID: &str = with_media_fragment!("query($id: Int) { Media(id: $id) { ...M } }");
 
 pub const AIRING_SCHEDULE: &str = with_media_fragment!(
@@ -69,6 +75,12 @@ pub const RANDOM_MEDIA: &str = with_media_fragment!(
      Page(page: $page, perPage: 20) { pageInfo { lastPage hasNextPage } \
      media(type: $type, countryOfOrigin: $country, format_in: $formatIn, genre: $genre, averageScore_greater: $minScore, isAdult: $isAdult, genre_not_in: $genreNotIn, \
      seasonYear: $seasonYear, status: $status, sort: [POPULARITY_DESC]) { ...M } } }"
+);
+
+pub const POPULAR_CHARACTERS: &str = concat!(
+    "query($perPage: Int) { Page(perPage: $perPage) { characters(sort: [FAVOURITES_DESC]) { ",
+    character_fields!(),
+    " } } }"
 );
 
 pub const SEARCH_CHARACTER: &str = concat!(

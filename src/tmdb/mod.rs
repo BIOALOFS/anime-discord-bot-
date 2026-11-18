@@ -202,6 +202,34 @@ impl Tmdb {
             .unwrap_or_default()
     }
 
+    /// Persons by name (the raw `search/person` document).
+    pub async fn person_search_doc(&self, query: &str) -> Option<Arc<Value>> {
+        let q = [
+            ("query", query.to_string()),
+            ("b", Self::bucket(Ttl::Search)),
+        ];
+        self.get("/search/person", &q, Ttl::Search).await
+    }
+
+    /// One person with their combined credits.
+    pub async fn person_doc(&self, id: i64) -> Option<Arc<Value>> {
+        let q = [
+            ("append_to_response", "combined_credits".to_string()),
+            ("b", Self::bucket(Ttl::Details)),
+        ];
+        self.get(&format!("/person/{id}"), &q, Ttl::Details).await
+    }
+
+    /// The cast and crew of a work (`credits` for a movie, `aggregate_credits` for a series).
+    pub async fn credits_doc(&self, kind: Kind, id: i64) -> Option<Arc<Value>> {
+        let path = match kind {
+            Kind::Tv => format!("/tv/{id}/aggregate_credits"),
+            Kind::Movie => format!("/movie/{id}/credits"),
+        };
+        let q = [("b", Self::bucket(Ttl::Details))];
+        self.get(&path, &q, Ttl::Details).await
+    }
+
     /// Full details with credits, ratings, keywords, providers (one request). `None` when missing, blocked or off.
     pub async fn details(&self, kind: Kind, id: i64) -> Option<Work> {
         let (path, append) = match kind {

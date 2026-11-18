@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, Semaphore};
 const API: &str = "https://api.igdb.com/v4";
 const TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
 const IMAGE: &str = "https://images.igdb.com/igdb/image/upload/t_cover_big";
-pub(super) const GAME_FIELDS: &str = "name,summary,url,first_release_date,total_rating,total_rating_count,cover.image_id,genres.name,themes.id,themes.name,keywords.name";
+pub(crate) const GAME_FIELDS: &str = "name,summary,url,first_release_date,total_rating,total_rating_count,cover.image_id,genres.name,themes.id,themes.name,keywords.name";
 pub(super) const CHARACTER_FIELDS: &str = "name,akas,url,mug_shot.image_id,games.name,games.cover.image_id,games.total_rating_count,games.genres.name,games.themes.id,games.themes.name,games.keywords.name";
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -97,7 +97,7 @@ impl Igdb {
         Ok(value)
     }
 
-    async fn query(&self, endpoint: &str, body: String) -> Result<Value, ProviderError> {
+    pub(crate) async fn query(&self, endpoint: &str, body: String) -> Result<Value, ProviderError> {
         for attempt in 0..2 {
             let token = self.token().await?;
             let _open = self
@@ -370,7 +370,7 @@ fn image(v: &Value, key: &str) -> Option<String> {
         .then(|| format!("{IMAGE}/{id}.jpg"))
 }
 
-pub(super) fn parse_games(doc: &Value, allow_mature: bool) -> Vec<(Work, u64)> {
+pub(crate) fn parse_games(doc: &Value, allow_mature: bool) -> Vec<(Work, u64)> {
     let Some(list) = doc.as_array() else {
         return Vec::new();
     };

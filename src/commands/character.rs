@@ -89,6 +89,7 @@ pub fn card_rows(
     in_profile: bool,
     show_back: bool,
     work_key: Option<&str>,
+    performer: Option<&str>,
     enabled: bool,
 ) -> Vec<serenity::CreateActionRow> {
     let secondary = serenity::ButtonStyle::Secondary;
@@ -122,6 +123,8 @@ pub fn card_rows(
         crate::components::ItemKind::Character,
         work_key,
     ));
+    // "أظهر المؤدي": the voice actor's card as a new message.
+    main.extend(performer.map(crate::components::performer_button));
     let mut extra = vec![
         serenity::CreateButton::new(BTN_DESCRIBE)
             .label(i18n::BTN_DESCRIPTION)
@@ -140,7 +143,10 @@ pub fn card_rows(
             .disabled(!enabled),
     ];
     extra.push(close_button(enabled));
-    vec![buttons(main), buttons(extra)]
+    // Over five buttons the source link drops out (the card title links to it); the required ones always stay.
+    let (mut rows, _links) = crate::components::card_rows(main);
+    rows.push(buttons(extra));
+    rows
 }
 
 /// Appearances that may be shown under the given policy.
@@ -395,6 +401,7 @@ impl View for CharacterView {
                         .and_then(|r| r.id)
                         .map(|id| format!("anilist:{id}"))
                         .as_deref(),
+                    Some(&c.id.to_string()),
                     enabled,
                 ),
             ),
@@ -800,7 +807,7 @@ pub(crate) async fn character_suggestions(
     partial: &str,
     source: CharacterSource,
 ) -> Vec<serenity::AutocompleteChoice> {
-    if !crate::guild::autocomplete_allowed(ctx).await || partial.trim().chars().count() < 2 {
+    if !crate::guild::autocomplete_allowed(ctx).await {
         return Vec::new();
     }
     let (games_on, mature) = super::fallback::game_flags(ctx).await;
@@ -809,54 +816,63 @@ pub(crate) async fn character_suggestions(
     let providers = data.providers.clone();
     let use_games = source != CharacterSource::AnimeManga && games_on && providers.games_enabled();
     let use_ani = source != CharacterSource::Games;
-    // The cache key is the typed text, so the option that changes the answer is part of it.
-    let keyed = format!("{source:?}|{mature}|{}", partial.trim());
+    // The options that change the answer are part of the cache scope.
+    let scope = format!("{source:?}|{mature}");
     let items = data
         .auto
-        .items(ctx.author().id.get(), "character", &keyed, |q| async move {
-            let text = q.rsplit('|').next().unwrap_or("").to_string();
-            let (ani, prov) = futures::join!(
-                async {
-                    if !use_ani {
-                        return Vec::new();
+        .items_scoped(
+            ctx.author().id.get(),
+            "character",
+            &scope,
+            partial,
+            0,
+            |text| async move {
+                let (ani, prov) = futures::join!(
+                    async {
+                        if !use_ani {
+                            return Vec::new();
+                        }
+                        let list = if text.chars().count() >= 2 {
+                            api.search_characters(&text, 10, ContentPolicy::SAFE).await
+                        } else {
+                            api.popular_characters(10, ContentPolicy::SAFE).await
+                        };
+                        list.unwrap_or_default()
+                    },
+                    async {
+                        if use_games && text.chars().count() >= 2 {
+                            // Characters by name, and the games whose rosters the member may mean.
+                            let (chars, games) = futures::join!(
+                                providers.search_characters_found(&text, mature),
+                                providers.search_games_found(&text, None, mature, None)
+                            );
+                            (chars.works, games.works)
+                        } else {
+                            (Vec::new(), Vec::new())
+                        }
                     }
-                    api.search_characters(&text, 10, ContentPolicy::SAFE)
-                        .await
-                        .unwrap_or_default()
-                },
-                async {
-                    if use_games {
-                        // Characters by name, and the games whose rosters the member may mean.
-                        let (chars, games) = futures::join!(
-                            providers.search_characters_found(&text, mature),
-                            providers.search_games_found(&text, None, mature, None)
-                        );
-                        (chars.works, games.works)
-                    } else {
-                        (Vec::new(), Vec::new())
-                    }
-                }
-            );
-            let mut out: Vec<(String, String)> = ani
-                .iter()
-                .map(|c| {
-                    let label = match c.main_work() {
-                        Some(w) => format!("{} — {w}", c.display_name()),
-                        None => c.display_name().to_string(),
-                    };
-                    (label, format!("id:{}", c.id))
-                })
-                .collect();
-            out.extend(prov.0.iter().map(|w| (provider_label(w), w.id.clone())));
-            // "شخصيات لعبة X": typing a game where a character is expected still leads somewhere.
-            out.extend(
-                prov.1
+                );
+                let mut out: Vec<(String, String)> = ani
                     .iter()
-                    .take(3)
-                    .map(|g| (i18n::roster_of_game(&g.title), format!("roster:{}", g.id))),
-            );
-            out
-        })
+                    .map(|c| {
+                        let label = match c.main_work() {
+                            Some(w) => format!("{} — {w}", c.display_name()),
+                            None => c.display_name().to_string(),
+                        };
+                        (label, format!("id:{}", c.id))
+                    })
+                    .collect();
+                out.extend(prov.0.iter().map(|w| (provider_label(w), w.id.clone())));
+                // "شخصيات لعبة X": typing a game where a character is expected still leads somewhere.
+                out.extend(
+                    prov.1
+                        .iter()
+                        .take(3)
+                        .map(|g| (i18n::roster_of_game(&g.title), format!("roster:{}", g.id))),
+                );
+                out
+            },
+        )
         .await;
     to_choices(items)
 }
@@ -1036,15 +1052,23 @@ mod tests {
             false,
             true,
             Some("anilist:5"),
+            Some("5"),
             true,
         );
         let l = labels(&rows);
-        for want in [i18n::BTN_ADD_TO_PROFILE, i18n::BTN_WORKS, i18n::BTN_BACK] {
+        for want in [
+            i18n::BTN_ADD_TO_PROFILE,
+            i18n::BTN_WORKS,
+            i18n::BTN_BACK,
+            crate::components::LABEL_SHOW_WORK,
+            crate::components::LABEL_SHOW_PERFORMER,
+        ] {
             assert!(l.iter().any(|x| x == want), "{want} missing in {l:?}");
         }
+        // Six buttons do not fit one row: the source link is the first to go.
         assert!(
-            l.iter().any(|x| x.contains(i18n::BTN_ANILIST)),
-            "source link"
+            !l.iter().any(|x| x.contains(i18n::BTN_ANILIST)),
+            "the link drops out of a crowded row"
         );
         assert!(
             rows.len() <= 5
@@ -1059,7 +1083,7 @@ mod tests {
 
     #[test]
     fn the_add_button_becomes_remove_when_the_character_is_in_my_profile() {
-        let l = labels(&card_rows(None, true, false, None, true));
+        let l = labels(&card_rows(None, true, false, None, None, true));
         assert!(l.iter().any(|x| x == i18n::BTN_REMOVE_FROM_PROFILE));
         assert!(!l.iter().any(|x| x == i18n::BTN_ADD_TO_PROFILE));
         assert!(

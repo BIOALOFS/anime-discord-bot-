@@ -14,6 +14,16 @@ pub const SHOW_WORK: &str = "showwork";
 pub const SHOW_CHARS: &str = "showchars";
 pub const PICK_WORK: &str = "pickwork";
 pub const PICK_CHAR: &str = "pickchar";
+/// People: a menu of persons (opens a person card), the works of a person, the crew of a work, the performer of a
+/// character, and the overflow menu "المزيد" that holds optional buttons when a row would be too full.
+pub const PICK_PERSON: &str = "pickperson";
+pub const SHOW_WORKS: &str = "showworks";
+pub const SHOW_CREW: &str = "showcrew";
+pub const SHOW_PERFORMER: &str = "showperf";
+pub const PICK_MORE: &str = "pickmore";
+/// The general search: its result menu (any kind of item) and its page buttons.
+pub const PICK_ANY: &str = "pickany";
+pub const SEARCH_PAGE: &str = "searchpage";
 pub const REMIND: &str = "remind";
 pub const ADD_PROFILE: &str = "addprofile";
 /// The watch / read status menu of a work card: `setstatus:<work key>` (the chosen status is the menu value).
@@ -25,6 +35,10 @@ pub const LABEL_SHOW_WORK: &str = "أظهر العمل";
 pub const LABEL_SHOW_CHARS: &str = "أظهر الشخصيات";
 pub const LABEL_REMIND: &str = "ذكّرني";
 pub const LABEL_ADD: &str = "أضف لبروفايلي";
+pub const LABEL_SHOW_WORKS: &str = "أظهر الأعمال";
+pub const LABEL_SHOW_CREW: &str = "أظهر الطاقم";
+pub const LABEL_SHOW_PERFORMER: &str = "أظهر المؤدي";
+pub const LABEL_MORE: &str = "المزيد";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -36,9 +50,22 @@ pub enum ItemKind {
 pub fn is_global_id(id: &str) -> bool {
     id == PICK_WORK
         || id == PICK_CHAR
-        || [SHOW_WORK, SHOW_CHARS, REMIND, ADD_PROFILE, SET_STATUS]
-            .iter()
-            .any(|p| id.starts_with(&format!("{p}:")))
+        || id == PICK_PERSON
+        || id == PICK_MORE
+        || id == PICK_ANY
+        || [
+            SEARCH_PAGE,
+            SHOW_WORK,
+            SHOW_CHARS,
+            SHOW_WORKS,
+            SHOW_CREW,
+            SHOW_PERFORMER,
+            REMIND,
+            ADD_PROFILE,
+            SET_STATUS,
+        ]
+        .iter()
+        .any(|p| id.starts_with(&format!("{p}:")))
 }
 
 /// Provider-prefixed key of a work: `anilist:1`, `tmdb-tv:2`, `tmdb-movie:3`, `igdb:4`, `vndb:v5`.
@@ -57,6 +84,31 @@ pub fn show_work_id(work_key: &str) -> String {
 
 pub fn show_chars_id(work_key: &str) -> String {
     format!("{SHOW_CHARS}:{work_key}")
+}
+
+/// A person key: `anilist-staff:1`, `tmdb-person:2`, `vndb-staff:s3`, `igdb-company:4`.
+pub fn is_person_key(key: &str) -> bool {
+    crate::people::parse_key(key).is_some()
+}
+
+pub fn show_works_id(person_key: &str) -> String {
+    format!("{SHOW_WORKS}:{person_key}")
+}
+
+pub fn works_nav_id(person_key: &str, page: usize) -> String {
+    format!("{SHOW_WORKS}:{person_key}:{page}:{NAV}")
+}
+
+pub fn show_crew_id(work_key: &str) -> String {
+    format!("{SHOW_CREW}:{work_key}")
+}
+
+pub fn crew_nav_id(work_key: &str, page: usize) -> String {
+    format!("{SHOW_CREW}:{work_key}:{page}:{NAV}")
+}
+
+pub fn show_performer_id(character_key: &str) -> String {
+    format!("{SHOW_PERFORMER}:{character_key}")
 }
 
 /// A roster page button: `showchars:<work key>:<page>:nav`.
@@ -80,6 +132,17 @@ pub enum Press {
     ShowChars(String, Option<usize>),
     PickWork(String),
     PickChar(String),
+    PickPerson(String),
+    /// Any item of the general search, by key: opens a work, character or person card.
+    PickAny(String),
+    /// A page button of a general-search result: category, type, page, text.
+    SearchPage(crate::search::Cat, crate::search::Ty, usize, String),
+    /// The works of a person, and the page when it is a page button of that message.
+    ShowWorks(String, Option<usize>),
+    /// The crew of a work, and the page when it is a page button of that message.
+    ShowCrew(String, Option<usize>),
+    /// The performer(s) of a character.
+    ShowPerformer(String),
     Remind(String),
     Add(String),
     /// Work key and the chosen status (`current`, `completed`, `planned`, `paused`, `dropped`, or `none` to clear).
@@ -94,8 +157,53 @@ pub fn parse(id: &str, values: &[String]) -> Option<Press> {
     if id == PICK_CHAR {
         return values.first().map(|v| Press::PickChar(v.clone()));
     }
+    if id == PICK_PERSON {
+        return values
+            .first()
+            .filter(|v| is_person_key(v))
+            .map(|v| Press::PickPerson(v.clone()));
+    }
+    if id == PICK_ANY {
+        return values
+            .first()
+            .filter(|v| crate::search::is_key(v))
+            .map(|v| Press::PickAny(v.clone()));
+    }
+    if id.starts_with(&format!("{SEARCH_PAGE}:")) {
+        return crate::search::parse_page_id(id).map(|(c, t, p, q)| Press::SearchPage(c, t, p, q));
+    }
+    if id == PICK_MORE {
+        // The overflow menu carries the id of the button it stands for.
+        let v = values.first()?;
+        return (v != PICK_MORE).then(|| parse(v, &[])).flatten();
+    }
     let (head, rest) = id.split_once(':')?;
     match head {
+        SHOW_WORKS | SHOW_CREW => {
+            let ok = |k: &str| {
+                if head == SHOW_WORKS {
+                    is_person_key(k)
+                } else {
+                    is_work_key(k)
+                }
+            };
+            let make = |k: String, p: Option<usize>| {
+                if head == SHOW_WORKS {
+                    Press::ShowWorks(k, p)
+                } else {
+                    Press::ShowCrew(k, p)
+                }
+            };
+            if let Some(body) = rest.strip_suffix(&format!(":{NAV}")) {
+                let (key, page) = body.rsplit_once(':')?;
+                return ok(key)
+                    .then_some(())
+                    .and(page.parse().ok())
+                    .map(|p| make(key.to_string(), Some(p)));
+            }
+            ok(rest).then(|| make(rest.to_string(), None))
+        }
+        SHOW_PERFORMER => (!rest.is_empty()).then(|| Press::ShowPerformer(rest.to_string())),
         SHOW_WORK => is_work_key(rest).then(|| Press::ShowWork(rest.to_string())),
         REMIND => is_work_key(rest).then(|| Press::Remind(rest.to_string())),
         ADD_PROFILE => (!rest.is_empty()).then(|| Press::Add(rest.to_string())),
@@ -127,12 +235,98 @@ pub fn standard_actions(kind: ItemKind, work_key: Option<&str>) -> Vec<serenity:
             .label(LABEL_SHOW_WORK)
             .emoji('📖')
             .style(secondary)],
-        (ItemKind::Work, Some(k)) => vec![serenity::CreateButton::new(show_chars_id(k))
-            .label(LABEL_SHOW_CHARS)
-            .emoji('👥')
-            .style(secondary)],
+        (ItemKind::Work, Some(k)) => vec![
+            serenity::CreateButton::new(show_chars_id(k))
+                .label(LABEL_SHOW_CHARS)
+                .emoji('👥')
+                .style(secondary),
+            serenity::CreateButton::new(show_crew_id(k))
+                .label(LABEL_SHOW_CREW)
+                .emoji('🎬')
+                .style(secondary),
+        ],
         _ => Vec::new(),
     }
+}
+
+/// "أظهر المؤدي" for a character (the voice actor or actor).
+pub fn performer_button(character_key: &str) -> serenity::CreateButton {
+    serenity::CreateButton::new(show_performer_id(character_key))
+        .label(LABEL_SHOW_PERFORMER)
+        .emoji('🎙')
+        .style(serenity::ButtonStyle::Secondary)
+}
+
+/// "أظهر الأعمال" for a person.
+pub fn works_button(person_key: &str) -> serenity::CreateButton {
+    serenity::CreateButton::new(show_works_id(person_key))
+        .label(LABEL_SHOW_WORKS)
+        .emoji('🎞')
+        .style(serenity::ButtonStyle::Secondary)
+}
+
+/// A menu of persons: choosing one opens the person card as a new message.
+pub fn person_menu(
+    placeholder: &str,
+    items: &[(String, String)],
+) -> Option<serenity::CreateActionRow> {
+    menu(PICK_PERSON, placeholder, items)
+}
+
+/// Buttons of one card as action rows within Discord's limits (five buttons per row). Never dropped: the buttons
+/// every card must carry (show work / characters, add). When there are too many, the optional ones go in this order:
+/// link buttons first (the caller keeps the links as text), then the crew / performer buttons move into a single
+/// "المزيد" select under the row. Returns the rows and the links that were dropped.
+pub fn card_rows(
+    buttons: Vec<serenity::CreateButton>,
+) -> (Vec<serenity::CreateActionRow>, Vec<String>) {
+    const MAX: usize = 5;
+    let json = |b: &serenity::CreateButton| serde_json::to_value(b).unwrap_or_default();
+    if buttons.len() <= MAX {
+        return (
+            vec![serenity::CreateActionRow::Buttons(buttons)],
+            Vec::new(),
+        );
+    }
+    let is_link = |b: &serenity::CreateButton| json(b)["style"] == 5;
+    let optional = |b: &serenity::CreateButton| {
+        json(b)["custom_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with(SHOW_CREW) || id.starts_with(SHOW_PERFORMER))
+    };
+    let mut kept = buttons;
+    let mut links = Vec::new();
+    while kept.len() > MAX {
+        let Some(pos) = kept.iter().rposition(is_link) else {
+            break;
+        };
+        links.push(
+            json(&kept.remove(pos))["url"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+        );
+    }
+    if kept.len() <= MAX {
+        return (vec![serenity::CreateActionRow::Buttons(kept)], links);
+    }
+    let (more, main): (Vec<_>, Vec<_>) = kept.into_iter().partition(|b| optional(b));
+    let mut rows = vec![serenity::CreateActionRow::Buttons(main)];
+    let choices: Vec<crate::ui::select::Choice> = more
+        .iter()
+        .map(|b| {
+            let j = json(b);
+            crate::ui::select::Choice {
+                label: j["label"].as_str().unwrap_or("").to_string(),
+                description: None,
+                value: j["custom_id"].as_str().unwrap_or("").to_string(),
+            }
+        })
+        .collect();
+    rows.extend(crate::ui::select::select_row(
+        PICK_MORE, LABEL_MORE, choices, true,
+    ));
+    (rows, links)
 }
 
 /// "ذكّرني" for a work.
@@ -192,6 +386,14 @@ pub fn work_menu(
     menu(PICK_WORK, placeholder, items)
 }
 
+/// A menu of items of any kind (the general search): choosing one opens its card as a new message.
+pub fn any_menu(
+    placeholder: &str,
+    items: &[(String, String)],
+) -> Option<serenity::CreateActionRow> {
+    menu(PICK_ANY, placeholder, items)
+}
+
 /// A menu of characters (rosters, lists of characters).
 pub fn character_menu(
     placeholder: &str,
@@ -235,7 +437,6 @@ pub const VIEW_KINDS: &[(&str, ViewKind)] = &[
     ("AdminView", ViewKind::None),
     ("HelpView", ViewKind::None),
     ("DeleteView", ViewKind::None),
-    ("Confirm", ViewKind::None),
     ("NotifyView", ViewKind::None),
     ("AiringView", ViewKind::List),
     ("Arena", ViewKind::Event),
@@ -281,7 +482,7 @@ mod tests {
         );
         assert_eq!(
             labels(standard_actions(ItemKind::Work, Some("tmdb-tv:5"))),
-            vec!["أظهر الشخصيات"]
+            vec!["أظهر الشخصيات", "أظهر الطاقم"]
         );
         assert!(
             standard_actions(ItemKind::Work, None).is_empty(),
@@ -370,6 +571,141 @@ mod tests {
             .iter()
             .all(|o| o["label"].as_str().unwrap_or("").chars().count() <= 100));
         assert!(work_menu("اختر", &[]).is_none());
+    }
+
+    #[test]
+    fn people_ids_parse_back_and_are_global() {
+        let person = "anilist-staff:95";
+        assert_eq!(
+            parse(&show_works_id(person), &[]),
+            Some(Press::ShowWorks(person.into(), None))
+        );
+        assert_eq!(
+            parse(&works_nav_id(person, 2), &[]),
+            Some(Press::ShowWorks(person.into(), Some(2)))
+        );
+        assert_eq!(
+            parse(&show_crew_id("tmdb-tv:5"), &[]),
+            Some(Press::ShowCrew("tmdb-tv:5".into(), None))
+        );
+        assert_eq!(
+            parse(&crew_nav_id("anilist:1", 1), &[]),
+            Some(Press::ShowCrew("anilist:1".into(), Some(1)))
+        );
+        assert_eq!(
+            parse(&show_performer_id("12"), &[]),
+            Some(Press::ShowPerformer("12".into()))
+        );
+        assert_eq!(
+            parse(PICK_PERSON, &["tmdb-person:7".into()]),
+            Some(Press::PickPerson("tmdb-person:7".into()))
+        );
+        assert_eq!(
+            parse(PICK_PERSON, &["anilist:7".into()]),
+            None,
+            "only person keys open a person"
+        );
+        assert_eq!(
+            parse(&show_works_id("anilist:1"), &[]),
+            None,
+            "a work key is not a person"
+        );
+        assert_eq!(
+            parse(&show_crew_id("anilist-staff:1"), &[]),
+            None,
+            "a person key is not a work"
+        );
+        for id in [
+            show_works_id(person),
+            show_crew_id("igdb:4"),
+            show_performer_id("9"),
+            PICK_PERSON.to_string(),
+            PICK_MORE.to_string(),
+        ] {
+            assert!(is_global_id(&id), "{id}");
+            assert!(id.len() <= 100);
+        }
+    }
+
+    fn row_buttons(rows: &[serenity::CreateActionRow]) -> Vec<Vec<serde_json::Value>> {
+        rows.iter()
+            .filter_map(|r| {
+                let j = serde_json::to_value(r).ok()?;
+                let c = j["components"].as_array()?.clone();
+                (j["components"][0]["type"] == 2).then_some(c)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_crowded_card_drops_links_first_then_moves_optional_buttons_into_the_more_menu() {
+        let link = serenity::CreateButton::new_link("https://example.org").label("🔗 مصدر");
+        let plain = |id: &str, label: &str| serenity::CreateButton::new(id).label(label);
+        // six buttons: only the link has to go
+        let six = vec![
+            plain(&show_chars_id("anilist:1"), LABEL_SHOW_CHARS),
+            plain(&show_crew_id("anilist:1"), LABEL_SHOW_CREW),
+            plain("add", "add"),
+            plain("remind", "remind"),
+            link.clone(),
+            plain("close", "close"),
+        ];
+        let (rows, links) = card_rows(six);
+        assert_eq!(links, vec!["https://example.org".to_string()]);
+        let b = row_buttons(&rows);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].len(), 5);
+        assert!(b[0].iter().any(|x| x["label"] == LABEL_SHOW_CREW));
+        // seven without a link: the crew button moves into the "المزيد" menu, the required ones stay
+        let seven = vec![
+            plain(&show_chars_id("anilist:1"), LABEL_SHOW_CHARS),
+            plain(&show_crew_id("anilist:1"), LABEL_SHOW_CREW),
+            plain("a", "a"),
+            plain("b", "b"),
+            performer_button("7"),
+            plain("c", "c"),
+            plain("d", "d"),
+        ];
+        let (rows, links) = card_rows(seven);
+        assert!(links.is_empty());
+        let b = row_buttons(&rows);
+        assert!(b[0].len() <= 5);
+        assert!(
+            b[0].iter().any(|x| x["label"] == LABEL_SHOW_CHARS),
+            "show characters is never moved"
+        );
+        assert!(b[0].iter().all(|x| x["label"] != LABEL_SHOW_CREW));
+        let menu = serde_json::to_value(rows.last().expect("menu row")).expect("json");
+        assert_eq!(menu["components"][0]["custom_id"], PICK_MORE);
+        assert_eq!(menu["components"][0]["placeholder"], LABEL_MORE);
+        let value = menu["components"][0]["options"][0]["value"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(
+            parse(PICK_MORE, &[value]),
+            Some(Press::ShowCrew("anilist:1".into(), None))
+        );
+        // five or fewer: untouched
+        let (rows, links) = card_rows(vec![plain("x", "x")]);
+        assert!(links.is_empty() && rows.len() == 1);
+    }
+
+    #[test]
+    fn the_universal_buttons_cover_people() {
+        // a work: characters and crew; a character: its work (and the performer where known); a person: works
+        assert_eq!(
+            labels(standard_actions(ItemKind::Work, Some("igdb:1"))),
+            vec![LABEL_SHOW_CHARS, LABEL_SHOW_CREW]
+        );
+        assert_eq!(
+            labels(vec![performer_button("5")]),
+            vec![LABEL_SHOW_PERFORMER]
+        );
+        assert_eq!(
+            labels(vec![works_button("tmdb-person:1")]),
+            vec![LABEL_SHOW_WORKS]
+        );
     }
 
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {

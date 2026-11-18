@@ -278,7 +278,7 @@ pub const F_PROFILE_CHARACTERS: &str = "الشخصيات";
 pub const F_PROFILE_WORKS: &str = "الأعمال";
 pub const F_PROFILE_SUGGESTIONS: &str = "الاقتراحات";
 pub const BANNER_PICKER_TITLE: &str = "🎨 اختر غلافًا جاهزًا";
-pub const BANNER_PICKER_HELP: &str = "اختر من القائمة لترى المعاينة ثم اضغط «تطبيق».\nلرفع صورتك أو GIF: `/edit` ← البروفايل ← الغلاف وأرفق الملف (إن سمح السيرفر بالصور المخصصة). المقاس الموصى به **1200×400**، والنسبة بين 2:1 و4:1، وأقل عرض 600 بكسل. للون: اكتب `#ff8800` في القيمة.";
+pub const BANNER_PICKER_HELP: &str = "اختر من القائمة لترى المعاينة ثم اضغط «تطبيق».\nلرفع صورتك أو GIF: `/edit` ← البروفايل ← الغلاف وأرفق الملف (إن سمح السيرفر بالصور المخصصة)؛ أي مقاس يصلح وتبقى الـGIF متحركة. للون: اكتب `#ff8800` في القيمة.";
 pub const BANNER_PICKER_PLACEHOLDER: &str = "الأغلفة الجاهزة…";
 pub const BANNER_APPLY: &str = "تطبيق";
 pub const BANNER_RESET_BTN: &str = "إعادة للافتراضي";
@@ -406,13 +406,8 @@ pub const SCHEDULE_OPEN_PLACEHOLDER: &str = "افتح عملًا من القائ
 pub const SCHEDULE_MINE: &str = "أعمالي فقط";
 pub const SCHEDULE_NO_MINE: &str = "لا توجد أعمال في بروفايلك أو تذكيراتك بعد، فالقائمة فارغة.";
 pub const ARENA_CATEGORY_UNSUPPORTED: &str = "هذا النوع من الفعاليات غير متاح لهذه الفئة، جرّب «خمّن العمل من الغلاف» أو «صح أم خطأ» أو «الأعلى تقييمًا» أو «الترتيب بالسنة» أو «السباق».";
-pub const BANNER_TOO_NARROW: &str = "الصورة ضيقة جدًا: أقل عرض للغلاف 600 بكسل (الموصى به 1200×400).";
-pub const BANNER_BAD_RATIO: &str =
-    "الصورة المتحركة يجب أن تكون نسبتها بين 2:1 و4:1 (الموصى به 1200×400)، فلا أقصّها حتى لا تتشوّه.";
-pub const BANNER_CONFIRM_TITLE: &str = "معاينة الغلاف";
-pub const BANNER_CONFIRM_HELP: &str = "قصصتُ الصورة من المنتصف لتناسب الغلاف (1200×400). هل تعتمدها؟";
-pub const BANNER_CONFIRM_BTN: &str = "اعتمد الغلاف";
-pub const BANNER_CANCELLED: &str = "أُلغي تغيير الغلاف.";
+pub const BANNER_TOO_LARGE: &str = "الصورة كبيرة جدًا للغلاف (الحد 8 ميغابايت).";
+pub const BANNER_TOO_MANY_PIXELS: &str = "الصورة ضخمة الأبعاد، صغّر أبعادها وجرّب مرة أخرى.";
 pub const KIND_SERIES: &str = "مسلسل";
 pub const KIND_MOVIE: &str = "فيلم";
 pub const F_PROFILE_STATUS: &str = "الحالة";
@@ -461,6 +456,39 @@ pub const COMPARE_CHARS_PLACEHOLDER: &str = "افتح شخصية مشتركة";
 pub const REC_GENERAL_WHY: &str = "ترشيح عام من الأعمال الرائجة";
 pub const REC_TMDB_FIELD: &str = "🎬 مسلسلات وأفلام";
 pub const REC_TMDB_PLACEHOLDER: &str = "افتح مسلسلًا أو فيلمًا";
+
+// ---- people ----------------------------------------------------------------------------------------
+pub const PERSON_UNAVAILABLE: &str = "ما وجدت هذا الشخص، أو أن بياناته غير متاحة الآن.";
+pub const PERSON_SOURCE_DOWN: &str = "المصدر لا يردّ الآن، جرّب بعد قليل.";
+pub const PERSON_NO_WORKS: &str = "ما عندي أعمال أعرضها لهذا الشخص.";
+pub const NO_CREW: &str = "ما وصلتني بيانات الطاقم لهذا العمل.";
+pub const NO_PERFORMER: &str = "ما عندي مؤدٍّ مسجّل لهذه الشخصية.";
+pub const PICK_WORK_OF_PERSON: &str = "افتح عملًا…";
+pub const PICK_CHAR_OF_PERSON: &str = "افتح شخصية…";
+pub const PICK_ANY_PLACEHOLDER: &str = "افتح نتيجة…";
+pub fn search_results_for(q: &str) -> String {
+    format!("نتائج البحث عن «{q}»")
+}
+pub const SEARCH_NEEDS_NAME: &str = "اكتب اسم عمل أو شخصية أو شخص للبحث.";
+pub const PICK_PERSON_TITLE: &str = "من تقصد؟";
+pub const PICK_PERSON_PLACEHOLDER: &str = "افتح بطاقة شخص…";
+pub const PICK_PERFORMER_PLACEHOLDER: &str = "اختر المؤدي…";
+pub const F_BORN: &str = "الميلاد";
+pub const F_NOTABLE_WORKS: &str = "من أعماله";
+pub const PERSON_FAVOURITES: &str = "معجب";
+pub const PERSON_POPULARITY: &str = "نقاط الشعبية";
+pub fn years_old(age: i32) -> String {
+    format!("{age} سنة")
+}
+pub fn works_of(name: &str) -> String {
+    format!("أعمال {name}")
+}
+pub fn crew_of(title: &str) -> String {
+    format!("طاقم {title}")
+}
+pub fn performers_of(name: &str) -> String {
+    format!("مؤدّو {name}")
+}
 
 #[cfg(test)]
 mod tests {

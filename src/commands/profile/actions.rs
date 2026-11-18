@@ -172,10 +172,12 @@ async fn upload_gate(ctx: Context<'_>) -> Result<Option<i64>, Error> {
 async fn fetch_upload(
     ctx: Context<'_>,
     att: &serenity::Attachment,
+    max_bytes: usize,
+    too_large: &str,
 ) -> Result<Option<Vec<u8>>, Error> {
     let user = uid(ctx);
-    if att.size as usize > imaging::MAX_BYTES || !discord_cdn(&att.url) {
-        private_reply(ctx, i18n::IMAGE_TOO_LARGE).await?;
+    if att.size as usize > max_bytes || !discord_cdn(&att.url) {
+        private_reply(ctx, too_large).await?;
         return Ok(None);
     }
     if upload_limiter().contains_key(&user) {
@@ -203,7 +205,8 @@ pub(super) async fn take_upload(
     ctx: Context<'_>,
     att: &serenity::Attachment,
 ) -> Result<Option<imaging::Processed>, Error> {
-    let Some(bytes) = fetch_upload(ctx, att).await? else {
+    let Some(bytes) = fetch_upload(ctx, att, imaging::MAX_BYTES, i18n::IMAGE_TOO_LARGE).await?
+    else {
         return Ok(None);
     };
     match tokio::task::spawn_blocking(move || imaging::process(&bytes)).await {
@@ -219,21 +222,20 @@ pub(super) async fn take_upload(
     }
 }
 
-/// Same for a banner: at least 600 px wide; pictures are center-cropped, GIFs need a ratio of 2:1 to 4:1.
+/// Same for a banner, except that it is accepted as it is: any shape, any size up to the limit.
 async fn take_banner(
     ctx: Context<'_>,
     att: &serenity::Attachment,
 ) -> Result<Option<imaging::Processed>, Error> {
-    let Some(bytes) = fetch_upload(ctx, att).await? else {
+    let Some(bytes) =
+        fetch_upload(ctx, att, imaging::BANNER_MAX_BYTES, i18n::BANNER_TOO_LARGE).await?
+    else {
         return Ok(None);
     };
     let reply = match tokio::task::spawn_blocking(move || imaging::process_banner(&bytes)).await {
         Ok(Ok(p)) => return Ok(Some(p)),
-        Ok(Err(imaging::BannerError::TooNarrow)) => i18n::BANNER_TOO_NARROW,
-        Ok(Err(imaging::BannerError::BadRatio)) => i18n::BANNER_BAD_RATIO,
-        Ok(Err(imaging::BannerError::Image(imaging::ImageError::TooLarge))) => {
-            i18n::IMAGE_TOO_LARGE
-        }
+        Ok(Err(imaging::ImageError::TooLarge)) => i18n::BANNER_TOO_LARGE,
+        Ok(Err(imaging::ImageError::TooBig)) => i18n::BANNER_TOO_MANY_PIXELS,
         Ok(Err(_)) | Err(_) => i18n::IMAGE_INVALID,
     };
     private_reply(ctx, reply).await?;
@@ -281,7 +283,7 @@ pub(super) async fn character_image(
     private_reply(ctx, i18n::custom_image_saved(&name, new.animated)).await
 }
 
-/// Profile banner from an uploaded picture or GIF (same rules as character images). Stored as a custom image of the caller.
+/// Profile banner from an uploaded picture or GIF, accepted as it is. Stored as a custom image of the caller.
 pub(super) async fn banner_image(
     ctx: Context<'_>,
     image: serenity::Attachment,
@@ -297,10 +299,6 @@ pub(super) async fn banner_image(
     let Some(processed) = take_banner(ctx, &image).await? else {
         return Ok(());
     };
-    // A static picture was cropped for the banner: show the crop and let the member confirm. A GIF is kept whole.
-    if !processed.animated {
-        return super::banner_picker::confirm(ctx, processed).await;
-    }
     let id = match custom::store_image(
         &pool,
         user,
@@ -313,7 +311,8 @@ pub(super) async fn banner_image(
         StoreOutcome::LimitReached => return private_reply(ctx, i18n::IMAGE_LIMIT).await,
     };
     pdb::set_banner(&pool, user, Some(&render::BannerSpec::Image(id).encode())).await?;
-    private_reply(ctx, i18n::BANNER_SET).await
+    let text = crate::features::badges::announce(&pool, user, i18n::BANNER_SET.to_string()).await;
+    private_reply(ctx, text).await
 }
 
 // ---- sharing --------------------------------------------------------------------------------

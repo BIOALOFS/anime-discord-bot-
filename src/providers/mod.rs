@@ -6,11 +6,11 @@
 //! is hidden, an item without a reliable verdict is hidden, the source is credited, and images are **never
 //! hotlinked**: the bot downloads them itself (allow-listed hosts, size cap, cache) and attaches them.
 
-mod igdb;
+pub(crate) mod igdb;
 mod mangadex;
 mod mangaupdates;
 pub mod safety;
-mod vndb;
+pub(crate) mod vndb;
 
 use governor::{clock::DefaultClock, state::InMemoryState, state::NotKeyed, Quota, RateLimiter};
 use moka::future::Cache;
@@ -287,6 +287,8 @@ pub struct Providers {
     dex_limit: Limiter,
     mu_limit: Limiter,
     searches: Cache<String, Arc<Vec<Work>>>,
+    /// Raw answers for the people cards (VNDB staff, IGDB companies), cached like the other searches.
+    docs: Cache<String, Arc<serde_json::Value>>,
     covers: Cache<String, Arc<Vec<u8>>>,
 }
 
@@ -315,6 +317,10 @@ impl Providers {
                 .max_capacity(1_000)
                 .time_to_live(Duration::from_secs(600))
                 .build(),
+            docs: Cache::builder()
+                .max_capacity(2_000)
+                .time_to_live(Duration::from_secs(1800))
+                .build(),
             covers: Cache::builder()
                 .weigher(|_: &String, v: &Arc<Vec<u8>>| u32::try_from(v.len()).unwrap_or(u32::MAX))
                 .max_capacity(24 * 1024 * 1024)
@@ -332,6 +338,44 @@ impl Providers {
     pub fn vndb_enabled(&self) -> bool {
         self.cfg.vndb
     }
+    /// A VNDB document (cached 30 minutes; failures are not cached). `None` when VNDB is off.
+    pub async fn vndb_doc(
+        &self,
+        endpoint: &str,
+        body: serde_json::Value,
+    ) -> Option<Result<Arc<serde_json::Value>, ProviderError>> {
+        if !self.cfg.vndb {
+            return None;
+        }
+        let key = format!("vndb|{endpoint}|{body}");
+        if let Some(hit) = self.docs.get(&key).await {
+            return Some(Ok(hit));
+        }
+        let r = self.vndb.post(endpoint, body).await.map(Arc::new);
+        if let Ok(doc) = &r {
+            self.docs.insert(key, doc.clone()).await;
+        }
+        Some(r)
+    }
+
+    /// An IGDB document (cached 30 minutes; failures are not cached). `None` when IGDB is not configured.
+    pub async fn igdb_doc(
+        &self,
+        endpoint: &str,
+        body: String,
+    ) -> Option<Result<Arc<serde_json::Value>, ProviderError>> {
+        let igdb = self.igdb.as_ref()?;
+        let key = format!("igdb|{endpoint}|{body}");
+        if let Some(hit) = self.docs.get(&key).await {
+            return Some(Ok(hit));
+        }
+        let r = igdb.query(endpoint, body).await.map(Arc::new);
+        if let Ok(doc) = &r {
+            self.docs.insert(key, doc.clone()).await;
+        }
+        Some(r)
+    }
+
     pub fn games_enabled(&self) -> bool {
         self.igdb_enabled() || self.vndb_enabled()
     }

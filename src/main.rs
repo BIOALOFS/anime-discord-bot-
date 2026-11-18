@@ -17,11 +17,13 @@ mod global;
 mod guild;
 mod http_log;
 mod ops;
+mod people;
 pub mod texts;
 /// The one module of user-facing text; `i18n` is kept as its short alias across the code.
 pub use texts as i18n;
 mod providers;
 mod render;
+mod search;
 mod tmdb;
 mod ui;
 
@@ -198,7 +200,7 @@ fn qualified_names(cmds: &[Command], prefix: &str, out: &mut Vec<String>) {
 
 /// Every command gets the configured per-user cooldown.
 fn commands_with_cooldown(secs: u64) -> Vec<Command> {
-    // The seventeen user commands plus the three admin commands; nothing else is ever registered.
+    // The eighteen user commands plus the three admin commands; nothing else is ever registered.
     let mut cmds = vec![
         commands::category::anime(),
         commands::category::manga(),
@@ -207,6 +209,7 @@ fn commands_with_cooldown(secs: u64) -> Vec<Command> {
         commands::category::series(),
         commands::category::movie(),
         commands::category::game(),
+        commands::search::search(),
         commands::event::event(),
         commands::top::top(),
         commands::schedule::schedule(),
@@ -317,6 +320,7 @@ mod tests {
             "series",
             "movie",
             "game",
+            "search",
             "event",
             "top",
             "schedule",
@@ -336,7 +340,7 @@ mod tests {
         ];
         assert_eq!(
             names, want,
-            "the seventeen user commands plus /admin and the two channel commands, no aliases or leftovers, no /search /character /random"
+            "the eighteen user commands (with the general /search) plus /admin and the two channel commands, no aliases or leftovers, no /character /random"
         );
         // Must serialise for Discord without panicking.
         assert!(!poise::builtins::create_application_commands(&cmds).is_empty());
@@ -386,7 +390,7 @@ mod tests {
             .map(|s| s.intro)
             .chain(commands::help::GUIDES.iter().map(|g| g.2))
             .collect();
-        for gone in ["/search", "/character", "/random"] {
+        for gone in ["/character", "/random"] {
             assert!(!texts.contains(gone), "{gone} no longer exists");
         }
     }

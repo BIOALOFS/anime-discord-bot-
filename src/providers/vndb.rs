@@ -10,7 +10,7 @@ use std::{collections::HashMap, time::Duration};
 use tokio::sync::Semaphore;
 
 const API: &str = "https://api.vndb.org/kana";
-const VN_FIELDS: &str = "id,title,alttitle,image.url,image.sexual,image.violence,rating,votecount,released,devstatus,description,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating";
+pub(crate) const VN_FIELDS: &str = "id,title,alttitle,image.url,image.sexual,image.violence,rating,votecount,released,devstatus,description,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating";
 /// What the verdict of a novel needs (used when characters are vetted through their novels).
 const VERDICT_FIELDS: &str = "id,image.sexual,image.violence,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating";
 const CHARACTER_FIELDS: &str = "id,name,original,image.url,image.sexual,image.violence,vns.id,vns.title,traits.name,traits.group_name";
@@ -95,7 +95,7 @@ impl Vndb {
         }
     }
 
-    async fn post(&self, endpoint: &str, body: Value) -> Result<Value, ProviderError> {
+    pub(crate) async fn post(&self, endpoint: &str, body: Value) -> Result<Value, ProviderError> {
         let _open = self
             .open
             .acquire()
@@ -264,7 +264,7 @@ fn vn_facts(v: &Value) -> VnFacts {
     }
 }
 
-pub(super) fn parse_vns(doc: &Value, allow_mature: bool) -> Vec<Work> {
+pub(crate) fn parse_vns(doc: &Value, allow_mature: bool) -> Vec<Work> {
     let Some(list) = doc.get("results").and_then(Value::as_array) else {
         return Vec::new();
     };

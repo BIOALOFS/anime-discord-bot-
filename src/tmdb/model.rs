@@ -64,6 +64,14 @@ impl Providers {
     }
 }
 
+/// `tmdb-cast:{kind}:{work}:{person}`.
+pub fn cast_key(kind: Kind, work: i64, person: i64) -> String {
+    format!(
+        "tmdb-cast:{}:{work}:{person}",
+        if kind == Kind::Tv { "tv" } else { "movie" }
+    )
+}
+
 /// A cast entry: an actor playing a character of one work.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cast {
@@ -77,11 +85,7 @@ pub struct Cast {
 impl Cast {
     /// `tmdb-cast:{kind}:{work}:{person}`.
     pub fn key(&self, kind: Kind, work: i64) -> String {
-        format!(
-            "tmdb-cast:{}:{work}:{}",
-            if kind == Kind::Tv { "tv" } else { "movie" },
-            self.person_id
-        )
+        cast_key(kind, work, self.person_id)
     }
 
     /// The character name, or the actor's when TMDB has none.

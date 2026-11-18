@@ -37,6 +37,20 @@ pub(super) enum Which {
     Daily,
 }
 
+tokio::task_local! {
+    /// Set around lookups made for autocomplete: they draw on their own small budget and never queue.
+    pub static AUTOCOMPLETE: bool;
+}
+
+fn in_autocomplete() -> bool {
+    AUTOCOMPLETE.try_with(|a| *a).unwrap_or(false)
+}
+
+/// Requests per minute reserved for autocomplete, on top of the main budget.
+const AUTOCOMPLETE_PER_MIN: u32 = 20;
+/// An autocomplete lookup would rather fail than wait longer than this for a rate-limit pause.
+const AUTOCOMPLETE_MAX_WAIT: Duration = Duration::from_millis(800);
+
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 type JsonCache = Cache<String, Arc<Value>>;
 
@@ -55,6 +69,7 @@ pub(super) struct AniListClient {
     /// Set from `Retry-After` / `X-RateLimit-*`: no request is sent before this instant.
     paused_until: std::sync::Mutex<Option<tokio::time::Instant>>,
     limiter: Limiter,
+    auto_limiter: Limiter,
     search: JsonCache,
     details: JsonCache,
     profile: JsonCache,
@@ -77,6 +92,9 @@ impl AniListClient {
                 .build()?,
             paused_until: std::sync::Mutex::new(None),
             limiter: RateLimiter::direct(Quota::per_minute(per_min)),
+            auto_limiter: RateLimiter::direct(Quota::per_minute(
+                NonZeroU32::new(AUTOCOMPLETE_PER_MIN).unwrap_or(NonZeroU32::MIN),
+            )),
             search: cache(cfg.cache_ttl_search_secs, 5_000),
             details: cache(cfg.cache_ttl_details_secs, 5_000),
             profile: cache(cfg.cache_ttl_profile_secs, 1_000),
@@ -112,7 +130,9 @@ impl AniListClient {
         let until = self.paused_until.lock().ok().and_then(|g| *g);
         if let Some(until) = until {
             let wait = until.saturating_duration_since(tokio::time::Instant::now());
-            if wait > Duration::from_secs(MAX_GATE_WAIT_SECS) {
+            if wait > Duration::from_secs(MAX_GATE_WAIT_SECS)
+                || (in_autocomplete() && wait > AUTOCOMPLETE_MAX_WAIT)
+            {
                 return Err(AniError::Busy);
             }
             if !wait.is_zero() {
@@ -130,7 +150,12 @@ impl AniListClient {
         let body = json!({ "query": query, "variables": vars });
         for attempt in 0..=MAX_RETRIES {
             self.wait_gate().await?;
-            self.limiter.until_ready().await;
+            if in_autocomplete() {
+                // Own budget, no queueing: a suggestion that cannot be fetched now is served from the cache instead.
+                self.auto_limiter.check().map_err(|_| AniError::Busy)?;
+            } else {
+                self.limiter.until_ready().await;
+            }
             let resp = match self.http.post(ENDPOINT).json(&body).send().await {
                 Ok(r) => r,
                 Err(e) if attempt < MAX_RETRIES && (e.is_timeout() || e.is_connect()) => {

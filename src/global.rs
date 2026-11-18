@@ -26,14 +26,14 @@ pub struct Msg {
 }
 
 impl Msg {
-    fn text(t: impl Into<String>) -> Self {
+    pub(crate) fn text(t: impl Into<String>) -> Self {
         Self {
             text: Some(t.into()),
             ..Self::default()
         }
     }
 
-    fn card(e: Emb, rows: Vec<serenity::CreateActionRow>) -> Self {
+    pub(crate) fn card(e: Emb, rows: Vec<serenity::CreateActionRow>) -> Self {
         Self {
             embed: Some(e.build()),
             rows,
@@ -67,7 +67,7 @@ fn work_rows(
     if let Some(u) = url {
         row.push(link(u, credit));
     }
-    let mut rows = vec![serenity::CreateActionRow::Buttons(row)];
+    let (mut rows, _links) = components::card_rows(row);
     rows.extend(components::status_menu(key, written, current));
     rows
 }
@@ -313,6 +313,83 @@ fn roster_nav(key: &str, page: usize, pages: usize) -> serenity::CreateActionRow
     ])
 }
 
+/// Open any item by its key: a person, a work or a character.
+pub async fn open_any(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
+    if crate::people::parse_key(key).is_some() {
+        crate::people::msgs::person_msg(data, key, mature).await
+    } else if components::is_work_key(key) {
+        work_msg(data, key, user, mature).await
+    } else {
+        character_msg(data, key, mature).await
+    }
+}
+
+async fn search_params(
+    data: &Data,
+    guild: Option<i64>,
+    cat: crate::search::Cat,
+    ty: crate::search::Ty,
+) -> crate::search::Params {
+    let games_on = match guild {
+        Some(g) => crate::db::custom::games_enabled(&data.db, g)
+            .await
+            .unwrap_or(true),
+        None => true,
+    };
+    crate::search::Params {
+        cat,
+        ty,
+        mature: mature_for(data, guild).await,
+        games_on,
+    }
+}
+
+/// The result list of the general search for `q` (one page), as it was typed.
+pub async fn search_msg(
+    data: &Data,
+    guild: Option<i64>,
+    cat: crate::search::Cat,
+    ty: crate::search::Ty,
+    q: &str,
+    page: usize,
+) -> Msg {
+    let p = search_params(data, guild, cat, ty).await;
+    let overrides = guild_overrides(data, guild).await;
+    let found =
+        crate::search::gather(&crate::people::fetch::Sources::of(data), &overrides, p, q).await;
+    crate::search::results_msg(&found, p, q, page)
+}
+
+/// The submit of the general search: a picked key opens its card; a typed name with exactly one result opens that
+/// result; otherwise the grouped result list.
+pub async fn search_or_open(
+    data: &Data,
+    guild: Option<i64>,
+    user: i64,
+    cat: crate::search::Cat,
+    ty: crate::search::Ty,
+    q: &str,
+) -> Msg {
+    let p = search_params(data, guild, cat, ty).await;
+    if crate::search::is_key(q) {
+        return open_any(data, q.trim(), user, p.mature).await;
+    }
+    let overrides = guild_overrides(data, guild).await;
+    let found =
+        crate::search::gather(&crate::people::fetch::Sources::of(data), &overrides, p, q).await;
+    match found.entries.as_slice() {
+        [one] if found.failed.is_empty() => open_any(data, &one.key, user, p.mature).await,
+        _ => crate::search::results_msg(&found, p, q, 0),
+    }
+}
+
+/// Does anyone voice this character (AniList and VNDB look it up; the answer is cached by the sources)?
+async fn has_performers(data: &Data, key: &str, mature: bool) -> bool {
+    !crate::people::fetch::performers(&crate::people::fetch::Sources::of(data), key, mature)
+        .await
+        .is_empty()
+}
+
 /// The card of a character of any source. `value` is an AniList character id, a `tmdb-cast:` key or a provider key.
 pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
     if let Ok(id) = value.parse::<i64>() {
@@ -326,13 +403,13 @@ pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
                     .map(|id| format!("anilist:{id}"));
                 let mut row = components::standard_actions(ItemKind::Character, work.as_deref());
                 row.push(components::add_button(&format!("anilist-char:{}", c.id)));
+                if has_performers(data, &id.to_string(), mature).await {
+                    row.push(components::performer_button(&id.to_string()));
+                }
                 if let Some(u) = &c.site_url {
                     row.push(link(u, i18n::BTN_ANILIST));
                 }
-                Msg::card(
-                    cards::character_card(&c),
-                    vec![serenity::CreateActionRow::Buttons(row)],
-                )
+                Msg::card(cards::character_card(&c), components::card_rows(row).0)
             }
             Ok(CharacterLookup::Hidden) => Msg::text(i18n::HIDDEN_NOTICE),
             _ => Msg::unavailable(),
@@ -348,9 +425,11 @@ pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
         let work_key = w.key();
         let mut row = components::standard_actions(ItemKind::Character, Some(&work_key));
         row.push(components::add_button(value));
+        // The actor is always known for a cast entry.
+        row.push(components::performer_button(value));
         return Msg::card(
             tmdb::card::cast_embed(c, &w.title, &w.url()),
-            vec![serenity::CreateActionRow::Buttons(row)],
+            components::card_rows(row).0,
         );
     }
     match data.providers.character_by_key(value, mature).await {
@@ -363,10 +442,15 @@ pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
             // "أظهر العمل": the game (or novel) card, as a new message.
             let mut row = components::standard_actions(ItemKind::Character, w.work_key.as_deref());
             row.push(components::add_button(value));
+            if w.source == crate::providers::Source::Vndb
+                && has_performers(data, value, mature).await
+            {
+                row.push(components::performer_button(value));
+            }
             if let Some(u) = &w.url {
                 row.push(link(u, w.source.credit()));
             }
-            let mut m = Msg::card(e, vec![serenity::CreateActionRow::Buttons(row)]);
+            let mut m = Msg::card(e, components::card_rows(row).0);
             if let Some(c) = cover {
                 m.files.push(serenity::CreateAttachment::bytes(
                     c.to_vec(),
@@ -650,9 +734,21 @@ pub async fn handle(
     let user = i.user.id.get() as i64;
     let guild = i.guild_id.map(|g| g.get() as i64);
     let mature = mature_for(data, guild).await;
-    if let Press::ShowChars(key, Some(page)) = &press {
-        // Page buttons of a roster message edit that (new) message.
-        let m = roster_msg(data, key, *page, mature).await;
+    // Page buttons of a roster, works or crew message edit that (new) message.
+    let page_edit = match &press {
+        Press::ShowChars(key, Some(page)) => Some(roster_msg(data, key, *page, mature).await),
+        Press::ShowWorks(key, Some(page)) => {
+            Some(crate::people::msgs::works_msg(data, key, *page, mature).await)
+        }
+        Press::ShowCrew(key, Some(page)) => {
+            Some(crate::people::msgs::crew_msg(data, key, *page, mature).await)
+        }
+        Press::SearchPage(cat, ty, page, q) => {
+            Some(search_msg(data, guild, *cat, *ty, q, *page).await)
+        }
+        _ => None,
+    };
+    if let Some(m) = page_edit {
         let mut r = serenity::CreateInteractionResponseMessage::new().components(m.rows);
         r = match (m.embed, m.text) {
             (Some(e), _) => r.embed(e),
@@ -672,6 +768,24 @@ pub async fn handle(
             (work_msg(data, &k, user, mature).await, ephemeral)
         }
         Press::ShowChars(k, _) => (roster_msg(data, &k, 0, mature).await, ephemeral),
+        Press::PickAny(k) => (open_any(data, &k, user, mature).await, ephemeral),
+        Press::SearchPage(..) => return Ok(()),
+        Press::PickPerson(k) => (
+            crate::people::msgs::person_msg(data, &k, mature).await,
+            ephemeral,
+        ),
+        Press::ShowWorks(k, _) => (
+            crate::people::msgs::works_msg(data, &k, 0, mature).await,
+            ephemeral,
+        ),
+        Press::ShowCrew(k, _) => (
+            crate::people::msgs::crew_msg(data, &k, 0, mature).await,
+            ephemeral,
+        ),
+        Press::ShowPerformer(k) => (
+            crate::people::msgs::performers_msg(data, &k, mature).await,
+            ephemeral,
+        ),
         Press::PickChar(v) => (character_msg(data, &v, mature).await, ephemeral),
         Press::Remind(k) => (Msg::text(remind(data, &k, user, guild).await), true),
         Press::Add(k) => (Msg::text(add(data, &k, user, mature).await), true),
