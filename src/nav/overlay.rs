@@ -349,4 +349,84 @@ mod tests {
         );
         assert!(!nav.has_back());
     }
+
+    /// Every view a navigation press can open is a non-root view: with Back it always fits Discord's limits (five rows,
+    /// five buttons a row, 25 options a menu) and the required buttons stay.
+    #[tokio::test]
+    async fn every_navigation_view_gets_back_and_stays_within_discords_limits() {
+        let data = Data::for_tests(anilist).await;
+        let none: Vec<String> = Vec::new();
+        let presses: Vec<(&str, Vec<String>)> = vec![
+            ("showwork:anilist:1", none.clone()),
+            ("showchars:anilist:1", none.clone()),
+            ("showchars:anilist:1:1:nav", none.clone()),
+            (components::PICK_CHAR, vec!["10".to_string()]),
+            (components::PICK_WORK, vec!["anilist:1".to_string()]),
+            (components::PICK_ANY, vec!["anilist:1".to_string()]),
+        ];
+        let mut msgs: Vec<Msg> = Vec::new();
+        for (id, values) in &presses {
+            let press = components::parse(id, values).expect("a press");
+            msgs.push(
+                global::view_msg(&data, &press, 7, None)
+                    .await
+                    .expect("a view"),
+            );
+        }
+        // the people views
+        let credits: Vec<crate::people::Credit> = (0..60)
+            .map(|i| crate::people::Credit {
+                work_key: Some(format!("anilist:{}", i + 1)),
+                title: format!("Work {i}"),
+                year: Some(2000),
+                role: None,
+                character: Some((format!("{}", 100 + i), format!("Char {i}"))),
+            })
+            .collect();
+        let person = crate::people::Person {
+            key: "anilist-staff:95".into(),
+            name: "Kamiya".into(),
+            credits,
+            url: Some("https://anilist.co/staff/95".into()),
+            ..crate::people::Person::default()
+        };
+        msgs.push(crate::people::msgs::works_page(&person, 1));
+        msgs.push(Msg {
+            embed: None,
+            rows: crate::people::msgs::person_rows(&person),
+            text: Some("person".into()),
+            files: Vec::new(),
+        });
+        let entries: Vec<crate::people::CrewEntry> = (0..40)
+            .map(|i| crate::people::CrewEntry {
+                person: crate::people::Hit {
+                    key: format!("tmdb-person:{i}"),
+                    name: format!("P{i}"),
+                    native: None,
+                    hint: String::new(),
+                    popularity: 0,
+                },
+                role: "ممثل".into(),
+            })
+            .collect();
+        msgs.push(crate::people::msgs::crew_page("tmdb-tv:1", &entries, 0));
+        for msg in msgs {
+            let page = page_of(msg, true);
+            let rows = serde_json::to_value(&page.components).expect("json");
+            let rows = rows.as_array().expect("rows");
+            assert!(rows.len() <= 5, "{} rows", rows.len());
+            let mut has_back = false;
+            for r in rows {
+                let c = r["components"].as_array().expect("components");
+                assert!(c.len() <= 5);
+                has_back |= c.iter().any(|x| x["custom_id"] == components::BACK);
+                for x in c {
+                    if let Some(o) = x["options"].as_array() {
+                        assert!(o.len() <= 25);
+                    }
+                }
+            }
+            assert!(has_back, "a non-root view without Back");
+        }
+    }
 }
