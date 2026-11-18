@@ -393,7 +393,7 @@ mod tests {
         msgs.push(crate::people::msgs::works_page(&person, 1));
         msgs.push(Msg {
             embed: None,
-            rows: crate::people::msgs::person_rows(&person),
+            rows: crate::people::msgs::person_rows(&person, false),
             text: Some("person".into()),
             files: Vec::new(),
         });

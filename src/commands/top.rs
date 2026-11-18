@@ -113,6 +113,9 @@ pub fn character_key(id: i64) -> String {
     if let Some(key) = crate::people::decode_person_id(id) {
         return key;
     }
+    if let Some(key) = crate::wiki::profile::key_of_id(id) {
+        return key;
+    }
     if let Some((kind, work, person)) = tm::decode_cast_id(id) {
         return format!(
             "tmdb-cast:{}:{work}:{person}",

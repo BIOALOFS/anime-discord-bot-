@@ -85,6 +85,7 @@ impl Item {
             "vn" => crate::i18n::KIND_VN,
             "tmdb-tv" => crate::i18n::KIND_SERIES,
             "tmdb-movie" => crate::i18n::KIND_MOVIE,
+            "wiki" => crate::i18n::KIND_WIKI,
             other => MediaKind::from_key(other).map_or("", kind_label),
         };
         let tag = format!("{} {}", flag(w.country.as_deref()), kind)

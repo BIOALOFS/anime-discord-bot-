@@ -58,9 +58,10 @@ fn work_rows(
     remindable: bool,
     written: bool,
     current: Option<&str>,
+    in_profile: bool,
 ) -> Vec<serenity::CreateActionRow> {
     let mut row = components::standard_actions(ItemKind::Work, Some(key));
-    row.push(components::add_button(key));
+    row.push(add_button_for(key, in_profile));
     if remindable {
         row.push(components::remind_button(key));
     }
@@ -118,9 +119,10 @@ pub async fn mature_for(data: &Data, guild: Option<i64>) -> bool {
 
 pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
     if let Some((wiki, page)) = crate::wiki::parse_key(key) {
-        return crate::wiki::msgs::page_msg(&data.wikis, wiki, page).await;
+        return crate::wiki::msgs::page_msg(&data.wikis, wiki, page, user).await;
     }
     let current = status::get(&data.db, user, key).await.ok().flatten();
+    let mine = in_profile(data, user, key).await;
     if let Some(id) = key
         .strip_prefix("anilist:")
         .and_then(|n| n.parse::<i64>().ok())
@@ -137,6 +139,7 @@ pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
                         kind != MediaKind::Novel,
                         kind.is_written(),
                         current.as_deref(),
+                        mine,
                     ),
                 )
             }
@@ -150,7 +153,15 @@ pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
         let e = tmdb::card::work_embed(&w, data.tmdb.region(), false);
         return Msg::card(
             e,
-            work_rows(key, Some(&w.url()), "TMDB", true, false, current.as_deref()),
+            work_rows(
+                key,
+                Some(&w.url()),
+                "TMDB",
+                true,
+                false,
+                current.as_deref(),
+                mine,
+            ),
         );
     }
     match data.providers.work_by_key(key, mature).await {
@@ -183,6 +194,7 @@ pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
                     false,
                     false,
                     current.as_deref(),
+                    mine,
                 ),
             );
             if let Some(c) = cover {
@@ -336,11 +348,11 @@ fn roster_nav(key: &str, page: usize, pages: usize) -> serenity::CreateActionRow
 /// Open any item by its key: a person, a work or a character.
 pub async fn open_any(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
     if crate::people::parse_key(key).is_some() {
-        crate::people::msgs::person_msg(data, key, mature).await
+        crate::people::msgs::person_msg(data, key, mature, user).await
     } else if components::is_work_key(key) {
         work_msg(data, key, user, mature).await
     } else {
-        character_msg(data, key, mature).await
+        character_msg(data, key, mature, user).await
     }
 }
 
@@ -412,13 +424,13 @@ async fn has_performers(data: &Data, key: &str, mature: bool) -> bool {
 }
 
 /// The card of a character of any source. `value` is an AniList character id, a `tmdb-cast:` key or a provider key.
-pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
+pub async fn character_msg(data: &Data, value: &str, mature: bool, user: i64) -> Msg {
     if let Some((wiki, page)) = crate::wiki::parse_key(value) {
-        return crate::wiki::msgs::page_msg(&data.wikis, wiki, page).await;
+        return crate::wiki::msgs::page_msg(&data.wikis, wiki, page, user).await;
     }
     // A person added to a profile is listed with the characters: its stored id opens the person card.
     if crate::people::parse_key(value).is_some() {
-        return crate::people::msgs::person_msg(data, value, mature).await;
+        return crate::people::msgs::person_msg(data, value, mature, user).await;
     }
     if let Ok(id) = value.parse::<i64>() {
         return match data.anilist.character_by_id(id, ContentPolicy::SAFE).await {
@@ -430,7 +442,11 @@ pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
                     .and_then(|n| n.id)
                     .map(|id| format!("anilist:{id}"));
                 let mut row = components::standard_actions(ItemKind::Character, work.as_deref());
-                row.push(components::add_button(&format!("anilist-char:{}", c.id)));
+                let add_key = format!("anilist-char:{}", c.id);
+                row.push(add_button_for(
+                    &add_key,
+                    in_profile(data, user, &add_key).await,
+                ));
                 if has_performers(data, &id.to_string(), mature).await {
                     row.push(components::performer_button(&id.to_string()));
                 }
@@ -452,7 +468,7 @@ pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
         };
         let work_key = w.key();
         let mut row = components::standard_actions(ItemKind::Character, Some(&work_key));
-        row.push(components::add_button(value));
+        row.push(add_button_for(value, in_profile(data, user, value).await));
         // The actor is always known for a cast entry.
         row.push(components::performer_button(value));
         return Msg::card(
@@ -482,7 +498,7 @@ pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
             }
             // "أظهر العمل": the game (or novel) card, as a new message.
             let mut row = components::standard_actions(ItemKind::Character, w.work_key.as_deref());
-            row.push(components::add_button(value));
+            row.push(add_button_for(value, in_profile(data, user, value).await));
             if w.source == crate::providers::Source::Vndb
                 && has_performers(data, value, mature).await
             {
@@ -551,7 +567,129 @@ pub async fn remind(data: &Data, key: &str, user: i64, guild: Option<i64>) -> St
 }
 
 /// Add a work or a character to the member's profile (or say it is already there).
+/// What a key stands for in a profile: a character (its stored integer id) or a work (its key).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Slot {
+    Character(i64),
+    Work(String),
+}
+
+/// The profile slots a key can occupy (a wiki page is a character or a work, so both are checked). Real people are
+/// characters in a profile; companies have no slot.
+pub fn slots_of(key: &str) -> Vec<Slot> {
+    if let Some(n) = key
+        .strip_prefix("anilist-char:")
+        .and_then(|n| n.parse::<i64>().ok())
+    {
+        return vec![Slot::Character(n)];
+    }
+    if let Some((kind, work, person)) = tm::parse_cast_key(key) {
+        return tm::encode_cast_id(kind, work, person)
+            .map(Slot::Character)
+            .into_iter()
+            .collect();
+    }
+    for (prefix, source) in [
+        ("igdb:c", crate::providers::Source::Igdb),
+        ("vndb:c", crate::providers::Source::Vndb),
+    ] {
+        if let Some(n) = key.strip_prefix(prefix).and_then(|n| n.parse::<i64>().ok()) {
+            return crate::providers::encode_character_id(source, n)
+                .map(Slot::Character)
+                .into_iter()
+                .collect();
+        }
+    }
+    if crate::people::parse_key(key).is_some() {
+        return crate::people::encode_person_id(key)
+            .map(Slot::Character)
+            .into_iter()
+            .collect();
+    }
+    if let Some((w, p)) = crate::wiki::parse_key(key) {
+        let mut v = vec![Slot::Work(key.to_string())];
+        v.extend(crate::wiki::profile::encode_id(w, p).map(Slot::Character));
+        return v;
+    }
+    if key.parse::<i64>().is_ok() {
+        return key.parse().map(Slot::Character).into_iter().collect();
+    }
+    if crate::components::is_work_key(key) {
+        return vec![Slot::Work(key.to_string())];
+    }
+    Vec::new()
+}
+
+/// Is this item in the member's profile? (Drives the add / remove button and the toggle.)
+pub async fn in_profile(data: &Data, user: i64, key: &str) -> bool {
+    in_profile_pool(&data.db, user, key).await
+}
+
+pub async fn in_profile_pool(pool: &sqlx::SqlitePool, user: i64, key: &str) -> bool {
+    for slot in slots_of(key) {
+        let found = match slot {
+            Slot::Character(id) => pdb::get_entry(pool, user, id)
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+            Slot::Work(k) => works::get_entry(pool, user, &k)
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+        };
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
+/// Take the item out of the profile; the text says what happened.
+async fn remove_from_profile(data: &Data, user: i64, key: &str) -> Option<String> {
+    for slot in slots_of(key) {
+        match slot {
+            Slot::Character(id) => {
+                if pdb::remove_character(&data.db, user, id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Some(i18n::CHARACTER_REMOVED.to_string());
+                }
+            }
+            Slot::Work(k) => {
+                if works::remove_work(&data.db, user, &k)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Some(i18n::WORK_REMOVED.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The add button of a card: "إضافة" or, when the item is already in the profile, "إزالة".
+pub fn add_button_for(key: &str, in_profile: bool) -> serenity::CreateButton {
+    if in_profile {
+        serenity::CreateButton::new(components::add_id(key))
+            .label(i18n::BTN_REMOVE_FROM_PROFILE)
+            .emoji('➖')
+            .style(serenity::ButtonStyle::Secondary)
+    } else {
+        components::add_button(key)
+    }
+}
+
 pub async fn add(data: &Data, key: &str, user: i64, mature: bool) -> String {
+    // The same button adds or removes, as its label says.
+    if in_profile(data, user, key).await {
+        if let Some(text) = remove_from_profile(data, user, key).await {
+            return text;
+        }
+    }
     match add_inner(data, key, user, mature).await {
         // A newly earned badge is announced in the same private answer (nothing when the item was already there).
         Ok(t) if t.starts_with("أضفتُ") || t == i18n::WORK_ADDED => {
@@ -629,6 +767,20 @@ async fn add_inner(data: &Data, key: &str, user: i64, mature: bool) -> Result<St
             pdb::add_character(pool, user, cid).await?,
             c.display_name(),
         ));
+    }
+    if let Some((w, p)) = crate::wiki::parse_key(key) {
+        // A wiki page: a character goes to the characters list, anything else is a work. A snapshot is kept.
+        let Some((page, source)) = data.wikis.page(w, p).await else {
+            return Ok(i18n::SHOW_WORK_UNAVAILABLE.to_string());
+        };
+        return Ok(if crate::wiki::profile::is_character(&page) {
+            match crate::wiki::profile::add_character(pool, user, &page, &source, now).await? {
+                Some(outcome) => added_text(outcome, &page.title),
+                None => i18n::ERR_GENERIC.to_string(),
+            }
+        } else {
+            work_added(crate::wiki::profile::add_work(pool, user, &page, &source, now).await?)
+        });
     }
     if crate::people::parse_key(key).is_some() {
         // A person is added as a character (companies cannot be).
@@ -772,15 +924,16 @@ pub async fn view_msg(data: &Data, press: &Press, user: i64, guild: Option<i64>)
         Press::ShowChars(k, page) => roster_msg(data, k, page.unwrap_or(0), mature).await,
         Press::PickAny(k) => open_any(data, k, user, mature).await,
         Press::SearchPage(cat, ty, page, q) => search_msg(data, guild, *cat, *ty, q, *page).await,
-        Press::PickPerson(k) => crate::people::msgs::person_msg(data, k, mature).await,
+        Press::PickPerson(k) => crate::people::msgs::person_msg(data, k, mature, user).await,
         Press::ShowWorks(k, page) => {
             crate::people::msgs::works_msg(data, k, page.unwrap_or(0), mature).await
         }
         Press::ShowCrew(k, page) => {
             crate::people::msgs::crew_msg(data, k, page.unwrap_or(0), mature).await
         }
-        Press::ShowPerformer(k) => crate::people::msgs::performers_msg(data, k, mature).await,
-        Press::PickChar(v) => character_msg(data, v, mature).await,
+        Press::ShowPerformer(k) => crate::people::msgs::performers_msg(data, k, mature, user).await,
+        Press::PickChar(v) => character_msg(data, v, mature, user).await,
+        Press::ShowWorkOf(k) => crate::wiki::msgs::work_of_msg(data, k, mature, user).await,
         Press::Remind(_) | Press::Add(_) | Press::Status(..) | Press::Back => return None,
     })
 }
@@ -794,4 +947,150 @@ pub async fn act_text(data: &Data, press: &Press, user: i64, guild: Option<i64>)
         Press::Status(k, v) => set_status(data, k, v, user).await,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod wiki_profile_tests {
+    use super::*;
+    use crate::wiki::{store, Kind, Page};
+
+    async fn data_with_page(kind: Kind) -> (Data, i64) {
+        let data = Data::for_tests(|_, _| Err(crate::anilist::AniError::NotFound)).await;
+        let id = match store::insert(
+            &data.db,
+            &store::NewSource {
+                name: "Mudae Wiki".into(),
+                host: "mudae.fandom.com".into(),
+                api_url: "https://mudae.fandom.com/api.php".into(),
+                lang: "en".into(),
+                license_name: Some("CC BY-SA 3.0".into()),
+                license_url: None,
+                character_category: Some("Category:Characters".into()),
+                game_category: None,
+                added_by: None,
+            },
+        )
+        .await
+        .expect("source")
+        {
+            store::Added::New(id) => id,
+            other => panic!("{other:?}"),
+        };
+        data.wikis.invalidate().await;
+        store::upsert(
+            &data.db,
+            &Page {
+                wiki_id: id,
+                page_id: 77,
+                title: "Acerola".into(),
+                kind,
+                extract: Some("She is the trial captain.".into()),
+                image_url: None,
+                aliases: vec![],
+                parent_title: Some("Pokémon Sun/Moon".into()),
+                categories: vec![],
+            },
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+        .expect("page");
+        (data, id)
+    }
+
+    #[test]
+    fn every_kind_of_key_maps_to_its_profile_slot() {
+        assert_eq!(slots_of("anilist-char:10"), vec![Slot::Character(10)]);
+        assert_eq!(slots_of("anilist:5"), vec![Slot::Work("anilist:5".into())]);
+        assert_eq!(
+            slots_of("tmdb-tv:1396"),
+            vec![Slot::Work("tmdb-tv:1396".into())]
+        );
+        assert!(matches!(
+            slots_of("tmdb-cast:tv:1396:17419").as_slice(),
+            [Slot::Character(_)]
+        ));
+        assert!(
+            matches!(slots_of("vndb:c12").as_slice(), [Slot::Character(n)] if *n > 1_000_000_000_000)
+        );
+        assert!(
+            matches!(slots_of("igdb:c12").as_slice(), [Slot::Character(n)] if *n > 2_000_000_000_000)
+        );
+        assert!(matches!(
+            slots_of("tmdb-person:7").as_slice(),
+            [Slot::Character(_)]
+        ));
+        assert!(
+            slots_of("igdb-company:7").is_empty(),
+            "companies have no slot"
+        );
+        let wiki = slots_of("wiki:2:77");
+        assert_eq!(
+            wiki.len(),
+            2,
+            "a wiki page is a work or a character, whichever it turns out to be"
+        );
+        assert!(wiki.contains(&Slot::Work("wiki:2:77".into())));
+        assert!(slots_of("nonsense").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_same_button_adds_a_wiki_character_and_then_removes_it() {
+        let (data, id) = data_with_page(Kind::Character).await;
+        let key = crate::wiki::key(id, 77);
+        assert!(!in_profile(&data, 5, &key).await);
+        let added = add(&data, &key, 5, true).await;
+        assert!(added.starts_with("أضفتُ"), "{added}");
+        assert!(in_profile(&data, 5, &key).await);
+        // the button now says remove, with the same id
+        let b = serde_json::to_value(add_button_for(&key, true)).expect("json");
+        assert_eq!(b["label"], "إزالة من بروفايلي");
+        assert_eq!(add(&data, &key, 5, true).await, i18n::CHARACTER_REMOVED);
+        assert!(!in_profile(&data, 5, &key).await);
+        // another member's profile is not involved
+        assert!(!in_profile(&data, 6, &key).await);
+    }
+
+    #[tokio::test]
+    async fn a_wiki_game_is_added_as_a_work_and_removed_again() {
+        let (data, id) = data_with_page(Kind::Game).await;
+        let key = crate::wiki::key(id, 77);
+        assert_eq!(add(&data, &key, 5, true).await, i18n::WORK_ADDED);
+        assert!(in_profile(&data, 5, &key).await);
+        assert_eq!(add(&data, &key, 5, true).await, i18n::WORK_REMOVED);
+        assert!(!in_profile(&data, 5, &key).await);
+    }
+
+    #[tokio::test]
+    async fn the_card_of_an_added_item_survives_the_wiki_through_its_snapshot() {
+        let (data, id) = data_with_page(Kind::Character).await;
+        let key = crate::wiki::key(id, 77);
+        add(&data, &key, 5, true).await;
+        // the wiki is switched off for everyone and the cache is emptied
+        store::set_enabled(&data.db, id, false).await.expect("off");
+        data.wikis.invalidate().await;
+        store::clear_cache(&data.db).await.expect("clear");
+        let m = crate::wiki::msgs::page_msg(&data.wikis, id, 77, 5).await;
+        let e = serde_json::to_value(m.embed.expect("a card from the snapshot")).expect("json");
+        assert_eq!(e["title"], "Acerola");
+        assert!(
+            e["footer"]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Mudae Wiki"),
+            "the source is named"
+        );
+        assert!(e["footer"]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains(i18n::WIKI_SNAPSHOT_NOTE));
+        assert!(e["description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("📚 Pokémon Sun/Moon"));
+        // a member who did not add it gets the same card (the snapshot is the source), with the add button
+        assert!(!m.rows.is_empty());
+        // a page nobody saved is unavailable once the wiki is gone
+        let none = crate::wiki::msgs::page_msg(&data.wikis, id, 999, 5).await;
+        assert_eq!(none.text.as_deref(), Some(i18n::SHOW_WORK_UNAVAILABLE));
+    }
 }

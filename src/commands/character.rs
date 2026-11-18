@@ -958,7 +958,13 @@ pub async fn search_character(
     }
     // A page of a wiki picked from the suggestions.
     if let Some((wiki, page)) = crate::wiki::parse_key(name.trim()) {
-        let msg = crate::wiki::msgs::page_msg(&ctx.data().wikis, wiki, page).await;
+        let msg = crate::wiki::msgs::page_msg(
+            &ctx.data().wikis,
+            wiki,
+            page,
+            ctx.author().id.get() as i64,
+        )
+        .await;
         return crate::global::reply(ctx, msg).await;
     }
     if name.starts_with("igdb:c") || name.starts_with("vndb:c") {
@@ -1018,7 +1024,14 @@ pub async fn search_character(
                 .wikis
                 .search(query, Some(crate::wiki::Kind::Character), None)
                 .await;
-            if let Some(msg) = crate::wiki::msgs::show(&ctx.data().wikis, found, query).await {
+            if let Some(msg) = crate::wiki::msgs::show(
+                &ctx.data().wikis,
+                found,
+                query,
+                ctx.author().id.get() as i64,
+            )
+            .await
+            {
                 return crate::global::reply(ctx, msg).await;
             }
         }

@@ -8,6 +8,8 @@ pub mod client;
 pub mod fill;
 pub mod msgs;
 pub mod parse;
+pub mod profile;
+pub mod resolve;
 pub mod safety;
 pub mod service;
 pub mod store;

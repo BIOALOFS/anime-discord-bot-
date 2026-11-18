@@ -21,6 +21,8 @@ pub const SHOW_WORKS: &str = "showworks";
 pub const SHOW_CREW: &str = "showcrew";
 pub const SHOW_PERFORMER: &str = "showperf";
 pub const PICK_MORE: &str = "pickmore";
+/// "أظهر العمل" of a wiki character: the work is looked up when the button is pressed.
+pub const SHOW_WORK_OF: &str = "showworkof";
 /// The general search: its result menu (any kind of item) and its page buttons.
 pub const PICK_ANY: &str = "pickany";
 pub const SEARCH_PAGE: &str = "searchpage";
@@ -64,6 +66,7 @@ pub fn is_global_id(id: &str) -> bool {
             SHOW_WORKS,
             SHOW_CREW,
             SHOW_PERFORMER,
+            SHOW_WORK_OF,
             REMIND,
             ADD_PROFILE,
             SET_STATUS,
@@ -115,6 +118,10 @@ pub fn crew_nav_id(work_key: &str, page: usize) -> String {
     format!("{SHOW_CREW}:{work_key}:{page}:{NAV}")
 }
 
+pub fn show_work_of_id(character_key: &str) -> String {
+    format!("{SHOW_WORK_OF}:{character_key}")
+}
+
 pub fn show_performer_id(character_key: &str) -> String {
     format!("{SHOW_PERFORMER}:{character_key}")
 }
@@ -153,6 +160,8 @@ pub enum Press {
     ShowCrew(String, Option<usize>),
     /// The performer(s) of a character.
     ShowPerformer(String),
+    /// The work of a wiki character, resolved on the press.
+    ShowWorkOf(String),
     Remind(String),
     Add(String),
     /// Work key and the chosen status (`current`, `completed`, `planned`, `paused`, `dropped`, or `none` to clear).
@@ -217,6 +226,7 @@ pub fn parse(id: &str, values: &[String]) -> Option<Press> {
             ok(rest).then(|| make(rest.to_string(), None))
         }
         SHOW_PERFORMER => (!rest.is_empty()).then(|| Press::ShowPerformer(rest.to_string())),
+        SHOW_WORK_OF => crate::wiki::parse_key(rest).map(|_| Press::ShowWorkOf(rest.to_string())),
         SHOW_WORK => is_work_key(rest).then(|| Press::ShowWork(rest.to_string())),
         REMIND => is_work_key(rest).then(|| Press::Remind(rest.to_string())),
         ADD_PROFILE => (!rest.is_empty()).then(|| Press::Add(rest.to_string())),

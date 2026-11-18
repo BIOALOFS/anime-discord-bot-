@@ -646,7 +646,8 @@ async fn run_person(ctx: Context<'_>, cat: Category, name: String) -> Result<(),
             }
         }
     };
-    let msg = crate::people::msgs::person_msg(data, &key, mature).await;
+    let msg =
+        crate::people::msgs::person_msg(data, &key, mature, ctx.author().id.get() as i64).await;
     crate::global::reply(ctx, msg).await
 }
 
@@ -853,7 +854,8 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
         .as_deref()
         .and_then(|n| crate::wiki::parse_key(n.trim()))
     {
-        let msg = crate::wiki::msgs::page_msg(&wikis, wiki, page).await;
+        let msg =
+            crate::wiki::msgs::page_msg(&wikis, wiki, page, ctx.author().id.get() as i64).await;
         return crate::global::reply(ctx, msg).await;
     }
     match ty {
@@ -892,7 +894,9 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                 return fallback::show_with_note(ctx, all, note).await;
             }
             // The main providers have nothing (or a wiki was asked for): the wiki results are shown directly.
-            if let Some(msg) = crate::wiki::msgs::show(&wikis, wiki_found, &q).await {
+            if let Some(msg) =
+                crate::wiki::msgs::show(&wikis, wiki_found, &q, ctx.author().id.get() as i64).await
+            {
                 return crate::global::reply(ctx, msg).await;
             }
             say_ephemeral(ctx, found.empty_message(i18n::NO_RESULTS)).await
@@ -903,7 +907,14 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                 let found = wikis
                     .search(&q, Some(crate::wiki::Kind::Character), choice.only_wiki())
                     .await;
-                return match crate::wiki::msgs::show(&wikis, found, &q).await {
+                return match crate::wiki::msgs::show(
+                    &wikis,
+                    found,
+                    &q,
+                    ctx.author().id.get() as i64,
+                )
+                .await
+                {
                     Some(msg) => crate::global::reply(ctx, msg).await,
                     None => say_ephemeral(ctx, i18n::NO_RESULTS).await,
                 };

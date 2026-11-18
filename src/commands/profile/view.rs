@@ -77,6 +77,8 @@ pub struct ProfileView {
     pub images: super::imgcache::ImageCache,
     /// Up to three notable works of the shown person (empty for anything else).
     pub person_works: Vec<String>,
+    /// The wiki an item came from (its snapshot), shown as a source line.
+    pub wiki_source: Option<String>,
 }
 
 /// First index of the window that contains `index`.
@@ -209,6 +211,7 @@ impl ProfileView {
             notice: None,
             sources: Some(crate::people::fetch::Sources::of(ctx.data())),
             images: ctx.data().images.clone(),
+            wiki_source: None,
             person_works: Vec::new(),
         }
     }
@@ -277,6 +280,7 @@ impl ProfileView {
         }
         self.custom = self.load_custom_image().await;
         self.person_works = self.load_person_works().await;
+        self.wiki_source = self.load_wiki_source().await;
         if self.banner.is_none() {
             self.banner = self.prepare_banner().await.map(Arc::new);
         }
@@ -338,6 +342,18 @@ impl ProfileView {
                 }
             }
         });
+    }
+
+    /// The wiki a shown item came from, by its snapshot (so it is still known when the wiki is gone).
+    async fn load_wiki_source(&self) -> Option<String> {
+        let item = self.current().filter(|i| i.visible)?;
+        let (wiki, page) = crate::wiki::parse_key(&item.key).or_else(|| {
+            item.character_id()
+                .and_then(crate::wiki::profile::decode_id)
+        })?;
+        crate::wiki::profile::snapshot(&self.pool, wiki, page)
+            .await
+            .map(|s| s.source_name)
     }
 
     /// A person in the list: their three best known works (safety filtered when the card was parsed; cached by the
@@ -449,7 +465,7 @@ impl ProfileView {
         }
         let is_person = i
             .character_id()
-            .is_some_and(|id| id >= crate::people::PERSON_ID_BASE);
+            .is_some_and(|id| crate::people::decode_person_id(id).is_some());
         if let Some(w) = i.subtitle.as_deref().filter(|w| !w.is_empty()) {
             lines.push(if is_person {
                 // "شخص حقيقي · ممثل": a real person among the characters.
@@ -459,6 +475,9 @@ impl ProfileView {
             } else {
                 w.to_string()
             });
+        }
+        if let Some(src) = &self.wiki_source {
+            lines.push(format!("📄 {}: {src}", i18n::WIKI_SOURCE_LABEL));
         }
         if is_person && !self.person_works.is_empty() {
             lines.push(format!("🎞️ {}", self.person_works.join(" · ")));
@@ -496,10 +515,18 @@ impl ProfileView {
         if let Some(img) = &self.custom {
             return Some(format!("attachment://{}", custom_name(img)));
         }
-        self.current()
-            .filter(|i| i.visible)
-            .and_then(|i| i.image_url.clone())
-            .filter(|u| crate::people::profile::image_ok(u))
+        self.current().filter(|i| i.visible).and_then(|i| {
+            // Pictures of wiki items are kept as saved (a public https image address); the others come from the
+            // hosts that allow embedding.
+            let wiki = i.key.starts_with("wiki:")
+                || i.character_id()
+                    .and_then(crate::wiki::profile::decode_id)
+                    .is_some();
+            i.image_url.clone().filter(|u| {
+                crate::people::profile::image_ok(u)
+                    || (wiki && crate::wiki::safety::image_url_ok(u))
+            })
+        })
     }
 
     fn banner_url(&self) -> Option<String> {
@@ -743,6 +770,7 @@ mod tests {
             notice: None,
             sources: None,
             images: crate::commands::profile::imgcache::ImageCache::new(8),
+            wiki_source: None,
             person_works: Vec::new(),
         }
     }
@@ -1285,6 +1313,135 @@ mod tests {
         assert!(
             !v.images.contains(i6).await,
             "an item further away is not prefetched"
+        );
+    }
+
+    fn wiki_page(wiki: i64, id: i64, title: &str) -> (crate::wiki::Page, crate::wiki::Source) {
+        (
+            crate::wiki::Page {
+                wiki_id: wiki,
+                page_id: id,
+                title: title.into(),
+                kind: crate::wiki::Kind::Character,
+                extract: Some("She is the trial captain.".into()),
+                image_url: Some("https://static.wikia.nocookie.net/mudae/images/a/a1/Acerola.png/revision/latest".into()),
+                aliases: vec![],
+                parent_title: Some("Pokémon Sun/Moon".into()),
+                categories: vec![],
+            },
+            crate::wiki::Source {
+                id: wiki,
+                name: "Mudae Wiki".into(),
+                host: "mudae.fandom.com".into(),
+                api_url: "https://mudae.fandom.com/api.php".into(),
+                lang: "en".into(),
+                license_name: Some("CC BY-SA 3.0".into()),
+                license_url: None,
+                character_category: None,
+                game_category: None,
+                enabled: true,
+                added_by: None,
+                created_at: 0,
+                last_checked_at: None,
+                last_error: None,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_wiki_item_renders_like_any_other_is_editable_and_survives_the_wiki_and_navigation_keeps_working(
+    ) {
+        let mut v = fixture(3).await;
+        let (page, source) = wiki_page(2, 77, "Acerola");
+        crate::wiki::profile::add_character(&v.pool, 1, &page, &source, 10)
+            .await
+            .expect("add");
+        let id = crate::wiki::profile::encode_id(2, 77).expect("id");
+        v.load().await.expect("load");
+        assert_eq!(v.total, 4, "the wiki character is in the characters list");
+        v.index = 3;
+        v.load().await.expect("load");
+        let text = v.item_text();
+        assert!(
+            text.contains("Acerola") && text.contains("📺 Pokémon Sun/Moon"),
+            "{text}"
+        );
+        assert!(
+            text.contains("المصدر: Mudae Wiki"),
+            "the source line: {text}"
+        );
+        assert_eq!(
+            v.item_image().as_deref(),
+            Some("https://static.wikia.nocookie.net/mudae/images/a/a1/Acerola.png/revision/latest"),
+            "the saved picture is shown"
+        );
+        // the same edits as any item: a nickname, a description and a picture (GIF)
+        crate::db::custom::set_title(&v.pool, 1, id, Some("Captain"))
+            .await
+            .expect("nickname");
+        crate::db::custom::set_description(&v.pool, 1, id, Some("Mine"))
+            .await
+            .expect("description");
+        set_image(&v, id, 1, true, 80).await;
+        v.load().await.expect("load");
+        assert!(v.item_text().contains("Captain") && v.item_text().contains("Mine"));
+        assert!(v.custom.is_some());
+        // the wiki is disabled, deleted and its cache cleared: the item and the edits stay
+        let wiki_id = match crate::wiki::store::insert(
+            &v.pool,
+            &crate::wiki::store::NewSource {
+                name: "Mudae Wiki".into(),
+                host: "mudae.fandom.com".into(),
+                api_url: "https://mudae.fandom.com/api.php".into(),
+                lang: "en".into(),
+                license_name: None,
+                license_url: None,
+                character_category: None,
+                game_category: None,
+                added_by: None,
+            },
+        )
+        .await
+        .expect("insert")
+        {
+            crate::wiki::store::Added::New(i) => i,
+            other => panic!("{other:?}"),
+        };
+        crate::wiki::store::set_enabled(&v.pool, wiki_id, false)
+            .await
+            .expect("off");
+        crate::wiki::store::delete(&v.pool, wiki_id)
+            .await
+            .expect("delete");
+        crate::wiki::store::clear_cache(&v.pool)
+            .await
+            .expect("clear");
+        v.load().await.expect("load");
+        let text = v.item_text();
+        assert!(
+            text.contains("Acerola")
+                && text.contains("Captain")
+                && text.contains("المصدر: Mudae Wiki"),
+            "{text}"
+        );
+        // navigation reaches the edited wiki item with every control, forward and back
+        v.index = 0;
+        v.load().await.expect("load");
+        assert_eq!(
+            goes(&mut v, crate::ui::pagination::NAV_LAST, &[]).await,
+            id.to_string()
+        );
+        assert_eq!(
+            goes(&mut v, crate::ui::pagination::NAV_PREV, &[]).await,
+            "3"
+        );
+        assert_eq!(
+            goes(&mut v, ITEM_ID, &[&id.to_string()]).await,
+            id.to_string()
+        );
+        assert_eq!(
+            goes(&mut v, crate::ui::pagination::NAV_FIRST, &[]).await,
+            "1"
         );
     }
 

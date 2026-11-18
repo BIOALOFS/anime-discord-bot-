@@ -115,14 +115,14 @@ pub fn person_embed(p: &Person) -> Emb {
 }
 
 /// The buttons under a person card: "أظهر الأعمال" (when there are works) and the source link.
-pub fn person_rows(p: &Person) -> Vec<serenity::CreateActionRow> {
+pub fn person_rows(p: &Person, in_profile: bool) -> Vec<serenity::CreateActionRow> {
     let mut buttons = Vec::new();
     if !p.credits.is_empty() {
         buttons.push(components::works_button(&p.key));
     }
     // Actors, voice actors, staff: the same add-to-profile button as a character (companies have none).
     if super::addable(&p.key) {
-        buttons.push(components::add_button(&p.key));
+        buttons.push(crate::global::add_button_for(&p.key, in_profile));
     }
     if let Some(u) = p.url.as_deref().filter(|u| u.starts_with("https://")) {
         let credit = super::parse_key(&p.key).map_or("", |(s, _)| s.credit());
@@ -135,12 +135,13 @@ pub fn person_rows(p: &Person) -> Vec<serenity::CreateActionRow> {
     }
 }
 
-pub async fn person_msg(data: &Data, key: &str, mature: bool) -> Msg {
+pub async fn person_msg(data: &Data, key: &str, mature: bool, user: i64) -> Msg {
     let card = fetch::person(&Sources::of(data), key, mature).await;
     let Card::Found(p) = card else {
         return unavailable(card);
     };
-    let rows = person_rows(&p);
+    let mine = crate::global::in_profile(data, user, &p.key).await;
+    let rows = person_rows(&p, mine);
     Msg::card(person_embed(&p), rows)
 }
 
@@ -275,11 +276,11 @@ pub fn hits_list(hits: &[Hit], note: Option<String>) -> Msg {
 }
 
 /// The performer(s) of a character: one opens the person card directly, several get a menu.
-pub async fn performers_msg(data: &Data, character_key: &str, mature: bool) -> Msg {
+pub async fn performers_msg(data: &Data, character_key: &str, mature: bool, user: i64) -> Msg {
     let hits = fetch::performers(&Sources::of(data), character_key, mature).await;
     match hits.as_slice() {
         [] => Msg::text(i18n::NO_PERFORMER),
-        [one] => person_msg(data, &one.key, mature).await,
+        [one] => person_msg(data, &one.key, mature, user).await,
         many => performers_list(many),
     }
 }
@@ -461,7 +462,7 @@ mod tests {
 
     #[test]
     fn the_person_card_carries_show_works_and_the_source_link() {
-        let rows = person_rows(&person(3));
+        let rows = person_rows(&person(3), false);
         let j = json(&rows[0]);
         let labels: Vec<&str> = j["components"]
             .as_array()
@@ -475,7 +476,7 @@ mod tests {
             "showworks:anilist-staff:95"
         );
         // a person without works has no works button
-        let none = person_rows(&person(0));
+        let none = person_rows(&person(0), false);
         assert!(json(&none[0])["components"]
             .as_array()
             .expect("buttons")

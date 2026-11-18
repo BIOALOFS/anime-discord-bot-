@@ -472,6 +472,15 @@ pub fn search_results_for(q: &str) -> String {
 pub const SEARCH_NEEDS_NAME: &str = "اكتب اسم عمل أو شخصية أو شخص للبحث.";
 pub const PERSON_NOT_ADDABLE: &str = "الشركات ما تُضاف للبروفايل، فقط الأشخاص.";
 pub const WIKI_PICK_TITLE: &str = "نتائج من الويكي";
+pub const WIKI_SNAPSHOT_NOTE: &str = "نسخة محفوظة";
+pub fn wiki_work_not_found(series: Option<&str>) -> String {
+    match series {
+        Some(s) => format!("ما لقيت صفحة العمل «{s}» في أي مصدر."),
+        None => "هذه الصفحة ما تذكر العمل الذي تنتمي إليه.".to_string(),
+    }
+}
+pub const WIKI_SOURCE_LABEL: &str = "المصدر";
+pub const KIND_WIKI: &str = "ويكي";
 pub const PICK_PERSON_TITLE: &str = "من تقصد؟";
 pub const PICK_PERSON_PLACEHOLDER: &str = "افتح بطاقة شخص…";
 pub const PICK_PERFORMER_PLACEHOLDER: &str = "اختر المؤدي…";
