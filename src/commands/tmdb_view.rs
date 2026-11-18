@@ -96,6 +96,7 @@ impl TmdbView {
         let kind = w.kind.unwrap_or(tmdb::model::Kind::Tv);
         let mut main = components::standard_actions(ItemKind::Character, Some(&work_key));
         main.push(components::add_button(&c.key(kind, w.id)));
+        main.push(components::performer_button(&c.key(kind, w.id)));
         main.push(serenity::CreateButton::new_link(w.url()).label("🔗 TMDB"));
         main.push(close_button(enabled));
         let mut rows = vec![buttons(main)];
@@ -120,7 +121,8 @@ impl TmdbView {
         main.push(components::remind_button(&key));
         main.push(serenity::CreateButton::new_link(w.url()).label("🔗 TMDB"));
         main.push(close_button(enabled));
-        let mut rows = vec![buttons(main)];
+        // Too many buttons for one row: the link goes (the title already links to TMDB), then the optional ones move.
+        let (mut rows, _links) = components::card_rows(main);
         rows.extend(components::status_menu(&key, false, self.status.as_deref()));
         let mut extra = Vec::new();
         if self.reroll.is_some() {

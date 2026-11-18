@@ -89,6 +89,7 @@ pub fn card_rows(
     in_profile: bool,
     show_back: bool,
     work_key: Option<&str>,
+    performer: Option<&str>,
     enabled: bool,
 ) -> Vec<serenity::CreateActionRow> {
     let secondary = serenity::ButtonStyle::Secondary;
@@ -122,6 +123,8 @@ pub fn card_rows(
         crate::components::ItemKind::Character,
         work_key,
     ));
+    // "أظهر المؤدي": the voice actor's card as a new message.
+    main.extend(performer.map(crate::components::performer_button));
     let mut extra = vec![
         serenity::CreateButton::new(BTN_DESCRIBE)
             .label(i18n::BTN_DESCRIPTION)
@@ -140,7 +143,10 @@ pub fn card_rows(
             .disabled(!enabled),
     ];
     extra.push(close_button(enabled));
-    vec![buttons(main), buttons(extra)]
+    // Over five buttons the source link drops out (the card title links to it); the required ones always stay.
+    let (mut rows, _links) = crate::components::card_rows(main);
+    rows.push(buttons(extra));
+    rows
 }
 
 /// Appearances that may be shown under the given policy.
@@ -395,6 +401,7 @@ impl View for CharacterView {
                         .and_then(|r| r.id)
                         .map(|id| format!("anilist:{id}"))
                         .as_deref(),
+                    Some(&c.id.to_string()),
                     enabled,
                 ),
             ),
@@ -1045,15 +1052,23 @@ mod tests {
             false,
             true,
             Some("anilist:5"),
+            Some("5"),
             true,
         );
         let l = labels(&rows);
-        for want in [i18n::BTN_ADD_TO_PROFILE, i18n::BTN_WORKS, i18n::BTN_BACK] {
+        for want in [
+            i18n::BTN_ADD_TO_PROFILE,
+            i18n::BTN_WORKS,
+            i18n::BTN_BACK,
+            crate::components::LABEL_SHOW_WORK,
+            crate::components::LABEL_SHOW_PERFORMER,
+        ] {
             assert!(l.iter().any(|x| x == want), "{want} missing in {l:?}");
         }
+        // Six buttons do not fit one row: the source link is the first to go.
         assert!(
-            l.iter().any(|x| x.contains(i18n::BTN_ANILIST)),
-            "source link"
+            !l.iter().any(|x| x.contains(i18n::BTN_ANILIST)),
+            "the link drops out of a crowded row"
         );
         assert!(
             rows.len() <= 5
@@ -1068,7 +1083,7 @@ mod tests {
 
     #[test]
     fn the_add_button_becomes_remove_when_the_character_is_in_my_profile() {
-        let l = labels(&card_rows(None, true, false, None, true));
+        let l = labels(&card_rows(None, true, false, None, None, true));
         assert!(l.iter().any(|x| x == i18n::BTN_REMOVE_FROM_PROFILE));
         assert!(!l.iter().any(|x| x == i18n::BTN_ADD_TO_PROFILE));
         assert!(

@@ -78,6 +78,9 @@ pub enum Type {
     #[name = "character"]
     #[name_localized("ar", "شخصية")]
     Character,
+    #[name = "person"]
+    #[name_localized("ar", "شخص (ممثلون ومؤدو أصوات وطاقم)")]
+    Person,
     #[name = "random_work"]
     #[name_localized("ar", "عمل عشوائي")]
     RandomWork,
@@ -238,11 +241,13 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
     let Some(cat) = command_category(ctx) else {
         return Vec::new();
     };
-    let ty = option_str(ctx, "type").unwrap_or_default();
-    if ty.starts_with("random") {
-        return Vec::new();
+    let target = AcTarget::of(&option_str(ctx, "type").unwrap_or_default());
+    match target {
+        AcTarget::Random => return Vec::new(),
+        AcTarget::Person => return person_suggestions(ctx, cat, partial).await,
+        _ => {}
     }
-    let characters = ty == "character";
+    let characters = target == AcTarget::Character;
     let data = ctx.data();
     match cat {
         Category::Anime | Category::Manga | Category::Novel => {
@@ -399,6 +404,124 @@ async fn guild_overrides(ctx: Context<'_>) -> std::collections::HashMap<String, 
     }
 }
 
+// ---- people ------------------------------------------------------------------------------------
+
+/// What the `type` option chosen so far asks the `name` autocomplete for (a command not yet given a type: works).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcTarget {
+    Work,
+    Character,
+    Person,
+    /// A random pick has no name.
+    Random,
+}
+
+impl AcTarget {
+    pub fn of(ty: &str) -> Self {
+        match ty.trim() {
+            "character" => Self::Character,
+            "person" => Self::Person,
+            t if t.starts_with("random") => Self::Random,
+            _ => Self::Work,
+        }
+    }
+}
+
+/// The people sources of a category: AniList staff for anime / manga / novels, TMDB persons for drama, series and
+/// movies, IGDB companies and VNDB staff for games.
+pub fn people_scope(cat: Category) -> crate::people::fetch::Scope {
+    use crate::people::fetch::Scope;
+    match cat {
+        Category::Anime | Category::Manga | Category::Novel => Scope::AnimeManga,
+        Category::Drama | Category::Series | Category::Movie => Scope::Screen,
+        Category::Game => Scope::Games,
+    }
+}
+
+async fn person_suggestions(
+    ctx: Context<'_>,
+    cat: Category,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    let scope = people_scope(cat);
+    if scope == crate::people::fetch::Scope::Games && !fallback::game_flags(ctx).await.0 {
+        return Vec::new();
+    }
+    let sources = crate::people::fetch::Sources::of(ctx.data());
+    let items = ctx
+        .data()
+        .auto
+        .items_scoped(
+            ctx.author().id.get(),
+            "person",
+            &format!("{scope:?}"),
+            partial,
+            0,
+            |q| async move {
+                crate::people::fetch::search(&sources, scope, &q, true)
+                    .await
+                    .hits
+                    .iter()
+                    .map(|h| (h.label(), h.key.clone()))
+                    .collect()
+            },
+        )
+        .await;
+    to_choices(items)
+}
+
+/// `type: شخص`: open the card of the person picked from the suggestions, or search the typed name.
+async fn run_person(ctx: Context<'_>, cat: Category, name: String) -> Result<(), Error> {
+    ctx.defer().await?;
+    let scope = people_scope(cat);
+    let data = ctx.data();
+    match scope {
+        crate::people::fetch::Scope::Screen if !data.tmdb.enabled() => {
+            return say_ephemeral(ctx, i18n::TMDB_UNAVAILABLE).await;
+        }
+        crate::people::fetch::Scope::Games => {
+            if !data.providers.games_enabled() {
+                return say_ephemeral(ctx, i18n::GAMES_UNAVAILABLE).await;
+            }
+            if !fallback::game_flags(ctx).await.0 {
+                return say_ephemeral(ctx, i18n::GAMES_SERVER_OFF).await;
+            }
+        }
+        _ => {}
+    }
+    let mature = crate::global::mature_for(data, ctx.guild_id().map(|g| g.get() as i64)).await;
+    let key = if crate::people::parse_key(name.trim()).is_some() {
+        name.trim().to_string()
+    } else {
+        let found = crate::people::fetch::search(
+            &crate::people::fetch::Sources::of(data),
+            scope,
+            &name,
+            mature,
+        )
+        .await;
+        let note = found.partial_note();
+        let exact = found
+            .hits
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case(name.trim()))
+            .map(|h| h.key.clone());
+        match (found.hits.as_slice(), exact) {
+            ([], _) => {
+                let text = note.unwrap_or_else(|| i18n::NO_RESULTS.to_string());
+                return say_ephemeral(ctx, &text).await;
+            }
+            ([one], _) => one.key.clone(),
+            (_, Some(key)) => key,
+            (many, None) => {
+                return crate::global::reply(ctx, crate::people::msgs::hits_list(many, note)).await;
+            }
+        }
+    };
+    let msg = crate::people::msgs::person_msg(data, &key, mature).await;
+    crate::global::reply(ctx, msg).await
+}
+
 // ---- the shared handler ------------------------------------------------------------------
 
 /// Run a category command.
@@ -408,7 +531,7 @@ pub async fn run(ctx: Context<'_>, cat: Category, ty: Type, o: Opts) -> Result<(
         .clone()
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty());
-    if matches!(ty, Type::Work | Type::Character) && name.is_none() {
+    if matches!(ty, Type::Work | Type::Character | Type::Person) && name.is_none() {
         ctx.defer_ephemeral().await?;
         return say_ephemeral(ctx, i18n::CATEGORY_NEEDS_NAME).await;
     }
@@ -432,6 +555,7 @@ async fn run_anilist(
 ) -> Result<(), Error> {
     let (kind, filter) = anilist_target(cat, o);
     match ty {
+        Type::Person => run_person(ctx, cat, name.unwrap_or_default()).await,
         Type::Work => media::run_media_with(ctx, kind, name.unwrap_or_default(), filter).await,
         Type::Character => {
             character::search_character(ctx, name.unwrap_or_default(), None, Some("anime".into()))
@@ -493,6 +617,9 @@ async fn run_tmdb(
     o: &Opts,
     name: Option<String>,
 ) -> Result<(), Error> {
+    if ty == Type::Person {
+        return run_person(ctx, cat, name.unwrap_or_default()).await;
+    }
     ctx.defer().await?;
     let Some(tcat) = cat.tmdb() else {
         return Ok(());
@@ -533,6 +660,7 @@ async fn run_tmdb(
             let msg = crate::global::roster_msg(data, &key, 0, mature).await;
             crate::global::reply(ctx, msg).await
         }
+        Type::Person => Ok(()),
         Type::RandomWork => match find::random(&tmdb, tcat, &filter, &overrides, user).await {
             Some(w) => {
                 let r = tmdb_view::Reroll {
@@ -594,6 +722,7 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
         .and_then(|p| resolve(PLATFORMS, Some(p)).or_else(|| Some(p.trim().to_string())))
         .filter(|p| !p.is_empty());
     match ty {
+        Type::Person => run_person(ctx, Category::Game, name.unwrap_or_default()).await,
         Type::Work => {
             let q = name.unwrap_or_default();
             let found = providers
@@ -1087,5 +1216,50 @@ mod tests {
             Category::ALL.iter().filter(|c| c.tmdb().is_some()).count(),
             3
         );
+    }
+
+    #[test]
+    fn the_type_choices_include_person_and_no_random_person() {
+        use poise::ChoiceParameter;
+        let names: Vec<String> = Type::list().iter().map(|c| c.name.clone()).collect();
+        assert_eq!(
+            names,
+            [
+                "work",
+                "character",
+                "person",
+                "random_work",
+                "random_character"
+            ]
+        );
+        let ar: Vec<String> = Type::list()
+            .iter()
+            .map(|c| c.localizations.get("ar").cloned().unwrap_or_default())
+            .collect();
+        assert_eq!(ar[2], "شخص (ممثلون ومؤدو أصوات وطاقم)");
+        assert!(ar.iter().all(|n| !n.is_empty() && n.chars().count() <= 100));
+        assert!(!names.iter().any(|n| n == "random_person"));
+    }
+
+    #[test]
+    fn the_name_autocomplete_follows_the_chosen_type() {
+        assert_eq!(AcTarget::of("work"), AcTarget::Work);
+        assert_eq!(AcTarget::of(""), AcTarget::Work, "no type yet means works");
+        assert_eq!(AcTarget::of("character"), AcTarget::Character);
+        assert_eq!(AcTarget::of("person"), AcTarget::Person);
+        assert_eq!(AcTarget::of("random_work"), AcTarget::Random);
+        assert_eq!(AcTarget::of("random_character"), AcTarget::Random);
+    }
+
+    #[test]
+    fn each_category_searches_its_own_people_sources() {
+        use crate::people::fetch::Scope;
+        for c in [Category::Anime, Category::Manga, Category::Novel] {
+            assert_eq!(people_scope(c), Scope::AnimeManga);
+        }
+        for c in [Category::Drama, Category::Series, Category::Movie] {
+            assert_eq!(people_scope(c), Scope::Screen);
+        }
+        assert_eq!(people_scope(Category::Game), Scope::Games);
     }
 }

@@ -457,6 +457,34 @@ pub const REC_GENERAL_WHY: &str = "ترشيح عام من الأعمال الر�
 pub const REC_TMDB_FIELD: &str = "🎬 مسلسلات وأفلام";
 pub const REC_TMDB_PLACEHOLDER: &str = "افتح مسلسلًا أو فيلمًا";
 
+// ---- people ----------------------------------------------------------------------------------------
+pub const PERSON_UNAVAILABLE: &str = "ما وجدت هذا الشخص، أو أن بياناته غير متاحة الآن.";
+pub const PERSON_SOURCE_DOWN: &str = "المصدر لا يردّ الآن، جرّب بعد قليل.";
+pub const PERSON_NO_WORKS: &str = "ما عندي أعمال أعرضها لهذا الشخص.";
+pub const NO_CREW: &str = "ما وصلتني بيانات الطاقم لهذا العمل.";
+pub const NO_PERFORMER: &str = "ما عندي مؤدٍّ مسجّل لهذه الشخصية.";
+pub const PICK_WORK_OF_PERSON: &str = "افتح عملًا…";
+pub const PICK_CHAR_OF_PERSON: &str = "افتح شخصية…";
+pub const PICK_PERSON_TITLE: &str = "من تقصد؟";
+pub const PICK_PERSON_PLACEHOLDER: &str = "افتح بطاقة شخص…";
+pub const PICK_PERFORMER_PLACEHOLDER: &str = "اختر المؤدي…";
+pub const F_BORN: &str = "الميلاد";
+pub const F_NOTABLE_WORKS: &str = "من أعماله";
+pub const PERSON_FAVOURITES: &str = "معجب";
+pub const PERSON_POPULARITY: &str = "نقاط الشعبية";
+pub fn years_old(age: i32) -> String {
+    format!("{age} سنة")
+}
+pub fn works_of(name: &str) -> String {
+    format!("أعمال {name}")
+}
+pub fn crew_of(title: &str) -> String {
+    format!("طاقم {title}")
+}
+pub fn performers_of(name: &str) -> String {
+    format!("مؤدّو {name}")
+}
+
 #[cfg(test)]
 mod tests {
     /// Constants that are brand names or symbols, not sentences.

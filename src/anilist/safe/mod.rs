@@ -949,5 +949,6 @@ impl SafeAniList {
     }
 }
 
+mod people;
 #[cfg(test)]
 mod tests;

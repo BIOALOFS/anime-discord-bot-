@@ -17,6 +17,7 @@ mod global;
 mod guild;
 mod http_log;
 mod ops;
+mod people;
 pub mod texts;
 /// The one module of user-facing text; `i18n` is kept as its short alias across the code.
 pub use texts as i18n;

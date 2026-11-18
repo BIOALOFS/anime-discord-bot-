@@ -468,23 +468,16 @@ impl MediaView {
         } else {
             (i18n::BTN_FAVOURITE, secondary)
         };
-        let mut main = vec![
-            serenity::CreateButton::new(BTN_STAR)
-                .label(star_label)
-                .emoji(if self.added { '✅' } else { '⭐' })
-                .style(star_style)
-                .disabled(!enabled),
-            // "أظهر الشخصيات": a new message with the cast, never an edit of this one.
-            crate::components::standard_actions(
-                crate::components::ItemKind::Work,
-                Some(&format!("anilist:{}", m.id)),
-            )
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| {
-                serenity::CreateButton::new(BTN_CHARACTERS).label(i18n::BTN_CHARACTERS)
-            }),
-        ];
+        let mut main = vec![serenity::CreateButton::new(BTN_STAR)
+            .label(star_label)
+            .emoji(if self.added { '✅' } else { '⭐' })
+            .style(star_style)
+            .disabled(!enabled)];
+        // "أظهر الشخصيات" and "أظهر الطاقم": new messages, never an edit of this one.
+        main.extend(crate::components::standard_actions(
+            crate::components::ItemKind::Work,
+            Some(&format!("anilist:{}", m.id)),
+        ));
         // Anime episodes and the chapters of tracked manga can remind.
         if kind_of(m) != MediaKind::Novel {
             main.push(

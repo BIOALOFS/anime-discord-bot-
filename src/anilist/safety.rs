@@ -34,7 +34,7 @@ const EXPLICIT_TERMS: &[&str] = &[
     "nsfw",
 ];
 
-fn genres_adult(genres: &[String]) -> bool {
+pub(crate) fn genres_adult(genres: &[String]) -> bool {
     genres.iter().any(|g| g.eq_ignore_ascii_case(ADULT_GENRE))
 }
 

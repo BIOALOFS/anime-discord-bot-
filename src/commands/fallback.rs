@@ -295,10 +295,10 @@ impl FallbackView {
                     );
                 }
                 row.push(close_button(enabled));
-                let page = Page::embed(
-                    card(w, self.cover.is_some(), name).build(),
-                    vec![buttons(row)],
-                );
+                // Over five buttons the link drops out (the card's title links to the source) and the crew button
+                // moves into the "المزيد" menu when needed.
+                let (rows, _links) = crate::components::card_rows(row);
+                let page = Page::embed(card(w, self.cover.is_some(), name).build(), rows);
                 match &self.cover {
                     Some(c) => page.with_files(vec![serenity::CreateAttachment::bytes(
                         c.to_vec(),
