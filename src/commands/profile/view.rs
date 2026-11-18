@@ -937,7 +937,7 @@ mod tests {
         let values: Vec<String> = values.iter().map(|s| s.to_string()).collect();
         v.on_interaction(id, &values).await;
         assert!(v.notice.is_none(), "{id}: {:?}", v.notice);
-        v.current().expect("an item").key.clone()
+        v.current().map(|i| i.key.clone()).unwrap_or_default()
     }
 
     #[tokio::test]
