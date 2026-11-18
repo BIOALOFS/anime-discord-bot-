@@ -679,6 +679,7 @@ impl View for ProfileView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::custom;
 
     fn item(n: usize, name: &str) -> Item {
         Item {
