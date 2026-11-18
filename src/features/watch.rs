@@ -80,24 +80,26 @@ pub fn parse_input(
     ))
 }
 
-pub async fn create(
-    pool: &SqlitePool,
-    guild: i64,
-    channel: i64,
-    work_key: &str,
-    title: &str,
-    description: &str,
-    starts_at: i64,
-    by: i64,
-) -> Result<i64, sqlx::Error> {
+/// A night to create.
+pub struct NewNight<'a> {
+    pub guild: i64,
+    pub channel: i64,
+    pub work_key: &'a str,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub starts_at: i64,
+    pub created_by: i64,
+}
+
+pub async fn create(pool: &SqlitePool, n: &NewNight<'_>) -> Result<i64, sqlx::Error> {
     Ok(sqlx::query("INSERT INTO watch_nights (guild_id, channel_id, work_key, title, description, starts_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
-        .bind(guild)
-        .bind(channel)
-        .bind(work_key)
-        .bind(fit(title, 100))
-        .bind(description)
-        .bind(starts_at)
-        .bind(by)
+        .bind(n.guild)
+        .bind(n.channel)
+        .bind(n.work_key)
+        .bind(fit(n.title, 100))
+        .bind(n.description)
+        .bind(n.starts_at)
+        .bind(n.created_by)
         .execute(pool)
         .await?
         .last_insert_rowid())
@@ -289,6 +291,32 @@ pub fn reminder_text(n: &Night) -> String {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
+    async fn mk(
+        pool: &SqlitePool,
+        guild: i64,
+        channel: i64,
+        key: &str,
+        title: &str,
+        description: &str,
+        starts_at: i64,
+        by: i64,
+    ) -> Result<i64, sqlx::Error> {
+        create(
+            pool,
+            &NewNight {
+                guild,
+                channel,
+                work_key: key,
+                title,
+                description,
+                starts_at,
+                created_by: by,
+            },
+        )
+        .await
+    }
+
     const TZ: chrono_tz::Tz = chrono_tz::Asia::Muscat;
 
     #[test]
@@ -336,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn answers_are_one_per_member_changeable_and_closed_after_the_start() {
         let pool = crate::db::connect_memory().await;
-        let id = create(&pool, 1, 10, "anilist:5", "Frieren", "", 10_000, 99)
+        let id = mk(&pool, 1, 10, "anilist:5", "Frieren", "", 10_000, 99)
             .await
             .expect("create");
         assert_eq!(rsvp(&pool, id, 1, true, 100).await.expect("r"), Rsvp::Going);
@@ -368,10 +396,10 @@ mod tests {
     #[tokio::test]
     async fn the_reminder_is_due_at_the_start_sent_once_and_never_for_old_nights() {
         let pool = crate::db::connect_memory().await;
-        let soon = create(&pool, 1, 10, "anilist:5", "A", "", 10_000, 1)
+        let soon = mk(&pool, 1, 10, "anilist:5", "A", "", 10_000, 1)
             .await
             .expect("n");
-        let old = create(
+        let old = mk(
             &pool,
             1,
             10,
@@ -411,13 +439,13 @@ mod tests {
     #[tokio::test]
     async fn upcoming_nights_are_listed_per_server_and_old_ones_are_pruned_with_their_answers() {
         let pool = crate::db::connect_memory().await;
-        let a = create(&pool, 1, 10, "anilist:5", "A", "", 5_000, 1)
+        let a = mk(&pool, 1, 10, "anilist:5", "A", "", 5_000, 1)
             .await
             .expect("n");
-        let _b = create(&pool, 1, 10, "anilist:6", "B", "", 3_000, 1)
+        let _b = mk(&pool, 1, 10, "anilist:6", "B", "", 3_000, 1)
             .await
             .expect("n");
-        let _c = create(&pool, 2, 10, "anilist:7", "C", "", 4_000, 1)
+        let _c = mk(&pool, 2, 10, "anilist:7", "C", "", 4_000, 1)
             .await
             .expect("n");
         let up = upcoming(&pool, 1, 1_000).await.expect("u");

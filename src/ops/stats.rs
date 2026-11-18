@@ -94,7 +94,7 @@ pub async fn prune(pool: &SqlitePool, today: &str) -> Result<u64, sqlx::Error> {
         .rows_affected())
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Report {
     /// `(day, commands)` for the last seven days, oldest first.
     pub per_day: Vec<(String, i64)>,

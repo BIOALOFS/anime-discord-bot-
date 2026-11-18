@@ -33,6 +33,12 @@ pub async fn handle(
     {
         return digest_more(ctx, i).await;
     }
+    if let Some((poll, option)) = crate::features::poll::parse_vote(&i.data.custom_id) {
+        return poll_vote(ctx, i, data, poll, option).await;
+    }
+    if let Some((night, going)) = crate::features::watch::parse_rsvp(&i.data.custom_id) {
+        return watch_rsvp(ctx, i, data, night, going).await;
+    }
     let press = crate::components::parse(&i.data.custom_id, &values);
     let work = match &press {
         Some(_) => None,

@@ -138,6 +138,13 @@ impl Igdb {
         Err(ProviderError::Http("unauthorized".into()))
     }
 
+    /// The smallest possible request (the status panel): does IGDB answer with our token?
+    pub async fn ping(&self) -> bool {
+        self.query("games", "fields name; limit 1;".to_string())
+            .await
+            .is_ok()
+    }
+
     pub async fn search_games(
         &self,
         query: &str,

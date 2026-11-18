@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admin_ext;
 pub mod airing;
 pub mod arena;
 pub mod arena_tmdb;

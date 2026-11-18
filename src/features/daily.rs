@@ -59,15 +59,6 @@ pub fn birthday_matches<'a>(
         .collect()
 }
 
-/// The first candidate that was not posted in the last 30 days.
-pub fn first_unrepeated<T>(
-    candidates: Vec<T>,
-    recent: &HashSet<String>,
-    key: impl Fn(&T) -> String,
-) -> Option<T> {
-    candidates.into_iter().find(|c| !recent.contains(&key(c)))
-}
-
 /// Which members of a server have which of these characters: `character -> [members]` (public profiles only).
 pub async fn members_with(
     pool: &SqlitePool,
@@ -402,20 +393,6 @@ mod tests {
         assert_eq!(m.get(&6), Some(&vec![3]));
         assert!(!m.contains_key(&7));
         assert!(members_with(&pool, 10, &[]).await.expect("m").is_empty());
-    }
-
-    #[test]
-    fn a_featured_pick_is_never_one_of_the_last_thirty_days() {
-        let recent: HashSet<String> = ["1".to_string(), "2".to_string()].into();
-        assert_eq!(
-            first_unrepeated(vec![1, 2, 3, 4], &recent, |n| n.to_string()),
-            Some(3)
-        );
-        assert_eq!(
-            first_unrepeated(vec![1, 2], &recent, |n| n.to_string()),
-            None,
-            "everything was posted recently"
-        );
     }
 
     #[tokio::test]

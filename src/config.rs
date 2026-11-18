@@ -47,7 +47,7 @@ pub struct Config {
     #[serde(default)]
     pub igdb_client_secret: Option<Secret>,
     /// Optional: the Discord user id of the owner (otherwise the application owner is used).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_u64")]
     pub owner_id: Option<u64>,
     /// VNDB (visual novels) needs no key; set `ENABLE_VNDB=false` to switch it off.
     #[serde(default = "d_true", deserialize_with = "opt_bool_true")]
@@ -306,5 +306,34 @@ mod tests {
             cfg.provider_report().iter().filter(|p| p.1).count() >= 3 && !all.contains("hidden"),
             "{all}"
         );
+    }
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    #[test]
+    fn a_blank_or_missing_owner_id_means_unset_and_a_number_is_read() {
+        let load = |pairs: &[(&str, &str)]| {
+            envy::from_iter::<_, Config>(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        };
+        assert_eq!(
+            load(&[("DISCORD_TOKEN", "t"), ("OWNER_ID", "")])
+                .expect("blank")
+                .owner_id,
+            None
+        );
+        assert_eq!(
+            load(&[("DISCORD_TOKEN", "t")]).expect("missing").owner_id,
+            None
+        );
+        assert_eq!(
+            load(&[("DISCORD_TOKEN", "t"), ("OWNER_ID", " 123 ")])
+                .expect("number")
+                .owner_id,
+            Some(123)
+        );
+        assert!(load(&[("DISCORD_TOKEN", "t"), ("OWNER_ID", "abc")]).is_err());
     }
 }

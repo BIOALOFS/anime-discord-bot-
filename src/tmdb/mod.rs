@@ -244,6 +244,26 @@ impl Tmdb {
             .unwrap_or_default()
     }
 
+    /// A real (uncached) lightweight request for the status panel: is TMDB answering with our credentials?
+    pub async fn ping(&self) -> bool {
+        if !self.enabled() {
+            return false;
+        }
+        let mut req = self
+            .http
+            .get(format!("{API}/configuration"))
+            .timeout(Duration::from_secs(8));
+        match (&self.cfg.read_token, &self.cfg.api_key) {
+            (Some(t), _) => req = req.bearer_auth(t),
+            (None, Some(k)) => req = req.query(&[("api_key", k.as_str())]),
+            _ => return false,
+        }
+        req.send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    }
+
     /// What TMDB recommends after a show or film (the "because you liked it" list), most relevant first.
     pub async fn recommendations(&self, kind: Kind, id: i64) -> Vec<Work> {
         let path = if kind == Kind::Tv {

@@ -380,6 +380,14 @@ impl Providers {
         .await
     }
 
+    /// A real lightweight IGDB request for the status panel (`false` when IGDB is off or failing).
+    pub async fn ping_igdb(&self) -> bool {
+        match &self.igdb {
+            Some(igdb) => igdb.ping().await,
+            None => false,
+        }
+    }
+
     /// Like `cached`, but a failure is passed on (and never cached) so the caller can tell "nothing found" from "the
     /// provider did not answer".
     async fn cached_result<F, Fut>(&self, key: String, f: F) -> Result<Vec<Work>, ProviderError>
