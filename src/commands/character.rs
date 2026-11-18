@@ -800,7 +800,7 @@ pub(crate) async fn character_suggestions(
     partial: &str,
     source: CharacterSource,
 ) -> Vec<serenity::AutocompleteChoice> {
-    if !crate::guild::autocomplete_allowed(ctx).await || partial.trim().chars().count() < 2 {
+    if !crate::guild::autocomplete_allowed(ctx).await {
         return Vec::new();
     }
     let (games_on, mature) = super::fallback::game_flags(ctx).await;
@@ -809,54 +809,63 @@ pub(crate) async fn character_suggestions(
     let providers = data.providers.clone();
     let use_games = source != CharacterSource::AnimeManga && games_on && providers.games_enabled();
     let use_ani = source != CharacterSource::Games;
-    // The cache key is the typed text, so the option that changes the answer is part of it.
-    let keyed = format!("{source:?}|{mature}|{}", partial.trim());
+    // The options that change the answer are part of the cache scope.
+    let scope = format!("{source:?}|{mature}");
     let items = data
         .auto
-        .items(ctx.author().id.get(), "character", &keyed, |q| async move {
-            let text = q.rsplit('|').next().unwrap_or("").to_string();
-            let (ani, prov) = futures::join!(
-                async {
-                    if !use_ani {
-                        return Vec::new();
+        .items_scoped(
+            ctx.author().id.get(),
+            "character",
+            &scope,
+            partial,
+            0,
+            |text| async move {
+                let (ani, prov) = futures::join!(
+                    async {
+                        if !use_ani {
+                            return Vec::new();
+                        }
+                        let list = if text.chars().count() >= 2 {
+                            api.search_characters(&text, 10, ContentPolicy::SAFE).await
+                        } else {
+                            api.popular_characters(10, ContentPolicy::SAFE).await
+                        };
+                        list.unwrap_or_default()
+                    },
+                    async {
+                        if use_games && text.chars().count() >= 2 {
+                            // Characters by name, and the games whose rosters the member may mean.
+                            let (chars, games) = futures::join!(
+                                providers.search_characters_found(&text, mature),
+                                providers.search_games_found(&text, None, mature, None)
+                            );
+                            (chars.works, games.works)
+                        } else {
+                            (Vec::new(), Vec::new())
+                        }
                     }
-                    api.search_characters(&text, 10, ContentPolicy::SAFE)
-                        .await
-                        .unwrap_or_default()
-                },
-                async {
-                    if use_games {
-                        // Characters by name, and the games whose rosters the member may mean.
-                        let (chars, games) = futures::join!(
-                            providers.search_characters_found(&text, mature),
-                            providers.search_games_found(&text, None, mature, None)
-                        );
-                        (chars.works, games.works)
-                    } else {
-                        (Vec::new(), Vec::new())
-                    }
-                }
-            );
-            let mut out: Vec<(String, String)> = ani
-                .iter()
-                .map(|c| {
-                    let label = match c.main_work() {
-                        Some(w) => format!("{} — {w}", c.display_name()),
-                        None => c.display_name().to_string(),
-                    };
-                    (label, format!("id:{}", c.id))
-                })
-                .collect();
-            out.extend(prov.0.iter().map(|w| (provider_label(w), w.id.clone())));
-            // "شخصيات لعبة X": typing a game where a character is expected still leads somewhere.
-            out.extend(
-                prov.1
+                );
+                let mut out: Vec<(String, String)> = ani
                     .iter()
-                    .take(3)
-                    .map(|g| (i18n::roster_of_game(&g.title), format!("roster:{}", g.id))),
-            );
-            out
-        })
+                    .map(|c| {
+                        let label = match c.main_work() {
+                            Some(w) => format!("{} — {w}", c.display_name()),
+                            None => c.display_name().to_string(),
+                        };
+                        (label, format!("id:{}", c.id))
+                    })
+                    .collect();
+                out.extend(prov.0.iter().map(|w| (provider_label(w), w.id.clone())));
+                // "شخصيات لعبة X": typing a game where a character is expected still leads somewhere.
+                out.extend(
+                    prov.1
+                        .iter()
+                        .take(3)
+                        .map(|g| (i18n::roster_of_game(&g.title), format!("roster:{}", g.id))),
+                );
+                out
+            },
+        )
         .await;
     to_choices(items)
 }

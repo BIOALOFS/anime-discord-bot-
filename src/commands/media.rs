@@ -658,6 +658,58 @@ fn media_label(m: &Media) -> String {
     format!("{} ({})", m.title.main(), bits.join(" · "))
 }
 
+/// THE work search: autocomplete and submit both call this, so they share one query shape and one cache entry.
+pub async fn search_works(
+    api: &SafeAniList,
+    text: &str,
+    kind: MediaKind,
+    policy: ContentPolicy,
+) -> Result<Vec<Media>, crate::anilist::AniError> {
+    api.search_media(text.trim(), kind, 10, policy).await
+}
+
+/// What autocomplete answers for `q`: the search for two letters or more, the popular works of the kind for an
+/// empty or one-letter input (narrowed to the titles containing the letter when any do).
+pub async fn work_suggestions(
+    api: &SafeAniList,
+    kind: MediaKind,
+    q: &str,
+) -> Vec<(String, String)> {
+    let q = q.trim();
+    let to_items = |list: Vec<Media>| -> Vec<(String, String)> {
+        list.iter()
+            .map(|m| (media_label(m), format!("id:{}", m.id)))
+            .collect()
+    };
+    if q.chars().count() >= 2 {
+        return match search_works(api, q, kind, ContentPolicy::SAFE).await {
+            Ok(list) => to_items(list),
+            Err(e) => {
+                tracing::debug!("autocomplete search failed: {e}");
+                Vec::new()
+            }
+        };
+    }
+    let popular = match api.popular_media(kind, 10, ContentPolicy::SAFE).await {
+        Ok(list) => to_items(list),
+        Err(e) => {
+            tracing::debug!("autocomplete popular list failed: {e}");
+            return Vec::new();
+        }
+    };
+    let needle = q.to_lowercase();
+    let matching: Vec<_> = popular
+        .iter()
+        .filter(|(l, _)| !needle.is_empty() && l.to_lowercase().contains(&needle))
+        .cloned()
+        .collect();
+    if matching.is_empty() {
+        popular
+    } else {
+        matching
+    }
+}
+
 /// Autocomplete over AniList works of `kind` (values are `id:123`).
 pub async fn media_autocomplete(
     ctx: Context<'_>,
@@ -672,15 +724,14 @@ pub async fn media_autocomplete(
     let api = data.anilist.clone();
     let items = data
         .auto
-        .items(ctx.author().id.get(), label, partial, |q| async move {
-            match api.search_media(&q, kind, 10, ContentPolicy::SAFE).await {
-                Ok(list) => list
-                    .iter()
-                    .map(|m| (media_label(m), format!("id:{}", m.id)))
-                    .collect(),
-                Err(_) => Vec::new(),
-            }
-        })
+        .items_scoped(
+            ctx.author().id.get(),
+            label,
+            "",
+            partial,
+            0,
+            |q| async move { work_suggestions(&api, kind, &q).await },
+        )
         .await;
     to_choices(items)
 }
@@ -756,14 +807,11 @@ pub async fn run_media_with(
             Err(e) => return fail(ctx, e).await,
         }
     } else {
-        match api
-            .search_media(input.trim(), kind, 10, policy)
-            .await
-            .map(|v| {
-                v.into_iter()
-                    .filter(|m| filter.matches(m))
-                    .collect::<Vec<_>>()
-            }) {
+        match search_works(&api, &input, kind, policy).await.map(|v| {
+            v.into_iter()
+                .filter(|m| filter.matches(m))
+                .collect::<Vec<_>>()
+        }) {
             Ok(mut v) if v.len() == 1 => Mode::Card(Box::new(v.remove(0))),
             Ok(v) if v.is_empty() => {
                 // AniList has nothing: try the (opt-in) fallback catalogs for written works.
@@ -777,4 +825,81 @@ pub async fn run_media_with(
         }
     };
     session::run(ctx, MediaView::new(ctx, Source::Plain, mode).await).await
+}
+
+#[cfg(test)]
+mod suggestion_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn counting_api() -> (SafeAniList, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (searches, populars) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (s, p) = (searches.clone(), populars.clone());
+        let api = SafeAniList::with_fixture(move |query, vars| {
+            if vars.get("search").is_some() {
+                s.fetch_add(1, Ordering::SeqCst);
+            } else {
+                p.fetch_add(1, Ordering::SeqCst);
+                assert!(
+                    query.contains("POPULARITY_DESC"),
+                    "the popular list sorts by popularity"
+                );
+            }
+            let doc: serde_json::Value = serde_json::from_str(include_str!(
+                "../../tests/fixtures/anilist/search_media.json"
+            ))
+            .expect("fixture");
+            Ok(doc["data"].clone())
+        });
+        (api, searches, populars)
+    }
+
+    #[tokio::test]
+    async fn autocomplete_and_submit_share_one_search_and_one_cache_entry() {
+        let (api, searches, _) = counting_api();
+        let suggested = work_suggestions(&api, MediaKind::Anime, "Safe").await;
+        assert!(!suggested.is_empty());
+        // submit with the same text (different case and spacing) is a cache hit
+        let found = search_works(&api, "  safe ", MediaKind::Anime, ContentPolicy::SAFE)
+            .await
+            .expect("search");
+        assert!(!found.is_empty());
+        assert_eq!(
+            searches.load(Ordering::SeqCst),
+            1,
+            "one network call for both"
+        );
+        let ids: Vec<String> = found.iter().map(|m| format!("id:{}", m.id)).collect();
+        assert!(
+            suggested.iter().all(|(_, v)| ids.contains(v)),
+            "the same results"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_and_one_letter_input_show_the_popular_list() {
+        let (api, searches, populars) = counting_api();
+        let empty = work_suggestions(&api, MediaKind::Anime, "").await;
+        assert!(!empty.is_empty());
+        let one = work_suggestions(&api, MediaKind::Anime, "s").await;
+        assert!(!one.is_empty());
+        assert_eq!(
+            searches.load(Ordering::SeqCst),
+            0,
+            "no search below two letters"
+        );
+        assert_eq!(
+            populars.load(Ordering::SeqCst),
+            1,
+            "the popular list is cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_search_is_an_empty_answer_not_a_panic() {
+        let api = SafeAniList::with_fixture(|_, _| Err(crate::anilist::AniError::Busy));
+        assert!(work_suggestions(&api, MediaKind::Manga, "naruto")
+            .await
+            .is_empty());
+    }
 }

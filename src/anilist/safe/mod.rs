@@ -305,6 +305,52 @@ impl SafeAniList {
         Ok(filter_media(list, policy))
     }
 
+    /// The most popular safe works of `kind` (shared cache with nothing but the kind in its key).
+    pub async fn popular_media(
+        &self,
+        kind: MediaKind,
+        per_page: u8,
+        policy: ContentPolicy,
+    ) -> Result<Vec<Media>, AniError> {
+        let vars = adult_vars(
+            kind_vars(json!({"perPage": per_page.min(10)}), kind),
+            policy,
+        );
+        let key = format!("pm:{}:{per_page}:{}", kind.key(), policy.allow_adult);
+        let list: Vec<Media> = match self
+            .client
+            .get(Which::Search, key, queries::POPULAR_MEDIA, vars)
+            .await?
+        {
+            Some(doc) => parse(&doc, "/Page/media")?,
+            None => Vec::new(),
+        };
+        Ok(filter_media(list, policy))
+    }
+
+    /// The most-loved safe characters.
+    pub async fn popular_characters(
+        &self,
+        per_page: u8,
+        policy: ContentPolicy,
+    ) -> Result<Vec<Character>, AniError> {
+        let key = format!("pc:{per_page}");
+        let list: Vec<Character> = match self
+            .client
+            .get(
+                Which::Search,
+                key,
+                queries::POPULAR_CHARACTERS,
+                json!({"perPage": per_page.min(10)}),
+            )
+            .await?
+        {
+            Some(doc) => parse(&doc, "/Page/characters")?,
+            None => Vec::new(),
+        };
+        Ok(self.visible(list, policy).await)
+    }
+
     /// Search across anime and every written kind at once (profile favourites).
     pub async fn search_any(
         &self,

@@ -6,7 +6,7 @@ mod queries;
 mod safe;
 pub mod safety;
 
-pub use client::AniError;
+pub use client::{AniError, AUTOCOMPLETE};
 pub use safe::{
     kind_of, AiringEntry, AiringInfo, CharacterLookup, ContentPolicy, MediaFilter, MediaKind,
     SafeAniList, CAST_PAGE_SIZE,

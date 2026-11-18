@@ -14,7 +14,10 @@ use crate::{
     i18n,
     providers::CharacterSource,
     tmdb::{find, lookup, model as tm},
-    ui::{autocomplete::to_choices, session},
+    ui::{
+        autocomplete::{to_choices, MIN_CHARS},
+        session,
+    },
 };
 use poise::serenity_prelude as serenity;
 
@@ -299,12 +302,13 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
             let src = option_str(ctx, "source");
             let items = data
                 .auto
-                .items(
+                .items_scoped(
                     ctx.author().id.get(),
                     "game",
-                    &format!("{}|{partial}", src.clone().unwrap_or_default()),
-                    |q| async move {
-                        let text = q.rsplit('|').next().unwrap_or("").to_string();
+                    &format!("{}|{mature}", src.clone().unwrap_or_default()),
+                    partial,
+                    MIN_CHARS,
+                    |text| async move {
                         let found = if src.as_deref() == Some("VNDB") {
                             providers.search_visual_novels(&text, mature).await
                         } else {
