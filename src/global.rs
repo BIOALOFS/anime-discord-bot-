@@ -361,6 +361,7 @@ async fn search_params(
     guild: Option<i64>,
     cat: crate::search::Cat,
     ty: crate::search::Ty,
+    src: crate::search::Src,
 ) -> crate::search::Params {
     let games_on = match guild {
         Some(g) => crate::db::custom::games_enabled(&data.db, g)
@@ -374,6 +375,7 @@ async fn search_params(
         mature: mature_for(data, guild).await,
         games_on,
         live_wikis: true,
+        src,
     }
 }
 
@@ -383,10 +385,11 @@ pub async fn search_msg(
     guild: Option<i64>,
     cat: crate::search::Cat,
     ty: crate::search::Ty,
+    src: crate::search::Src,
     q: &str,
     page: usize,
 ) -> Msg {
-    let p = search_params(data, guild, cat, ty).await;
+    let p = search_params(data, guild, cat, ty, src).await;
     let overrides = guild_overrides(data, guild).await;
     let found =
         crate::search::gather(&crate::people::fetch::Sources::of(data), &overrides, p, q).await;
@@ -401,9 +404,10 @@ pub async fn search_or_open(
     user: i64,
     cat: crate::search::Cat,
     ty: crate::search::Ty,
+    src: crate::search::Src,
     q: &str,
 ) -> Msg {
-    let p = search_params(data, guild, cat, ty).await;
+    let p = search_params(data, guild, cat, ty, src).await;
     if crate::search::is_key(q) {
         return open_any(data, q.trim(), user, p.mature).await;
     }
@@ -923,7 +927,9 @@ pub async fn view_msg(data: &Data, press: &Press, user: i64, guild: Option<i64>)
         Press::ShowWork(k) | Press::PickWork(k) => work_msg(data, k, user, mature).await,
         Press::ShowChars(k, page) => roster_msg(data, k, page.unwrap_or(0), mature).await,
         Press::PickAny(k) => open_any(data, k, user, mature).await,
-        Press::SearchPage(cat, ty, page, q) => search_msg(data, guild, *cat, *ty, q, *page).await,
+        Press::SearchPage(cat, ty, src, page, q) => {
+            search_msg(data, guild, *cat, *ty, *src, q, *page).await
+        }
         Press::PickPerson(k) => crate::people::msgs::person_msg(data, k, mature, user).await,
         Press::ShowWorks(k, page) => {
             crate::people::msgs::works_msg(data, k, page.unwrap_or(0), mature).await

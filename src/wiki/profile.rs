@@ -184,7 +184,7 @@ pub async fn add_work(
         },
     )
     .await?;
-    Ok(works::add_work(pool, user, &key, "wiki").await?)
+    works::add_work(pool, user, &key, "wiki").await
 }
 
 #[cfg(test)]

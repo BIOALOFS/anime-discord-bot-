@@ -153,7 +153,13 @@ pub enum Press {
     /// Any item of the general search, by key: opens a work, character or person card.
     PickAny(String),
     /// A page button of a general-search result: category, type, page, text.
-    SearchPage(crate::search::Cat, crate::search::Ty, usize, String),
+    SearchPage(
+        crate::search::Cat,
+        crate::search::Ty,
+        crate::search::Src,
+        usize,
+        String,
+    ),
     /// The works of a person, and the page when it is a page button of that message.
     ShowWorks(String, Option<usize>),
     /// The crew of a work, and the page when it is a page button of that message.
@@ -192,7 +198,8 @@ pub fn parse(id: &str, values: &[String]) -> Option<Press> {
             .map(|v| Press::PickAny(v.clone()));
     }
     if id.starts_with(&format!("{SEARCH_PAGE}:")) {
-        return crate::search::parse_page_id(id).map(|(c, t, p, q)| Press::SearchPage(c, t, p, q));
+        return crate::search::parse_page_id(id)
+            .map(|(c, t, s, p, q)| Press::SearchPage(c, t, s, p, q));
     }
     if id == PICK_MORE {
         // The overflow menu carries the id of the button it stands for.

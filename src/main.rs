@@ -428,6 +428,36 @@ mod tests {
         assert!(!poise::builtins::create_application_commands(&cmds).is_empty());
     }
 
+    /// Every search command has an optional `source` that is backed by autocomplete, not by fixed choices: a wiki added
+    /// or removed later changes the options without registering the commands again.
+    #[test]
+    fn every_search_command_has_an_optional_autocompleted_source() {
+        let cmds = commands_with_cooldown(3);
+        for name in [
+            "anime", "manga", "novel", "drama", "series", "movie", "game", "search",
+        ] {
+            let c = cmds.iter().find(|c| c.name == name).expect(name);
+            let p = c
+                .parameters
+                .iter()
+                .find(|p| p.name == "source")
+                .unwrap_or_else(|| panic!("/{name} has no source"));
+            assert!(!p.required, "/{name}: source is optional");
+            assert!(
+                p.choices.is_empty(),
+                "/{name}: no fixed choices, so nothing to re-register when a wiki is added"
+            );
+            assert!(
+                p.autocomplete_callback.is_some(),
+                "/{name}: the options come from autocomplete"
+            );
+            assert!(
+                p.name_localizations.contains_key("ar"),
+                "/{name}: localized"
+            );
+        }
+    }
+
     /// Names of the top-level registered commands.
     fn top_level_names() -> Vec<String> {
         commands_with_cooldown(3)

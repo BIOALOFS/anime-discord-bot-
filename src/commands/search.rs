@@ -3,10 +3,11 @@
 
 use super::{profile::option_str, say_ephemeral};
 use crate::{
+    commands::category::{ac_source, SourceChoice},
     error::{Context, Error},
     i18n,
     people::fetch::Sources,
-    search::{self, Cat, Params, Ty},
+    search::{self, Cat, Params, Src, Ty},
     ui::autocomplete::{to_choices, MIN_CHARS},
 };
 use poise::serenity_prelude as serenity;
@@ -41,10 +42,19 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
         games_on,
         // Autocomplete may not wait for a wiki: it reads the local index only.
         live_wikis: false,
+        src: Src::from_choice(SourceChoice::parse(
+            option_str(ctx, "source").as_deref(),
+            &ctx.data().wikis.sources().await,
+        )),
     };
     let src = Sources::of(ctx.data());
     let overrides = overrides(ctx).await;
-    let scope = format!("{}|{}|{games_on}|{mature}", cat.key(), ty.key());
+    let scope = format!(
+        "{}|{}|{games_on}|{mature}|{}",
+        cat.key(),
+        ty.key(),
+        p.src.code()
+    );
     let items =
         ctx.data()
             .auto
@@ -83,6 +93,14 @@ pub async fn search(
     #[description_localized("ar", "النوع (الافتراضي: الكل)")]
     #[name_localized("ar", "النوع")]
     r#type: Option<Ty>,
+    #[description = "Source (optional): the main sources, all wikis or one wiki"]
+    #[description_localized(
+        "ar",
+        "المصدر (اختياري): المصادر الأساسية أو كل الويكيات أو ويكي بعينها"
+    )]
+    #[name_localized("ar", "المصدر")]
+    #[autocomplete = "ac_source"]
+    source: Option<String>,
 ) -> Result<(), Error> {
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -96,6 +114,10 @@ pub async fn search(
         ctx.author().id.get() as i64,
         category.unwrap_or(Cat::All),
         r#type.unwrap_or(Ty::All),
+        Src::from_choice(SourceChoice::parse(
+            source.as_deref(),
+            &ctx.data().wikis.sources().await,
+        )),
         &name,
     )
     .await;
