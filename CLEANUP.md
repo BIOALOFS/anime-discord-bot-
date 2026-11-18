@@ -103,3 +103,8 @@ What was removed and what was merged. Nothing here is reachable from a command a
   `wiki_snapshots`), the `source` option on every search command, the add/remove toggle on every card.
 - **Removed:** the "wiki pages cannot be added to a profile" limit and the "fallback only" wiki results; the `ac_name` source-less path.
 - **Still true:** the notification digests do not list wiki items separately; a wiki work is not merged with a same-title work of another source (they are only linked for button navigation).
+
+## Round 11.2 and 11.3
+- **Added:** `src/netfetch.rs`, `anilist/index.rs`, `Kind` mediums, migrations 0022 (wiki `work_category`, `kind_hint`) and 0023 (`media_index`, a cache excluded from the row-count check).
+- **Removed:** nothing was deleted: the audit found no unused dependency, no Giant Bomb code, no dead module. Kept as uncertain: the `#[allow(dead_code)]` items (`session.rs`, `main.rs`, `db/profile`, `db/works`, `commands/profile/items.rs`), and `.env`, which is tracked as the variables template (not read; make sure it holds no secret).
+- **Not done:** restoring a navigable profile session after a restart (sessions after a restart are only disabled by the sweeper); the "من رابط" choice is a `/edit` action with the link in "النص", not a modal; `kind_hint` has no owner-panel field yet (database column only).
