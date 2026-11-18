@@ -245,12 +245,20 @@ struct FallbackView {
     chosen: Option<usize>,
     cover: Option<Arc<Vec<u8>>>,
     from_list: bool,
+    /// The owner's wikis: a card that lacks a picture or a text is filled in place when the lookup arrives.
+    wikis: Arc<crate::wiki::service::Wikis>,
+    live: crate::wiki::fill::LiveFill,
 }
 
 impl FallbackView {
     async fn open(&mut self, i: usize) {
         self.chosen = Some(i);
         self.cover = self.providers.cover(&self.works[i]).await;
+        let w = &self.works[i];
+        if w.kind != Kind::Character {
+            self.live
+                .start(&self.wikis, &w.id, &w.title, None, crate::wiki::Kind::Game);
+        }
     }
 }
 
@@ -265,6 +273,19 @@ impl View for FallbackView {
 
     async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
         self.press(id, values).await
+    }
+
+    fn tick_after(&self) -> Option<std::time::Duration> {
+        self.live.pending().then_some(crate::wiki::fill::LIVE_POLL)
+    }
+
+    /// The wiki lookup finished: draw the card again with what it gave (the same message is edited).
+    async fn on_tick(&mut self) -> Outcome {
+        if self.live.poll().await {
+            Outcome::Update
+        } else {
+            Outcome::Keep
+        }
     }
 }
 
@@ -298,7 +319,12 @@ impl FallbackView {
                 // Over five buttons the link drops out (the card's title links to the source) and the crew button
                 // moves into the "المزيد" menu when needed.
                 let (rows, _links) = crate::components::card_rows(row);
-                let page = Page::embed(card(w, self.cover.is_some(), name).build(), rows);
+                let mut emb = card(w, self.cover.is_some(), name);
+                // What the wiki lookup gave (empty fields only), once it has arrived.
+                if let Some(fill) = &self.live.fill {
+                    crate::wiki::fill::enrich(&mut emb, self.cover.is_some(), fill);
+                }
+                let page = Page::embed(emb.build(), rows);
                 match &self.cover {
                     Some(c) => page.with_files(vec![serenity::CreateAttachment::bytes(
                         c.to_vec(),
@@ -406,6 +432,8 @@ pub async fn show_with_note(
         works,
         chosen: None,
         cover: None,
+        wikis: ctx.data().wikis.clone(),
+        live: crate::wiki::fill::LiveFill::new(),
     };
     if view.works.len() == 1 {
         view.open(0).await;

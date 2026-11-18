@@ -1028,7 +1028,8 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                         db,
                         user,
                     )
-                    .with_providers(providers, Vec::new());
+                    .with_providers(providers, Vec::new())
+                    .with_wikis(ctx.data().wikis.clone());
                     view.prepare().await;
                     view.load_cover().await;
                     view.set_notice(note);
@@ -1254,6 +1255,7 @@ pub async fn drama(
     name_localized("ar", "مسلسل"),
     description_localized("ar", "ابحث عن مسلسل أو شخصية، أو اختر واحدًا عشوائيًا")
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn series(
     ctx: Context<'_>,
     #[description = "What to do"]

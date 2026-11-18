@@ -71,6 +71,9 @@ pub struct CharacterView {
     roster: Option<Roster>,
     whisper: Option<Whisper>,
     providers: Option<Arc<Providers>>,
+    /// The owner's wikis: a provider character that lacks a picture or text is filled in place when the lookup arrives.
+    wikis: Option<Arc<crate::wiki::service::Wikis>>,
+    live: crate::wiki::fill::LiveFill,
     /// Game / visual-novel matches shown next to the AniList ones in the pick menu.
     extra: Vec<Work>,
     cover: Option<Arc<Vec<u8>>>,
@@ -181,6 +184,8 @@ impl CharacterView {
             roster: None,
             whisper: None,
             providers: None,
+            wikis: None,
+            live: crate::wiki::fill::LiveFill::new(),
             extra: Vec::new(),
             cover: None,
             from_parent: false,
@@ -212,6 +217,25 @@ impl CharacterView {
         self
     }
 
+    /// Let the view fill gaps of provider characters from the owner's wikis.
+    pub fn with_wikis(mut self, wikis: Arc<crate::wiki::service::Wikis>) -> Self {
+        self.wikis = Some(wikis);
+        self
+    }
+
+    /// Start looking up a wiki fill for the provider character on screen (the card renders without waiting).
+    fn start_fill(&mut self) {
+        if let (Mode::Provider(w), Some(wikis)) = (&self.mode, &self.wikis) {
+            self.live.start(
+                wikis,
+                &w.id,
+                &w.title,
+                w.subtitle.as_deref(),
+                crate::wiki::Kind::Character,
+            );
+        }
+    }
+
     async fn open_provider(&mut self, w: Work) {
         self.cover = match &self.providers {
             Some(p) => p.cover(&w).await,
@@ -219,6 +243,7 @@ impl CharacterView {
         };
         self.history.push(self.mode.clone());
         self.mode = Mode::Provider(Box::new(w));
+        self.start_fill();
     }
 
     /// The id used in the profile tables for the shown character (AniList id or encoded provider id).
@@ -331,6 +356,7 @@ impl CharacterView {
         if let (Mode::Provider(w), Some(p)) = (&self.mode, &self.providers) {
             self.cover = p.cover(w).await;
         }
+        self.start_fill();
     }
 
     fn fail(&mut self, e: AniError) -> Outcome {
@@ -350,6 +376,19 @@ impl CharacterView {
 }
 
 impl View for CharacterView {
+    fn tick_after(&self) -> Option<std::time::Duration> {
+        self.live.pending().then_some(crate::wiki::fill::LIVE_POLL)
+    }
+
+    /// The wiki lookup finished: draw the card again with what it gave (the same message is edited).
+    async fn on_tick(&mut self) -> Outcome {
+        if self.live.poll().await {
+            Outcome::Update
+        } else {
+            Outcome::Keep
+        }
+    }
+
     fn render(&self, enabled: bool) -> Page {
         if let Some(r) = &self.roster {
             return r.render(enabled);
@@ -474,10 +513,11 @@ impl View for CharacterView {
                             .label(format!("🔗 {}", w.source.credit())),
                     );
                 }
-                (
-                    super::fallback::card(w, self.cover.is_some(), name),
-                    vec![buttons(row)],
-                )
+                let mut emb = super::fallback::card(w, self.cover.is_some(), name);
+                if let Some(fill) = self.live.for_key(&w.id) {
+                    crate::wiki::fill::enrich(&mut emb, self.cover.is_some(), fill);
+                }
+                (emb, vec![buttons(row)])
             }
         };
         if !matches!(self.mode, Mode::Card(_)) {
@@ -973,8 +1013,9 @@ pub async fn search_character(
         }
         return match providers.character_by_key(name.trim(), mature).await {
             Some(w) => {
-                let mut view =
-                    new_view(Mode::Provider(Box::new(w))).with_providers(providers, Vec::new());
+                let mut view = new_view(Mode::Provider(Box::new(w)))
+                    .with_providers(providers, Vec::new())
+                    .with_wikis(ctx.data().wikis.clone());
                 view.load_cover().await;
                 session::run(ctx, view).await
             }
@@ -1070,7 +1111,9 @@ pub async fn search_character(
         (0, 1) => (Mode::Provider(Box::new(prov[0].clone())), Vec::new()),
         _ => (Mode::Pick(ani), prov),
     };
-    let mut view = new_view(mode).with_providers(providers, extra);
+    let mut view = new_view(mode)
+        .with_providers(providers, extra)
+        .with_wikis(ctx.data().wikis.clone());
     view.load_cover().await;
     view.set_notice(prov_found.partial_note());
     session::run(ctx, view).await
