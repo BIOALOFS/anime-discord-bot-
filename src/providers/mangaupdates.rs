@@ -31,7 +31,9 @@ impl CatalogProvider for MangaUpdates {
             .await
             .map_err(|e| ProviderError::Http(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Http(resp.status().to_string()));
+            return Err(ProviderError::Http(
+                crate::http_log::failed("mangaupdates", "series search", resp).await,
+            ));
         }
         let doc: Value = resp
             .json()
@@ -64,6 +66,7 @@ fn parse_one(rec: &Value) -> Option<Work> {
         })
         .unwrap_or_default();
     Some(Work {
+        work_key: None,
         id: format!("mu:{id}"),
         source: Source::MangaUpdates,
         kind: Kind::Manga,

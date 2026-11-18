@@ -105,6 +105,8 @@ pub struct Work {
     pub url: Option<String>,
     pub cover_url: Option<String>,
     pub genres: Vec<String>,
+    /// For characters: the provider key of the main game / novel (`igdb:55`, `vndb:v17`), for "أظهر العمل".
+    pub work_key: Option<String>,
 }
 
 impl Work {
@@ -120,6 +122,108 @@ impl Work {
             .then(|| encode_character_id(self.source, self.numeric_id()?))
             .flatten()
     }
+}
+
+/// One provider's answer: `None` when it was not asked.
+pub type Asked = Option<Result<Vec<Work>, ProviderError>>;
+
+/// Results of a query that goes to several game providers: what succeeded, and who did not answer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Found {
+    pub works: Vec<Work>,
+    /// Providers that were asked.
+    pub tried: Vec<Source>,
+    /// Providers that failed (their results are simply missing).
+    pub failed: Vec<Source>,
+}
+
+impl Found {
+    /// Combine per-provider results (`None` = not asked).
+    pub fn from_results<const N: usize>(results: [(Source, Asked); N]) -> Self {
+        let mut f = Self::default();
+        for (source, r) in results {
+            match r {
+                None => {}
+                Some(Ok(list)) => {
+                    f.tried.push(source);
+                    f.works.extend(list);
+                }
+                Some(Err(_)) => {
+                    f.tried.push(source);
+                    f.failed.push(source);
+                }
+            }
+        }
+        f
+    }
+
+    /// Every provider that was asked failed: only then is "the source does not respond" the right message.
+    pub fn all_failed(&self) -> bool {
+        !self.tried.is_empty() && self.failed.len() == self.tried.len()
+    }
+
+    /// A short Arabic note when some, but not all, providers failed.
+    pub fn partial_note(&self) -> Option<String> {
+        if self.failed.is_empty() || self.all_failed() {
+            return None;
+        }
+        let names = |v: &[Source]| {
+            v.iter()
+                .map(|s| s.prefix().to_uppercase())
+                .collect::<Vec<_>>()
+                .join(" و")
+        };
+        let ok: Vec<Source> = self
+            .tried
+            .iter()
+            .copied()
+            .filter(|s| !self.failed.contains(s))
+            .collect();
+        Some(format!(
+            "لم أستطع جلب نتائج من {} الآن، هذه نتائج {} فقط.",
+            names(&self.failed),
+            names(&ok)
+        ))
+    }
+
+    /// The message for an empty answer: unavailable when everything failed, otherwise "nothing found".
+    pub fn empty_message(&self, nothing: &'static str) -> &'static str {
+        if self.all_failed() {
+            crate::i18n::GAMES_DOWN
+        } else {
+            nothing
+        }
+    }
+}
+
+/// Tries per provider for a random pick (at least ten different offsets).
+pub const RANDOM_TRIES: usize = 12;
+
+/// `n` distinct random offsets inside the first 500 results: IGDB pages of 40 (offsets 0..=460), VNDB pages (1..=25).
+pub fn offset_plan(n: usize, provider: Source) -> Vec<u32> {
+    let mut all: Vec<u32> = if provider == Source::Igdb {
+        (0..12).map(|i| i * 40).collect()
+    } else {
+        (1..=25).collect()
+    };
+    for i in (1..all.len()).rev() {
+        all.swap(i, rand::random_range(0..=i));
+    }
+    all.truncate(n.min(all.len()));
+    all
+}
+
+/// A random candidate that is not one of the member's last five picks (remembered once chosen).
+pub fn pick_unseen(mut list: Vec<Work>, user: i64, scope: &str) -> Option<Work> {
+    for i in (1..list.len()).rev() {
+        list.swap(i, rand::random_range(0..=i));
+    }
+    let pos = list
+        .iter()
+        .position(|w| !crate::commands::picks::seen(user, scope, &w.id))?;
+    let w = list.swap_remove(pos);
+    crate::commands::picks::remember(user, scope, &w.id);
+    Some(w)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -180,17 +284,11 @@ pub struct Providers {
     mangaupdates: MangaUpdates,
     igdb: Option<Igdb>,
     vndb: Vndb,
-    igdb_down: std::sync::atomic::AtomicBool,
-    vndb_down: std::sync::atomic::AtomicBool,
     dex_limit: Limiter,
     mu_limit: Limiter,
     searches: Cache<String, Arc<Vec<Work>>>,
     covers: Cache<String, Arc<Vec<u8>>>,
 }
-
-/// Random picks: `(page spread, IGDB popularity floor)`. Each attempt looks at nearer pages with a lower floor, so a
-/// narrow filter or a sparse page still ends with an allowed game when one exists.
-const RANDOM_ATTEMPTS: [(u32, u32); 4] = [(30, 25), (10, 10), (3, 2), (0, 0)];
 
 fn per_second(n: u32) -> Limiter {
     RateLimiter::direct(Quota::per_second(
@@ -208,8 +306,6 @@ impl Providers {
                 .clone()
                 .map(|(id, secret)| Igdb::new(http.clone(), id, secret)),
             vndb: Vndb::new(http.clone()),
-            igdb_down: std::sync::atomic::AtomicBool::new(false),
-            vndb_down: std::sync::atomic::AtomicBool::new(false),
             http,
             cfg,
             // MangaDex allows about 5 requests/second per IP; stay below it.
@@ -284,252 +380,330 @@ impl Providers {
         .await
     }
 
-    /// Record whether the last call to a provider worked, so an empty answer after a failure is reported as "the
-    /// provider is unavailable" and not as "no games".
-    fn note<T>(&self, igdb: bool, r: Result<T, ProviderError>) -> Result<T, ProviderError> {
-        let flag = if igdb {
-            &self.igdb_down
-        } else {
-            &self.vndb_down
-        };
-        flag.store(r.is_err(), std::sync::atomic::Ordering::Relaxed);
-        if let Err(e) = &r {
-            tracing::warn!(
-                provider = if igdb { "igdb" } else { "vndb" },
-                "game provider failed: {e}"
-            );
+    /// A real lightweight IGDB request for the status panel (`false` when IGDB is off or failing).
+    pub async fn ping_igdb(&self) -> bool {
+        match &self.igdb {
+            Some(igdb) => igdb.ping().await,
+            None => false,
         }
-        r
     }
 
-    /// Did the last request of an enabled game provider fail (so an empty result means "unavailable")?
-    pub fn games_unavailable(&self) -> bool {
-        use std::sync::atomic::Ordering::Relaxed;
-        (self.igdb.is_some() && self.igdb_down.load(Relaxed))
-            || (self.cfg.vndb && self.vndb_down.load(Relaxed))
+    /// Like `cached`, but a failure is passed on (and never cached) so the caller can tell "nothing found" from "the
+    /// provider did not answer".
+    async fn cached_result<F, Fut>(&self, key: String, f: F) -> Result<Vec<Work>, ProviderError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<Work>, ProviderError>>,
+    {
+        if let Some(hit) = self.searches.get(&key).await {
+            return Ok((*hit).clone());
+        }
+        let out = f().await?;
+        if !out.is_empty() {
+            self.searches.insert(key, Arc::new(out.clone())).await;
+        }
+        Ok(out)
     }
 
     /// Games from IGDB, judged by content: a sexual signal always hides a game; horror and war only when
     /// `allow_mature` (the `mature-themes` setting) is off. Age ratings play no part.
-    pub async fn search_games(&self, query: &str, allow_mature: bool) -> Vec<Work> {
-        let (Some(igdb), true) = (&self.igdb, query.trim().chars().count() >= 2) else {
-            return Vec::new();
-        };
-        self.cached(
-            format!("igdb:g:{allow_mature}:{}", query.trim().to_lowercase()),
-            || async {
-                self.note(true, igdb.search_games(query, allow_mature).await)
-                    .unwrap_or_default()
-            },
-        )
-        .await
-    }
-
-    /// Platform-narrowed game search.
-    pub async fn search_games_on(
+    async fn igdb_games(
         &self,
         query: &str,
-        platform: &str,
-        allow_mature: bool,
-    ) -> Vec<Work> {
-        let (Some(igdb), true) = (&self.igdb, query.trim().chars().count() >= 2) else {
-            return Vec::new();
-        };
-        self.cached(
-            format!(
-                "igdb:gp:{allow_mature}:{}:{}",
-                platform.to_lowercase(),
-                query.trim().to_lowercase()
-            ),
-            || async {
-                self.note(
-                    true,
-                    igdb.search_games_on(query, platform, allow_mature).await,
-                )
-                .unwrap_or_default()
-            },
-        )
-        .await
-    }
-
-    /// A random well-known game (optionally on a platform) or visual novel. `source`: `igdb`, `vndb` or `None` for either.
-    /// The pick comes from popularity-sorted pages; a page whose games were all filtered out, or an offset past the end,
-    /// is not a failure: the next attempt looks at a nearer, then the first, page with a lower popularity floor.
-    pub async fn random_work(
-        &self,
-        source: Option<&str>,
         platform: Option<&str>,
-        allow_mature: bool,
-    ) -> Option<Work> {
-        let want_igdb = self.igdb.is_some() && source != Some("vndb");
-        let want_vndb = self.cfg.vndb && source != Some("igdb") && platform.is_none();
-        let use_igdb = match (want_igdb, want_vndb) {
-            (true, true) => rand::random_range(0..2) == 0,
-            (a, _) => a,
+        mature: bool,
+    ) -> Result<Vec<Work>, ProviderError> {
+        let Some(igdb) = &self.igdb else {
+            return Ok(Vec::new());
         };
-        for (spread, floor) in RANDOM_ATTEMPTS {
-            let list = if use_igdb {
-                let offset = rand::random_range(0..=spread) * 40;
-                match self
-                    .igdb
-                    .as_ref()?
-                    .popular_games(offset, floor, platform, allow_mature)
-                    .await
-                {
-                    Ok(l) => {
-                        let _ = self.note(true, Ok::<(), ProviderError>(()));
-                        l
-                    }
-                    Err(e) => {
-                        let _ = self.note::<()>(true, Err(e));
-                        return None;
-                    }
-                }
-            } else if want_vndb {
-                match self
-                    .vndb
-                    .popular_vns(rand::random_range(1..=spread.max(1)), allow_mature)
-                    .await
-                {
-                    Ok(l) => {
-                        let _ = self.note(false, Ok::<(), ProviderError>(()));
-                        l
-                    }
-                    Err(e) => {
-                        let _ = self.note::<()>(false, Err(e));
-                        return None;
-                    }
-                }
-            } else {
-                return None;
-            };
-            if !list.is_empty() {
-                let i = rand::random_range(0..list.len());
-                return list.into_iter().nth(i);
-            }
-        }
-        None
-    }
-
-    /// The characters of a game or visual novel from its provider key (`igdb:55`, `vndb:v17`).
-    pub async fn characters_of(&self, key: &str, allow_mature: bool) -> Vec<Work> {
-        let Some((prefix, tail)) = key.split_once(':') else {
-            return Vec::new();
-        };
-        self.cached(format!("roster:{key}:{allow_mature}"), || async {
-            match prefix {
-                "igdb" => match (&self.igdb, tail.parse::<i64>()) {
-                    (Some(igdb), Ok(id)) => self
-                        .note(true, igdb.characters_of(id, allow_mature).await)
-                        .unwrap_or_default(),
-                    _ => Vec::new(),
-                },
-                "vndb" if self.cfg.vndb && tail.starts_with('v') => self
-                    .note(false, self.vndb.characters_of(tail, allow_mature).await)
-                    .unwrap_or_default(),
-                _ => Vec::new(),
+        let key = format!(
+            "igdb:g:{mature}:{}:{}",
+            platform.unwrap_or("").to_lowercase(),
+            query.trim().to_lowercase()
+        );
+        self.cached_result(key, || async {
+            match platform {
+                Some(p) => igdb.search_games_on(query, p, mature).await,
+                None => igdb.search_games(query, mature).await,
             }
         })
         .await
     }
 
-    /// A random game or visual-novel character (same widening attempts as `random_work`).
-    pub async fn random_character(&self, source: Option<&str>, allow_mature: bool) -> Option<Work> {
-        let want_igdb = self.igdb.is_some() && source != Some("vndb");
-        for (spread, _) in RANDOM_ATTEMPTS {
-            let list = if want_igdb {
-                let offset = rand::random_range(0..=spread) * 40;
-                self.note(
-                    true,
-                    self.igdb
-                        .as_ref()?
-                        .popular_characters(offset, allow_mature)
-                        .await,
-                )
-                .ok()?
-            } else if self.cfg.vndb {
-                self.note(false, self.vndb.popular_characters(allow_mature).await)
-                    .ok()?
-            } else {
-                return None;
-            };
-            if !list.is_empty() {
-                let i = rand::random_range(0..list.len());
-                return list.into_iter().nth(i);
-            }
-        }
-        None
-    }
-
-    pub async fn search_visual_novels(&self, query: &str, allow_mature: bool) -> Vec<Work> {
-        if !self.cfg.vndb || query.trim().chars().count() < 2 {
-            return Vec::new();
-        }
-        self.cached(
-            format!("vndb:v:{allow_mature}:{}", query.trim().to_lowercase()),
-            || async {
-                self.note(false, self.vndb.search_vns(query, allow_mature).await)
-                    .unwrap_or_default()
-            },
+    async fn vndb_novels(&self, query: &str, mature: bool) -> Result<Vec<Work>, ProviderError> {
+        self.cached_result(
+            format!("vndb:v:{mature}:{}", query.trim().to_lowercase()),
+            || self.vndb.search_vns(query, mature),
         )
         .await
     }
 
-    /// Game and visual-novel characters.
-    pub async fn search_characters(&self, query: &str, allow_mature: bool) -> Vec<Work> {
+    async fn igdb_characters(&self, query: &str, mature: bool) -> Result<Vec<Work>, ProviderError> {
+        let Some(igdb) = &self.igdb else {
+            return Ok(Vec::new());
+        };
+        self.cached_result(
+            format!("igdb:c:{mature}:{}", query.trim().to_lowercase()),
+            || igdb.search_characters(query, mature),
+        )
+        .await
+    }
+
+    async fn vndb_characters(&self, query: &str, mature: bool) -> Result<Vec<Work>, ProviderError> {
+        self.cached_result(
+            format!("vndb:c:{mature}:{}", query.trim().to_lowercase()),
+            || self.vndb.search_characters(query, mature),
+        )
+        .await
+    }
+
+    /// Which providers a query goes to: `source` is `igdb`, `vndb` or `None` for both; a platform is an IGDB notion.
+    fn targets(&self, source: Option<&str>, platform: Option<&str>) -> (bool, bool) {
+        (
+            self.igdb.is_some() && source != Some("vndb"),
+            self.cfg.vndb && source != Some("igdb") && platform.is_none(),
+        )
+    }
+
+    /// Search games and visual novels. One provider failing never blocks the other: its name is in `failed`.
+    pub async fn search_games_found(
+        &self,
+        query: &str,
+        platform: Option<&str>,
+        mature: bool,
+        source: Option<&str>,
+    ) -> Found {
         if query.trim().chars().count() < 2 {
-            return Vec::new();
+            return Found::default();
         }
-        let mut out = Vec::new();
-        if let Some(igdb) = &self.igdb {
-            let found = self
-                .cached(
-                    format!("igdb:c:{allow_mature}:{}", query.trim().to_lowercase()),
-                    || async {
-                        self.note(true, igdb.search_characters(query, allow_mature).await)
-                            .unwrap_or_default()
+        let (igdb, vndb) = self.targets(source, platform);
+        let (g, v) = futures::join!(
+            async {
+                if igdb {
+                    Some(self.igdb_games(query, platform, mature).await)
+                } else {
+                    None
+                }
+            },
+            async {
+                if vndb {
+                    Some(self.vndb_novels(query, mature).await)
+                } else {
+                    None
+                }
+            }
+        );
+        Found::from_results([(Source::Igdb, g), (Source::Vndb, v)])
+    }
+
+    /// Search game and visual-novel characters (same partial-result rule).
+    pub async fn search_characters_found(&self, query: &str, mature: bool) -> Found {
+        if query.trim().chars().count() < 2 {
+            return Found::default();
+        }
+        let (g, v) = futures::join!(
+            async {
+                if self.igdb.is_some() {
+                    Some(self.igdb_characters(query, mature).await)
+                } else {
+                    None
+                }
+            },
+            async {
+                if self.cfg.vndb {
+                    Some(self.vndb_characters(query, mature).await)
+                } else {
+                    None
+                }
+            }
+        );
+        Found::from_results([(Source::Igdb, g), (Source::Vndb, v)])
+    }
+
+    /// Games for suggestions and autocomplete: whatever succeeded (a failure only shortens the list).
+    pub async fn search_games(&self, query: &str, mature: bool) -> Vec<Work> {
+        self.search_games_found(query, None, mature, Some("igdb"))
+            .await
+            .works
+    }
+
+    pub async fn search_visual_novels(&self, query: &str, mature: bool) -> Vec<Work> {
+        self.search_games_found(query, None, mature, Some("vndb"))
+            .await
+            .works
+    }
+
+    pub async fn search_characters(&self, query: &str, mature: bool) -> Vec<Work> {
+        self.search_characters_found(query, mature).await.works
+    }
+
+    /// A random well-known main game (optionally on a platform) or visual novel that passes the safety filter, is not one of
+    /// the member's last five picks and fits the filters. Candidate pages are popularity-sorted, inside the first 500
+    /// results, and cached; when a page has nothing usable the next of at least ten different offsets is tried before
+    /// giving up. A provider that fails is skipped and reported, never fatal for the other.
+    pub async fn random_work_found(
+        &self,
+        source: Option<&str>,
+        platform: Option<&str>,
+        mature: bool,
+        user: i64,
+    ) -> Found {
+        let (igdb, vndb) = self.targets(source, platform);
+        let mut order: Vec<Source> = [(igdb, Source::Igdb), (vndb, Source::Vndb)]
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, s)| s)
+            .collect();
+        if order.len() == 2 && rand::random::<bool>() {
+            order.swap(0, 1);
+        }
+        let mut found = Found::default();
+        for provider in order {
+            found.tried.push(provider);
+            let mut ok = true;
+            for (n, offset) in offset_plan(RANDOM_TRIES, provider).into_iter().enumerate() {
+                // The first six attempts want well-known games; later ones accept anything rated.
+                let floor = if n < 6 { 5 } else { 0 };
+                let page = match provider {
+                    Source::Igdb => match &self.igdb {
+                        Some(igdb) => {
+                            let key = format!(
+                                "igdb:rand:{mature}:{}:{offset}:{floor}",
+                                platform.unwrap_or("").to_lowercase()
+                            );
+                            self.cached_result(key, || {
+                                igdb.popular_games(offset, floor, platform, mature)
+                            })
+                            .await
+                        }
+                        None => Ok(Vec::new()),
                     },
-                )
-                .await;
-            out.extend(found);
+                    _ => {
+                        self.cached_result(format!("vndb:rand:{mature}:{offset}"), || {
+                            self.vndb.popular_vns(offset, mature)
+                        })
+                        .await
+                    }
+                };
+                match page {
+                    Ok(list) => {
+                        if let Some(w) = pick_unseen(list, user, "game") {
+                            found.works.push(w);
+                            return found;
+                        }
+                    }
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                found.failed.push(provider);
+            }
         }
-        if self.cfg.vndb {
-            let found = self
-                .cached(
-                    format!("vndb:c:{allow_mature}:{}", query.trim().to_lowercase()),
-                    || async {
-                        self.note(
-                            false,
-                            self.vndb.search_characters(query, allow_mature).await,
-                        )
-                        .unwrap_or_default()
+        found
+    }
+
+    /// A random game or visual-novel character (same widening, nothing to filter by platform).
+    pub async fn random_character_found(
+        &self,
+        source: Option<&str>,
+        mature: bool,
+        user: i64,
+    ) -> Found {
+        let (igdb, vndb) = self.targets(source, None);
+        let mut order: Vec<Source> = [(igdb, Source::Igdb), (vndb, Source::Vndb)]
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, s)| s)
+            .collect();
+        if order.len() == 2 && rand::random::<bool>() {
+            order.swap(0, 1);
+        }
+        let mut found = Found::default();
+        for provider in order {
+            found.tried.push(provider);
+            let mut ok = true;
+            for offset in offset_plan(RANDOM_TRIES, provider) {
+                let page = match provider {
+                    Source::Igdb => match &self.igdb {
+                        Some(igdb) => {
+                            self.cached_result(format!("igdb:randc:{mature}:{offset}"), || {
+                                igdb.popular_characters(offset, mature)
+                            })
+                            .await
+                        }
+                        None => Ok(Vec::new()),
                     },
-                )
-                .await;
-            out.extend(found);
+                    _ => {
+                        self.cached_result(format!("vndb:randc:{mature}:{offset}"), || {
+                            self.vndb.popular_characters(mature, offset)
+                        })
+                        .await
+                    }
+                };
+                match page {
+                    Ok(list) => {
+                        if let Some(w) = pick_unseen(list, user, "game-character") {
+                            found.works.push(w);
+                            return found;
+                        }
+                    }
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                found.failed.push(provider);
+            }
         }
-        out
+        found
+    }
+
+    /// The characters of a game or visual novel from its provider key (`igdb:55`, `vndb:v17`). A game that is hidden by
+    /// the safety rules has no roster; a failed request is an error, never an empty roster.
+    pub async fn characters_of(&self, key: &str, mature: bool) -> Result<Vec<Work>, ProviderError> {
+        let Some((prefix, tail)) = key.split_once(':') else {
+            return Ok(Vec::new());
+        };
+        self.cached_result(format!("roster:{key}:{mature}"), || async {
+            match prefix {
+                "igdb" => match (&self.igdb, tail.parse::<i64>()) {
+                    (Some(igdb), Ok(id)) => igdb.characters_of(id, mature).await,
+                    _ => Ok(Vec::new()),
+                },
+                "vndb" if self.cfg.vndb && tail.starts_with('v') => {
+                    self.vndb.characters_of(tail, mature).await
+                }
+                _ => Ok(Vec::new()),
+            }
+        })
+        .await
     }
 
     /// Re-find one game or visual novel from a provider-prefixed key (`igdb:55`, `vndb:v17`); `None` when the
     /// provider is off, the item is unknown or it fails the safety rules.
-    pub async fn work_by_key(&self, key: &str, allow_mature: bool) -> Option<Work> {
+    pub async fn work_by_key(&self, key: &str, mature: bool) -> Option<Work> {
         let (prefix, tail) = key.split_once(':')?;
         match prefix {
             "igdb" => self
-                .note(
-                    true,
-                    self.igdb
-                        .as_ref()?
-                        .game_by_id(tail.parse().ok()?, allow_mature)
-                        .await,
-                )
+                .igdb
+                .as_ref()?
+                .game_by_id(tail.parse().ok()?, mature)
+                .await
+                .map_err(|e| tracing::warn!("igdb game lookup failed: {e}"))
                 .ok()
                 .flatten(),
             "vndb"
                 if self.cfg.vndb && tail.starts_with('v') && tail[1..].parse::<u64>().is_ok() =>
             {
-                self.note(false, self.vndb.vn_by_id(tail, allow_mature).await)
+                self.vndb
+                    .vn_by_id(tail, mature)
+                    .await
+                    .map_err(|e| tracing::warn!("vndb lookup failed: {e}"))
                     .ok()
                     .flatten()
             }
@@ -538,19 +712,23 @@ impl Providers {
     }
 
     /// Re-find one character from an autocomplete value like `igdb:c55` / `vndb:c123`.
-    pub async fn character_by_key(&self, key: &str, allow_mature: bool) -> Option<Work> {
+    pub async fn character_by_key(&self, key: &str, mature: bool) -> Option<Work> {
         let (prefix, tail) = key.split_once(':')?;
         let n: i64 = tail.trim_start_matches('c').parse().ok()?;
         match prefix {
             "igdb" => self
-                .note(
-                    true,
-                    self.igdb.as_ref()?.character_by_id(n, allow_mature).await,
-                )
+                .igdb
+                .as_ref()?
+                .character_by_id(n, mature)
+                .await
+                .map_err(|e| tracing::warn!("igdb character lookup failed: {e}"))
                 .ok()
                 .flatten(),
             "vndb" if self.cfg.vndb => self
-                .note(false, self.vndb.character_by_id(n, allow_mature).await)
+                .vndb
+                .character_by_id(n, mature)
+                .await
+                .map_err(|e| tracing::warn!("vndb character lookup failed: {e}"))
                 .ok()
                 .flatten(),
             _ => None,

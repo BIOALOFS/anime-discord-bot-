@@ -187,8 +187,10 @@ impl AniListClient {
                 return Err(AniError::Api(msg.to_string()));
             }
             if !status.is_success() {
+                crate::ops::health::err("anilist", &status.to_string());
                 return Err(AniError::Http(status.to_string()));
             }
+            crate::ops::health::ok("anilist");
             return Ok(doc["data"].take());
         }
         Err(AniError::Busy)

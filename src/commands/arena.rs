@@ -687,6 +687,8 @@ impl Arena {
             {
                 tracing::warn!("weekly score not saved: {e}");
             }
+            // Badges for event wins are awarded quietly (the board is public; the badge appears on the profile).
+            crate::features::badges::award(&self.pool, user.get() as i64).await;
         }
     }
 

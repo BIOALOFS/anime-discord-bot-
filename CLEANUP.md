@@ -60,3 +60,11 @@ What was removed and what was merged. Nothing here is reachable from a command a
 - **Migration 0016 (additive only):** `item_status`, `notification_settings`, `notification_prefs`, `notification_exclusions`, `drama_country_overrides`,
   `notified_events`, new columns on `reminders` (`work_key`, `category`, `notify_days`), `guild_settings` (`timezone`, `spoiler_guard`, `tmdb_region`)
   and `chapter_settings` (`digest_hours`, `digest_at`). Nothing is dropped or rebuilt, and the automatic backup runs first.
+
+## Round 8
+- **Removed:** the old computed profile badges (`ui/styles.rs`, `BADGE_*` strings, replaced by stored badges), `no_popularity` (character cards omit the line), the
+  old per-call provider failure flags (`games_unavailable`), the separate game-search helpers, and every use of the invalid VNDB field `releases.minage`.
+- **Guards:** a test checks every field of every VNDB request against the documented field lists; tests check the exact IGDB and VNDB bodies; another covers
+  partial provider results and the random-pick offsets. `.env.example` is now the tracked `.env` template (as on `main`); `OWNER_ID` was added to it.
+- **Migration 0017:** `mature_games` renamed to `mature_themes`. **Migration 0018 (additive):** `bot_state`, `guild_features`, `daily_posts`, `polls`, `poll_votes`,
+  `badges`, `role_permissions`, `watch_nights`, `watch_night_rsvps`, `usage_stats`.

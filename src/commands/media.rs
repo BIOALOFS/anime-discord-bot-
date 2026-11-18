@@ -422,7 +422,11 @@ impl MediaView {
                 works::upsert_media_cache(&pool, &media_cache_row(&m, super::profile::now()))
                     .await?;
                 works::add_work(&pool, user, &key, &kind).await?;
-                Ok((i18n::WORK_ADDED.to_string(), true))
+                Ok((
+                    crate::features::badges::announce(&pool, user, i18n::WORK_ADDED.to_string())
+                        .await,
+                    true,
+                ))
             }
         }
         .await;

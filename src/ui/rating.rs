@@ -82,11 +82,6 @@ pub fn vndb(rating: Option<f64>, votes: Option<i64>) -> String {
     format!("التقييم: {r}")
 }
 
-/// Characters of IGDB and VNDB have no popularity data.
-pub fn no_popularity() -> String {
-    format!("الشعبية: {NONE}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +133,5 @@ mod tests {
         assert_eq!(igdb_game(None, None, None), "التقييم: — · المتابعون: —");
         assert_eq!(vndb(Some(82.0), Some(5000)), "التقييم: 82/100 (5,000 صوت)");
         assert_eq!(vndb(None, None), "التقييم: —");
-        assert_eq!(no_popularity(), "الشعبية: —");
     }
 }

@@ -6,6 +6,5 @@ pub mod pagination;
 pub mod rating;
 pub mod select;
 pub mod session;
-pub mod styles;
 pub mod text;
 pub mod v2;

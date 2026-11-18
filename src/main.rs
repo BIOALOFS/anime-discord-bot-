@@ -5,14 +5,18 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod anilist;
 mod chapters;
 mod commands;
+use std::str::FromStr;
 mod components;
 mod config;
 mod db;
 mod error;
 mod events;
+mod features;
 mod feed;
 mod global;
 mod guild;
+mod http_log;
+mod ops;
 pub mod texts;
 /// The one module of user-facing text; `i18n` is kept as its short alias across the code.
 pub use texts as i18n;
@@ -36,6 +40,7 @@ pub struct Data {
     pub guilds: std::sync::Arc<guild::GuildStore>,
     pub providers: std::sync::Arc<providers::Providers>,
     pub tmdb: std::sync::Arc<tmdb::Tmdb>,
+    pub ops: std::sync::Arc<ops::Ops>,
 }
 
 #[tokio::main]
@@ -46,6 +51,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting anpot");
+    for (name, enabled, why) in config.provider_report() {
+        tracing::info!(provider = name, enabled, reason = why, "provider");
+    }
     let pool = db::connect(&config.database_url).await?;
     let anilist = std::sync::Arc::new(anilist::SafeAniList::new(&config)?);
     let token = config.discord_token.expose().to_string();
@@ -61,6 +69,12 @@ async fn main() -> anyhow::Result<()> {
     // One TMDB client for commands and for the background reminders (shared cache and rate limit).
     let tmdb_shared = std::sync::Arc::new(tmdb::Tmdb::new(feed_web.clone(), tmdb_cfg.clone()));
     let feed_tmdb = tmdb_shared.clone();
+    let db_path = sqlx::sqlite::SqliteConnectOptions::from_str(&config.database_url)
+        .map(|o| o.get_filename().to_path_buf())
+        .unwrap_or_else(|_| std::path::PathBuf::from("bot.db"));
+    let ops_state = ops::Ops::load(pool.clone(), config.owner_id, db_path).await;
+    let setup_ops = ops_state.clone();
+    let feed_ops = ops_state.clone();
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -72,6 +86,16 @@ async fn main() -> anyhow::Result<()> {
         })
         .setup(move |ctx, ready, framework| {
             Box::pin(async move {
+                // The owner is the application's owner (or OWNER_ID): the status, backup, stats and maintenance tools.
+                match ctx.http.get_current_application_info().await {
+                    Ok(info) => {
+                        let owner = info.team.as_ref().map(|t| t.owner_user_id).or(info.owner.as_ref().map(|u| u.id));
+                        if let Some(o) = owner {
+                            setup_ops.set_owner_if_unknown(o.get());
+                        }
+                    }
+                    Err(e) => tracing::warn!("could not read the application info (owner tools need OWNER_ID): {e}"),
+                }
                 let cmds = &framework.options().commands;
                 // Registration overwrites the whole list in its scope, so removed commands disappear.
                 match dev_guild {
@@ -97,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
                     guilds: std::sync::Arc::new(guild::GuildStore::new(pool.clone())),
                     providers: std::sync::Arc::new(providers::Providers::new(http.clone(), provider_cfg.clone())),
                     tmdb: tmdb_shared.clone(),
+                    ops: setup_ops.clone(),
                     renderer: std::sync::Arc::new(render::Renderer::new(http.clone())),
                     http,
                     db: pool,
@@ -125,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
             last_chapter_poll: std::sync::atomic::AtomicI64::new(0),
             tmdb: feed_tmdb,
             last_tmdb_poll: std::sync::atomic::AtomicI64::new(0),
+            ops: feed_ops,
         },
         stop_rx,
     ));

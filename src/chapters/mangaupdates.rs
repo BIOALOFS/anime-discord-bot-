@@ -40,8 +40,11 @@ impl ChapterSource for MangaUpdates {
             .map_err(|e| SourceError::Http(e.without_url().to_string()))?;
         tokio::time::sleep(Duration::from_secs(1)).await;
         if !resp.status().is_success() {
-            return Err(SourceError::Http(resp.status().to_string()));
+            return Err(SourceError::Http(
+                crate::http_log::failed("mangaupdates", "releases", resp).await,
+            ));
         }
+        crate::ops::health::ok("mangaupdates");
         let doc: Value = resp
             .json()
             .await

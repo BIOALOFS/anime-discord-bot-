@@ -46,6 +46,9 @@ pub struct Config {
     pub igdb_client_id: Option<String>,
     #[serde(default)]
     pub igdb_client_secret: Option<Secret>,
+    /// Optional: the Discord user id of the owner (otherwise the application owner is used).
+    #[serde(default, deserialize_with = "opt_u64")]
+    pub owner_id: Option<u64>,
     /// VNDB (visual novels) needs no key; set `ENABLE_VNDB=false` to switch it off.
     #[serde(default = "d_true", deserialize_with = "opt_bool_true")]
     pub enable_vndb: bool,
@@ -145,6 +148,57 @@ impl Config {
         }
     }
 
+    /// One line per provider for the startup log: `(name, enabled, reason)`. No secrets, only which one is missing.
+    pub fn provider_report(&self) -> Vec<(&'static str, bool, &'static str)> {
+        let blank = |s: Option<&str>| s.map(str::trim).unwrap_or("").is_empty();
+        let igdb_id = blank(self.igdb_client_id.as_deref());
+        let igdb_secret = blank(self.igdb_client_secret.as_ref().map(|s| s.expose()));
+        let tmdb_key = blank(self.tmdb_api_key.as_ref().map(|s| s.expose()))
+            && blank(self.tmdb_read_token.as_ref().map(|s| s.expose()));
+        vec![
+            ("anilist", true, "always on"),
+            (
+                "tmdb",
+                self.enable_tmdb && !tmdb_key,
+                if !self.enable_tmdb {
+                    "ENABLE_TMDB is false"
+                } else if tmdb_key {
+                    "TMDB_API_KEY / TMDB_READ_TOKEN missing"
+                } else {
+                    "key present"
+                },
+            ),
+            (
+                "igdb",
+                !igdb_id && !igdb_secret,
+                match (igdb_id, igdb_secret) {
+                    (true, true) => "IGDB_CLIENT_ID and IGDB_CLIENT_SECRET missing",
+                    (true, false) => "IGDB_CLIENT_ID missing",
+                    (false, true) => "IGDB_CLIENT_SECRET missing",
+                    _ => "credentials present",
+                },
+            ),
+            (
+                "vndb",
+                self.enable_vndb,
+                if self.enable_vndb {
+                    "no key needed"
+                } else {
+                    "ENABLE_VNDB is false"
+                },
+            ),
+            (
+                "fallback (mangadex, mangaupdates)",
+                self.enable_fallback_providers,
+                if self.enable_fallback_providers {
+                    "ENABLE_FALLBACK_PROVIDERS is true"
+                } else {
+                    "ENABLE_FALLBACK_PROVIDERS is false"
+                },
+            ),
+        ]
+    }
+
     /// TMDB settings: blank keys count as missing, `ENABLE_TMDB=false` switches it off.
     pub fn tmdb_config(&self) -> crate::tmdb::Config {
         let clean = |s: &Option<Secret>| {
@@ -191,6 +245,7 @@ impl Config {
             enable_fallback_providers: false,
             igdb_client_id: None,
             igdb_client_secret: None,
+            owner_id: None,
             enable_vndb: false,
             tmdb_api_key: None,
             tmdb_read_token: None,
@@ -212,5 +267,73 @@ mod tests {
         let shown = format!("{cfg:?}");
         assert!(!shown.contains("test\"") && shown.contains("<redacted>"));
         assert_eq!(cfg.discord_token.expose(), "test");
+    }
+
+    #[test]
+    fn the_startup_report_names_why_a_provider_is_off_without_secrets() {
+        let mut cfg = Config::for_tests();
+        cfg.enable_tmdb = true;
+        let r = cfg.provider_report();
+        let line = |n: &str| {
+            r.iter()
+                .find(|(name, ..)| *name == n)
+                .copied()
+                .expect("provider")
+        };
+        assert!(line("anilist").1);
+        assert_eq!(
+            (line("tmdb").1, line("tmdb").2),
+            (false, "TMDB_API_KEY / TMDB_READ_TOKEN missing")
+        );
+        assert_eq!(
+            (line("igdb").1, line("igdb").2),
+            (false, "IGDB_CLIENT_ID and IGDB_CLIENT_SECRET missing")
+        );
+        assert!(!line("vndb").1);
+        cfg.igdb_client_id = Some("id".into());
+        assert_eq!(
+            cfg.provider_report()
+                .iter()
+                .find(|p| p.0 == "igdb")
+                .map(|p| p.2),
+            Some("IGDB_CLIENT_SECRET missing")
+        );
+        cfg.igdb_client_secret = Some(Secret("hidden-secret-value".into()));
+        cfg.tmdb_read_token = Some(Secret("hidden-token".into()));
+        cfg.enable_tmdb = true;
+        let all = format!("{:?}", cfg.provider_report());
+        assert!(
+            cfg.provider_report().iter().filter(|p| p.1).count() >= 3 && !all.contains("hidden"),
+            "{all}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    #[test]
+    fn a_blank_or_missing_owner_id_means_unset_and_a_number_is_read() {
+        let load = |pairs: &[(&str, &str)]| {
+            envy::from_iter::<_, Config>(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        };
+        assert_eq!(
+            load(&[("DISCORD_TOKEN", "t"), ("OWNER_ID", "")])
+                .expect("blank")
+                .owner_id,
+            None
+        );
+        assert_eq!(
+            load(&[("DISCORD_TOKEN", "t")]).expect("missing").owner_id,
+            None
+        );
+        assert_eq!(
+            load(&[("DISCORD_TOKEN", "t"), ("OWNER_ID", " 123 ")])
+                .expect("number")
+                .owner_id,
+            Some(123)
+        );
+        assert!(load(&[("DISCORD_TOKEN", "t"), ("OWNER_ID", "abc")]).is_err());
     }
 }

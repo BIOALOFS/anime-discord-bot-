@@ -9,7 +9,6 @@ use crate::{
     commands::buttons,
     db::{
         custom::{self, StoredImage},
-        game,
         profile::{self as pdb, Profile},
         suggest, works,
     },
@@ -20,7 +19,7 @@ use crate::{
         pagination::{apply_nav, parse_nav, NAV_FIRST, NAV_LAST, NAV_NEXT, NAV_PREV},
         select::{select_row, Choice},
         session::{Outcome, Page, View},
-        styles, v2,
+        v2,
     },
 };
 use poise::serenity_prelude as serenity;
@@ -62,7 +61,7 @@ pub struct ProfileView {
     pub total: i64,
     pub counts: (i64, i64),
     pub suggestions: i64,
-    pub badges: Vec<styles::Badge>,
+    pub badges: Vec<&'static str>,
     /// The page (window of 25) that contains `index`.
     pub window: Vec<Item>,
     pub window_start: usize,
@@ -230,11 +229,7 @@ impl ProfileView {
             works::count(&self.pool, self.owner).await?,
         );
         self.counts = (chars, works_n);
-        let watched = works::count_filtered(&self.pool, self.owner, None, Some("watched")).await?;
-        let correct = game::total_correct(&self.pool, self.owner)
-            .await
-            .unwrap_or(0);
-        self.badges = styles::badges(chars, works_n, watched, correct);
+        self.badges = crate::features::badges::line(&self.pool, self.owner).await;
         self.suggestions = suggest::count_everywhere(&self.pool, self.owner)
             .await
             .unwrap_or(0);
@@ -342,13 +337,7 @@ impl ProfileView {
         }
         lines.push(self.details_line());
         if !self.badges.is_empty() {
-            lines.push(
-                self.badges
-                    .iter()
-                    .map(|b| b.label)
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-            );
+            lines.push(self.badges.join(" · "));
         }
         lines.join("\n")
     }

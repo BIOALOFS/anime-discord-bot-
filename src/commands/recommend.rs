@@ -95,7 +95,98 @@ async fn seeds_of(pool: &SqlitePool, user: i64) -> Result<Vec<i64>, Error> {
     Ok(out)
 }
 
+/// Where the recommendations come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, poise::ChoiceParameter)]
+pub enum RecSource {
+    #[name = "profile"]
+    #[name_localized("ar", "من بروفايلي")]
+    Profile,
+    #[name = "general"]
+    #[name_localized("ar", "عامة")]
+    General,
+}
+
+/// Without a choice: from the profile when it has at least three items, otherwise general.
+pub fn default_source(profile_items: i64) -> RecSource {
+    if profile_items >= 3 {
+        RecSource::Profile
+    } else {
+        RecSource::General
+    }
+}
+
+/// A show or film recommended through TMDB.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TmdbCandidate {
+    pub key: String,
+    pub title: String,
+    pub year: Option<i32>,
+    pub rating: Option<f32>,
+    /// Titles of the profile items that led here.
+    pub because: Vec<String>,
+}
+
+/// Merge the recommendations of several seeds: one entry per work, remembering every seed that pointed at it; works
+/// already in the profile (or the seeds themselves) are dropped. Most pointed-at first, then best rated.
+pub fn merge_tmdb(
+    per_seed: Vec<(String, Vec<crate::tmdb::Work>)>,
+    exclude: &std::collections::HashSet<String>,
+) -> Vec<TmdbCandidate> {
+    let mut by_key: HashMap<String, TmdbCandidate> = HashMap::new();
+    for (seed_title, list) in per_seed {
+        for w in list {
+            let key = w.key();
+            if exclude.contains(&key) {
+                continue;
+            }
+            by_key
+                .entry(key.clone())
+                .and_modify(|c| c.because.push(seed_title.clone()))
+                .or_insert(TmdbCandidate {
+                    key,
+                    title: w.title.clone(),
+                    year: w.year,
+                    rating: w.rating,
+                    because: vec![seed_title.clone()],
+                });
+        }
+    }
+    let mut out: Vec<TmdbCandidate> = by_key.into_values().collect();
+    out.sort_by(|a, b| {
+        b.because
+            .len()
+            .cmp(&a.because.len())
+            .then(b.rating.unwrap_or(0.0).total_cmp(&a.rating.unwrap_or(0.0)))
+            .then(a.key.cmp(&b.key))
+    });
+    out
+}
+
+/// TMDB works in a member's profile: `(key, title)` of the first few (the seeds), and every key (to exclude).
+async fn tmdb_profile(
+    pool: &SqlitePool,
+    user: i64,
+) -> Result<(Vec<(String, String)>, std::collections::HashSet<String>), sqlx::Error> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT pw.work_id, mc.title_romaji FROM profile_works pw LEFT JOIN media_cache mc ON mc.work_id = pw.work_id WHERE pw.user_id = ?1 AND pw.work_id LIKE 'tmdb-%' ORDER BY pw.position",
+    )
+    .bind(user)
+    .fetch_all(pool)
+    .await?;
+    let all = rows.iter().map(|(k, _)| k.clone()).collect();
+    let seeds = rows
+        .into_iter()
+        .take(4)
+        .map(|(k, t)| (k.clone(), t.unwrap_or(k)))
+        .collect();
+    Ok((seeds, all))
+}
+
 struct RecView {
+    /// Shows and films from TMDB (opened from a menu as new messages).
+    tmdb: Vec<TmdbCandidate>,
+    /// General (not profile based) recommendations.
+    general: bool,
     api: Arc<SafeAniList>,
     policy: ContentPolicy,
     /// The work card opened from the dropdown; Back returns to the list.
@@ -111,6 +202,9 @@ struct RecView {
 
 impl RecView {
     fn why(&self, c: &Candidate) -> String {
+        if self.general {
+            return i18n::REC_GENERAL_WHY.to_string();
+        }
         let first = c.because.first().map_or("", String::as_str);
         if self.together {
             i18n::rec_why_together(first)
@@ -171,8 +265,7 @@ impl View for RecView {
                 i18n::POWERED_BY,
                 self.page + 1,
                 pages
-            ))
-            .build();
+            ));
         let choices: Vec<Choice> = slice
             .iter()
             .map(|c| Choice {
@@ -199,7 +292,43 @@ impl View for RecView {
             close_button(enabled),
         ]));
         rows.push(nav_row(self.page, pages, enabled));
-        Page::embed(embed, rows)
+        // Shows and films come from TMDB: listed in the embed and opened from their own menu (new messages).
+        let mut embed = embed;
+        if !self.tmdb.is_empty() {
+            let lines: Vec<String> = self
+                .tmdb
+                .iter()
+                .take(5)
+                .map(|t| {
+                    format!(
+                        "• **{}**{} · {}",
+                        crate::ui::embeds::fit(&t.title, 60),
+                        t.year.map(|y| format!(" ({y})")).unwrap_or_default(),
+                        if self.general {
+                            i18n::REC_GENERAL_WHY.to_string()
+                        } else {
+                            i18n::rec_why(t.because.first().map_or("", String::as_str))
+                        }
+                    )
+                })
+                .collect();
+            embed
+                .fields
+                .push((i18n::REC_TMDB_FIELD.to_string(), lines.join("\n"), false));
+            let items: Vec<(String, String)> = self
+                .tmdb
+                .iter()
+                .take(25)
+                .map(|t| (crate::ui::embeds::fit(&t.title, 100), t.key.clone()))
+                .collect();
+            if rows.len() < 5 {
+                rows.extend(crate::components::work_menu(
+                    i18n::REC_TMDB_PLACEHOLDER,
+                    &items,
+                ));
+            }
+        }
+        Page::embed(embed.build(), rows)
     }
 
     async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
@@ -337,11 +466,11 @@ async fn gather(
     Ok((by_id.into_values().collect(), taste))
 }
 
-/// Suggestions from your favourites; with `user`, suggestions you would both like.
+/// Suggestions from your profile (or general ones); with `user`, suggestions you would both like.
 #[poise::command(
     slash_command,
     name_localized("ar", "توصية"),
-    description_localized("ar", "توصيات من مفضلاتك، أو مشتركة مع عضو آخر")
+    description_localized("ar", "توصيات من بروفايلك أو عامة، أو مشتركة مع عضو آخر")
 )]
 pub async fn recommend(
     ctx: Context<'_>,
@@ -349,6 +478,10 @@ pub async fn recommend(
     #[description_localized("ar", "عضو آخر للحصول على توصيات مشتركة")]
     #[name_localized("ar", "المستخدم")]
     user: Option<serenity::User>,
+    #[description = "Where recommendations come from: your profile or general"]
+    #[description_localized("ar", "مصدر التوصيات: من بروفايلك أو عامة")]
+    #[name_localized("ar", "المصدر")]
+    source: Option<RecSource>,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let (pool, api, pol) = (
@@ -361,7 +494,14 @@ pub async fn recommend(
         .as_ref()
         .map(|u| u.id.get() as i64)
         .filter(|o| *o != me);
-    let mut seeds = seeds_of(&pool, me).await?;
+    let items_in_profile = pdb::count(&pool, me).await? + works::count(&pool, me).await?;
+    let source = source.unwrap_or_else(|| default_source(items_in_profile));
+    let general = source == RecSource::General && other.is_none();
+    let mut seeds = if general {
+        Vec::new()
+    } else {
+        seeds_of(&pool, me).await?
+    };
     if let Some(o) = other {
         for s in seeds_of(&pool, o).await? {
             if !seeds.contains(&s) {
@@ -369,12 +509,49 @@ pub async fn recommend(
             }
         }
     }
-    if seeds.is_empty() {
+    // Shows and films: TMDB recommendations of the profile's own TMDB items (yours, and theirs together).
+    let (mut tmdb_seeds, mut tmdb_known) = (Vec::new(), std::collections::HashSet::new());
+    if !general {
+        for uid in std::iter::once(me).chain(other) {
+            let (s, all) = tmdb_profile(&pool, uid).await?;
+            tmdb_seeds.extend(s);
+            tmdb_known.extend(all);
+        }
+    }
+    if seeds.is_empty() && tmdb_seeds.is_empty() && !general {
         return say_ephemeral(ctx, i18n::REC_NO_SEEDS).await;
     }
-    let (cands, taste) = match gather(&api, pol, &seeds).await {
-        Ok(v) => v,
-        Err(e) => return fail(ctx, e).await,
+    let tmdb = ctx.data().tmdb.clone();
+    let mut tmdb_items = Vec::new();
+    if tmdb.enabled() {
+        if general {
+            let mut list = Vec::new();
+            for kind in [crate::tmdb::Kind::Tv, crate::tmdb::Kind::Movie] {
+                list.extend(tmdb.discover(kind, &[], rand::random_range(1..=5)).await);
+            }
+            tmdb_items = merge_tmdb(vec![(String::new(), list)], &tmdb_known);
+        } else {
+            let mut per_seed = Vec::new();
+            for (key, title) in &tmdb_seeds {
+                if let Some((kind, id)) = crate::tmdb::model::parse_work_key(key) {
+                    per_seed.push((title.clone(), tmdb.recommendations(kind, id).await));
+                }
+            }
+            let mut exclude = tmdb_known.clone();
+            exclude.extend(tmdb_seeds.iter().map(|(k, _)| k.clone()));
+            tmdb_items = merge_tmdb(per_seed, &exclude);
+        }
+    }
+    let (cands, taste) = if general {
+        match general_candidates(&api, pol).await {
+            Ok(v) => v,
+            Err(e) => return fail(ctx, e).await,
+        }
+    } else {
+        match gather(&api, pol, &seeds).await {
+            Ok(v) => v,
+            Err(e) => return fail(ctx, e).await,
+        }
     };
     // Already yours (and, together, theirs), hidden, or one of the seeds.
     let mut exclude: Vec<i64> = seeds.clone();
@@ -385,12 +562,14 @@ pub async fn recommend(
         }
     }
     let items = rank(cands, &taste, &exclude);
-    if items.is_empty() {
+    if items.is_empty() && tmdb_items.is_empty() {
         return say_ephemeral(ctx, i18n::REC_NONE).await;
     }
     session::run(
         ctx,
         RecView {
+            tmdb: tmdb_items,
+            general,
             api: ctx.data().anilist.clone(),
             policy: policy(ctx),
             sub: None,
@@ -404,6 +583,28 @@ pub async fn recommend(
         },
     )
     .await
+}
+
+/// General recommendations: a handful of well-liked, safe anime and manga (nothing about your profile).
+async fn general_candidates(
+    api: &SafeAniList,
+    policy: ContentPolicy,
+) -> Result<(Vec<Candidate>, HashMap<String, usize>), AniError> {
+    let mut by_id: HashMap<i64, Candidate> = HashMap::new();
+    for kind in [
+        crate::anilist::MediaKind::Anime,
+        crate::anilist::MediaKind::Anime,
+        crate::anilist::MediaKind::Manga,
+        crate::anilist::MediaKind::Manhwa,
+    ] {
+        if let Some(m) = api.random_media(kind, None, Some(70), policy).await? {
+            by_id.entry(m.id).or_insert(Candidate {
+                media: m,
+                because: vec![String::new()],
+            });
+        }
+    }
+    Ok((by_id.into_values().collect(), HashMap::new()))
 }
 
 #[cfg(test)]
@@ -476,5 +677,80 @@ mod tests {
             because: vec![],
         };
         assert!(score(&c, &HashMap::new()).is_finite());
+    }
+
+    fn show(id: i64, title: &str, rating: f32) -> crate::tmdb::Work {
+        crate::tmdb::Work {
+            id,
+            kind: Some(crate::tmdb::Kind::Tv),
+            title: title.into(),
+            rating: Some(rating),
+            ..crate::tmdb::Work::default()
+        }
+    }
+
+    #[test]
+    fn the_default_source_is_the_profile_from_three_items_and_general_before() {
+        assert_eq!(default_source(0), RecSource::General);
+        assert_eq!(default_source(2), RecSource::General);
+        assert_eq!(default_source(3), RecSource::Profile);
+        assert_eq!(default_source(200), RecSource::Profile);
+    }
+
+    #[test]
+    fn tmdb_recommendations_are_merged_deduplicated_and_exclude_what_the_profile_has() {
+        let per_seed = vec![
+            (
+                "Seed A".to_string(),
+                vec![
+                    show(1, "Shared", 7.0),
+                    show(2, "Only A", 9.0),
+                    show(3, "Owned", 8.0),
+                ],
+            ),
+            (
+                "Seed B".to_string(),
+                vec![show(1, "Shared", 7.0), show(4, "Only B", 6.0)],
+            ),
+        ];
+        let exclude: std::collections::HashSet<String> = ["tmdb-tv:3".to_string()].into();
+        let out = merge_tmdb(per_seed, &exclude);
+        let keys: Vec<&str> = out.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["tmdb-tv:1", "tmdb-tv:2", "tmdb-tv:4"],
+            "the one two seeds point at first, then by rating; the owned one is gone"
+        );
+        assert_eq!(
+            out[0].because,
+            vec!["Seed A".to_string(), "Seed B".to_string()]
+        );
+        assert!(merge_tmdb(Vec::new(), &exclude).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_tmdb_seeds_of_a_profile_come_with_their_titles_and_every_key_is_excluded() {
+        let pool = crate::db::connect_memory().await;
+        sqlx::query("INSERT INTO profiles (user_id) VALUES (1)")
+            .execute(&pool)
+            .await
+            .expect("p");
+        sqlx::query("INSERT INTO media_cache (work_id, title_romaji, kind, is_safe, source, fetched_at) VALUES ('tmdb-tv:5', 'Crash Landing', 'tmdb-tv', 1, 'tmdb', 0)").execute(&pool).await.expect("c");
+        for (i, k) in ["tmdb-tv:5", "tmdb-movie:6", "anilist:7"]
+            .iter()
+            .enumerate()
+        {
+            sqlx::query("INSERT INTO profile_works (user_id, work_id, kind, position) VALUES (1, ?1, 'x', ?2)").bind(k).bind(i as i64).execute(&pool).await.expect("w");
+        }
+        let (seeds, all) = tmdb_profile(&pool, 1).await.expect("seeds");
+        assert_eq!(
+            seeds[0],
+            ("tmdb-tv:5".to_string(), "Crash Landing".to_string())
+        );
+        assert_eq!(
+            seeds[1].1, "tmdb-movie:6",
+            "without a cached title the key stands in"
+        );
+        assert_eq!(all.len(), 2, "AniList works are not TMDB seeds");
     }
 }

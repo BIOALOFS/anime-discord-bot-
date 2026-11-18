@@ -110,6 +110,7 @@ async fn disabled_providers_make_no_requests_and_return_nothing() {
     assert!(!p.enabled());
     assert!(p.search("anything").await.is_empty());
     let w = Work {
+        work_key: None,
         id: "mdex:x".into(),
         source: Source::MangaDex,
         kind: Kind::Manga,
@@ -394,17 +395,92 @@ fn igdb_queries_are_escaped() {
 }
 
 #[test]
-fn random_attempts_widen_toward_the_first_page_with_a_lower_floor() {
-    let a = RANDOM_ATTEMPTS;
-    assert!(
-        a.windows(2).all(|w| w[0].0 > w[1].0 && w[0].1 > w[1].1),
-        "each attempt looks nearer with a lower popularity floor"
+fn random_offsets_are_distinct_inside_the_first_500_and_at_least_ten() {
+    for _ in 0..50 {
+        let igdb = offset_plan(RANDOM_TRIES, Source::Igdb);
+        assert!(igdb.len() >= 10 && RANDOM_TRIES >= 10);
+        let mut seen = std::collections::HashSet::new();
+        assert!(
+            igdb.iter().all(|o| seen.insert(*o) && *o + 40 <= 500 + 20),
+            "{igdb:?}"
+        );
+        let vndb = offset_plan(RANDOM_TRIES, Source::Vndb);
+        assert!(vndb.len() >= 10 && vndb.iter().all(|p| (1..=25).contains(p)));
+    }
+}
+
+fn game(id: &str) -> Work {
+    Work {
+        work_key: None,
+        id: id.into(),
+        source: Source::Igdb,
+        kind: Kind::Game,
+        title: id.into(),
+        native: None,
+        subtitle: None,
+        year: None,
+        status: None,
+        rating: None,
+        url: None,
+        cover_url: None,
+        genres: Vec::new(),
+    }
+}
+
+#[test]
+fn a_random_pick_skips_the_last_five_and_is_remembered() {
+    let user = 777_001;
+    let all: Vec<Work> = (0..8).map(|i| game(&format!("igdb:{i}"))).collect();
+    let mut picked = std::collections::HashSet::new();
+    for _ in 0..5 {
+        let w = pick_unseen(all.clone(), user, "t-random").expect("a pick");
+        assert!(picked.insert(w.id), "no repeat inside the last five");
+    }
+    // Only the five remembered ones are excluded: with three left the next picks are among them.
+    let next = pick_unseen(all.clone(), user, "t-random").expect("a pick");
+    assert!(!picked.contains(&next.id));
+    // When every candidate was seen the page is not usable: the caller widens to another offset.
+    let seen_only: Vec<Work> = picked
+        .iter()
+        .map(|id| game(id))
+        .filter(|w| crate::commands::picks::seen(user, "t-random", &w.id))
+        .collect();
+    assert!(pick_unseen(seen_only, user, "t-random").is_none());
+}
+
+#[test]
+fn a_failed_provider_never_blocks_the_other_and_says_so() {
+    let ok = || -> Option<Result<Vec<Work>, ProviderError>> { Some(Ok(vec![game("igdb:1")])) };
+    let failed: Option<Result<Vec<Work>, ProviderError>> =
+        Some(Err(ProviderError::Http("400 Bad Request".into())));
+    let partial = Found::from_results([(Source::Igdb, ok()), (Source::Vndb, failed)]);
+    assert_eq!(partial.works.len(), 1);
+    assert!(!partial.all_failed());
+    assert_eq!(
+        partial.partial_note().as_deref(),
+        Some("لم أستطع جلب نتائج من VNDB الآن، هذه نتائج IGDB فقط.")
     );
     assert_eq!(
-        a[a.len() - 1],
-        (0, 0),
-        "the last attempt is the first page of anything"
+        partial.empty_message("لا شيء"),
+        "لا شيء",
+        "an empty answer after a partial failure is not 'unavailable'"
     );
+
+    let all_down = Found::from_results([
+        (Source::Igdb, Some(Err(ProviderError::Http("500".into())))),
+        (Source::Vndb, Some(Err(ProviderError::Http("400".into())))),
+    ]);
+    assert!(
+        all_down.all_failed() && all_down.works.is_empty() && all_down.partial_note().is_none()
+    );
+    assert_eq!(all_down.empty_message("لا شيء"), crate::i18n::GAMES_DOWN);
+
+    let clean = Found::from_results([(Source::Igdb, ok()), (Source::Vndb, None)]);
+    assert!(
+        clean.partial_note().is_none() && !clean.all_failed(),
+        "a provider that was not asked is not a failure"
+    );
+    assert!(Found::default().partial_note().is_none() && !Found::default().all_failed());
 }
 
 fn vn(id: &str, tags: serde_json::Value, sexual: serde_json::Value) -> serde_json::Value {
@@ -474,22 +550,6 @@ fn vndb_violence_is_allowed_unless_mature_themes_is_off() {
 }
 
 #[test]
-fn vndb_an_adult_minimum_age_alone_does_not_hide_but_with_sexual_tags_it_does() {
-    let mut dark = vn(
-        "v1",
-        json!([{"category": "cont", "name": "Dark"}]),
-        json!(0),
-    );
-    dark["releases"] = json!([{"minage": 18}]);
-    let mut ero = vn("v2", json!([{"category": "ero", "name": "x"}]), json!(0));
-    ero["releases"] = json!([{"minage": 18}]);
-    assert_eq!(
-        vn_ids(&json!({"results": [dark, ero]}), true),
-        vec!["vndb:v1"]
-    );
-}
-
-#[test]
 fn vndb_characters_need_a_clean_picture_traits_and_verified_novels() {
     let chars = json!({"results": [
         {"id": "c1", "name": "Ok", "original": "名", "image": {"url": "https://t.vndb.org/ch/a/1.jpg", "sexual": 0, "violence": 0}, "vns": [{"id": "v1", "title": "VN v1"}]},
@@ -524,17 +584,6 @@ fn vndb_characters_need_a_clean_picture_traits_and_verified_novels() {
 }
 
 #[test]
-fn vndb_requests_ask_for_the_tags_images_and_release_ages_the_verdict_needs() {
-    assert!(
-        vndb::VN_FIELDS_FOR_TESTS.contains("tags.category")
-            && vndb::VN_FIELDS_FOR_TESTS.contains("image.sexual")
-            && vndb::VN_FIELDS_FOR_TESTS.contains("screenshots.sexual")
-            && vndb::VN_FIELDS_FOR_TESTS.contains("releases.minage")
-            && vndb::VN_FIELDS_FOR_TESTS.contains("image.violence")
-    );
-}
-
-#[test]
 fn character_ids_round_trip_and_never_touch_anilist_ids() {
     for (s, n) in [(Source::Vndb, 5), (Source::Igdb, 77)] {
         let id = encode_character_id(s, n).expect("encodes");
@@ -561,4 +610,307 @@ fn games_footers_and_providers_toggle() {
         },
     );
     assert!(p.games_enabled());
+}
+
+// ---- VNDB request bodies: the exact JSON, and every field checked against the documented ones ----
+
+const VN_ROOTS: &[&str] = &[
+    "id",
+    "title",
+    "alttitle",
+    "titles",
+    "aliases",
+    "olang",
+    "devstatus",
+    "released",
+    "languages",
+    "platforms",
+    "image",
+    "length",
+    "length_minutes",
+    "length_votes",
+    "description",
+    "average",
+    "rating",
+    "votecount",
+    "screenshots",
+    "relations",
+    "tags",
+    "developers",
+    "editions",
+    "staff",
+    "va",
+    "extlinks",
+];
+const CHARACTER_ROOTS: &[&str] = &[
+    "id",
+    "name",
+    "original",
+    "aliases",
+    "description",
+    "image",
+    "blood_type",
+    "height",
+    "weight",
+    "bust",
+    "waist",
+    "hips",
+    "cup",
+    "age",
+    "birthday",
+    "sex",
+    "vns",
+    "traits",
+];
+
+fn nested_ok(root: &str, sub: &str) -> bool {
+    let image = [
+        "id",
+        "url",
+        "dims",
+        "sexual",
+        "violence",
+        "votecount",
+        "thumbnail",
+        "thumbnail_dims",
+    ];
+    match root {
+        "image" => image.contains(&sub),
+        "screenshots" => image.contains(&sub) || sub.starts_with("release"),
+        "tags" => [
+            "id",
+            "name",
+            "aliases",
+            "description",
+            "category",
+            "searchable",
+            "applicable",
+            "vn_count",
+            "rating",
+            "spoiler",
+            "lie",
+        ]
+        .contains(&sub),
+        "vns" => [
+            "id",
+            "title",
+            "alttitle",
+            "role",
+            "spoiler",
+            "released",
+            "rating",
+            "votecount",
+        ]
+        .contains(&sub),
+        "traits" => [
+            "id",
+            "name",
+            "aliases",
+            "description",
+            "searchable",
+            "applicable",
+            "group_id",
+            "group_name",
+            "char_count",
+            "spoiler",
+            "lie",
+        ]
+        .contains(&sub),
+        _ => false,
+    }
+}
+
+#[test]
+fn vndb_request_fields_are_all_documented_ones() {
+    for (endpoint, what, body) in vndb::all_bodies_for_tests() {
+        let roots = if endpoint == "vn" {
+            VN_ROOTS
+        } else {
+            CHARACTER_ROOTS
+        };
+        for field in body["fields"].as_str().expect("fields").split(',') {
+            let (root, sub) = field
+                .split_once('.')
+                .map_or((field, None), |(r, s)| (r, Some(s)));
+            assert!(
+                roots.contains(&root),
+                "/{endpoint} {what}: unknown field {field}"
+            );
+            if let Some(sub) = sub {
+                assert!(
+                    nested_ok(root, sub),
+                    "/{endpoint} {what}: unknown nested field {field}"
+                );
+            }
+        }
+        assert!(
+            body["results"].as_u64().unwrap_or(0) <= 100,
+            "/{endpoint} {what}: results above 100"
+        );
+        let searching = body["filters"].get(0).and_then(|f| f.as_str()) == Some("search");
+        assert!(
+            !(searching && body.get("sort").is_some()),
+            "/{endpoint} {what}: sort with a search filter"
+        );
+        assert!(body["filters"].is_array() && body.get("fields").is_some());
+    }
+    assert!(
+        !vndb::all_bodies_for_tests()
+            .iter()
+            .any(|(_, _, b)| b["fields"].as_str().unwrap_or("").contains("releases")),
+        "release data lives on /release, not /vn"
+    );
+}
+
+#[test]
+fn vndb_bodies_have_the_exact_documented_shape() {
+    assert_eq!(
+        vndb::vn_search_body("silent hill"),
+        json!({"filters": ["search", "=", "silent hill"], "results": 20,
+               "fields": "id,title,alttitle,image.url,image.sexual,image.violence,rating,votecount,released,devstatus,description,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating"})
+    );
+    assert_eq!(
+        vndb::vn_by_id_body("v17")["filters"],
+        json!(["id", "=", "v17"])
+    );
+    assert_eq!(vndb::vn_by_id_body("v17")["results"], json!(1));
+    let pop = vndb::vn_popular_body(0);
+    assert_eq!(
+        (
+            pop["page"].clone(),
+            pop["sort"].clone(),
+            pop["reverse"].clone()
+        ),
+        (json!(1), json!("votecount"), json!(true))
+    );
+    assert_eq!(
+        vndb::character_search_body("alice"),
+        json!({"filters": ["search", "=", "alice"], "results": 20,
+               "fields": "id,name,original,image.url,image.sexual,image.violence,vns.id,vns.title,traits.name,traits.group_name"})
+    );
+    assert_eq!(
+        vndb::character_by_id_body(5)["filters"],
+        json!(["id", "=", "c5"])
+    );
+    assert_eq!(
+        vndb::characters_of_vn_body("v17")["filters"],
+        json!(["vn", "=", ["id", "=", "v17"]])
+    );
+    let verdict = vndb::vn_verdict_body(&["v1".into(), "v2".into()]);
+    assert_eq!(
+        verdict["filters"],
+        json!(["or", ["id", "=", "v1"], ["id", "=", "v2"]])
+    );
+    assert!(verdict["fields"]
+        .as_str()
+        .unwrap_or("")
+        .contains("tags.category"));
+}
+
+#[test]
+fn vndb_parses_a_response_shaped_like_the_real_api() {
+    let doc = json!({"more": false, "results": [{
+        "id": "v7", "title": "Silent Hill: The Novel", "alttitle": "サイレントヒル", "released": "1999-01-01", "devstatus": 0,
+        "rating": 77.5, "votecount": 1200, "description": "A town in fog.",
+        "image": {"url": "https://t.vndb.org/cv/12/34.jpg", "sexual": 0, "violence": 1},
+        "screenshots": [{"sexual": 0, "violence": 1}],
+        "tags": [{"id": "g5", "name": "Horror", "category": "cont", "rating": 2.9}]
+    }]});
+    let w = vndb::parse_vns(&doc, true);
+    assert_eq!(w.len(), 1);
+    assert_eq!(
+        (w[0].id.as_str(), w[0].title.as_str(), w[0].year),
+        ("vndb:v7", "Silent Hill: The Novel", Some(1999))
+    );
+    assert_eq!(w[0].status.as_deref(), Some("finished"));
+}
+
+// ---- IGDB request bodies (exact text) ----
+
+#[test]
+fn igdb_bodies_have_the_exact_documented_shape() {
+    assert_eq!(
+        igdb::characters_search_body("james sunderland"),
+        format!(
+            "search \"james sunderland\"; fields {}; limit 20;",
+            igdb::CHARACTER_FIELDS
+        )
+    );
+    assert!(igdb::CHARACTER_FIELDS
+        .starts_with("name,akas,url,mug_shot.image_id,games.name,games.cover.image_id"));
+    assert_eq!(
+        igdb::characters_of_game_body(1234),
+        format!(
+            "fields {}; where games = (1234); limit 50;",
+            igdb::CHARACTER_FIELDS
+        )
+    );
+    assert_eq!(
+        igdb::character_by_id_body(9),
+        format!("fields {}; where id = 9; limit 1;", igdb::CHARACTER_FIELDS)
+    );
+    let search = igdb::games_search_body("silent hill", None);
+    assert!(
+        search.starts_with("search \"silent hill\"; fields name,summary,url,"),
+        "{search}"
+    );
+    assert!(
+        search.contains("where version_parent = null & parent_game = null;")
+            && search.ends_with("limit 50;")
+    );
+    assert!(igdb::games_search_body("x", Some("PlayStation"))
+        .contains("platforms.name ~ *\"PlayStation\"*"));
+    let popular = igdb::popular_games_body(80, 5, None);
+    assert!(
+        popular.contains("total_rating_count > 5")
+            && popular.contains("sort total_rating_count desc; limit 40; offset 80;"),
+        "{popular}"
+    );
+    assert!(
+        popular.contains("themes.id")
+            && popular.contains("keywords.name")
+            && popular.contains("genres.name")
+            && popular.contains("cover.image_id")
+    );
+    for body in [
+        popular,
+        search,
+        igdb::characters_search_body("x"),
+        igdb::characters_of_game_body(1),
+    ] {
+        assert!(
+            !body.contains("age_rating") && !body.contains("category"),
+            "no age ratings, no deprecated category: {body}"
+        );
+    }
+}
+
+#[test]
+fn igdb_characters_of_a_game_come_back_with_their_games_and_the_main_games_key() {
+    let silent_hill = json!({"id": 5, "name": "Silent Hill 2", "total_rating_count": 900, "themes": [{"id": 19, "name": "Horror"}], "cover": {"image_id": "co1"}});
+    let other = json!({"id": 6, "name": "Silent Hill 3", "total_rating_count": 300, "themes": [{"id": 19, "name": "Horror"}]});
+    let doc = json!([
+        {"id": 11, "name": "James Sunderland", "mug_shot": {"image_id": "mug1"}, "games": [other, silent_hill]},
+        {"id": 12, "name": "No Picture", "games": [{"id": 5, "name": "Silent Hill 2", "total_rating_count": 900}]},
+    ]);
+    let found = igdb::parse_characters(&doc, true);
+    assert_eq!(
+        ids(&found),
+        vec!["igdb:c11", "igdb:c12"],
+        "ranked by the games' popularity"
+    );
+    let james = &found[0].0;
+    assert_eq!(
+        james.subtitle.as_deref(),
+        Some("Silent Hill 2 · Silent Hill 3")
+    );
+    assert_eq!(
+        james.work_key.as_deref(),
+        Some("igdb:5"),
+        "the most rated game opens from the character card"
+    );
+    assert!(
+        james.cover_url.is_some() && found[1].0.cover_url.is_none(),
+        "a missing mug shot is fine"
+    );
 }

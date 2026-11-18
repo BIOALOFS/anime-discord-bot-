@@ -31,6 +31,12 @@ pub enum Screen {
     Limits,
     Chapters,
     Library,
+    Status,
+    Daily,
+    Poll,
+    Perms,
+    Watch,
+    Owner,
     Reset,
 }
 
@@ -44,8 +50,16 @@ pub const HOME: &[(&str, &str, char, Screen)] = &[
     ("go:limits", "الحدود", '⏱', Screen::Limits),
     ("go:chapters", "مصادر الفصول", '📖', Screen::Chapters),
     ("go:library", "المسلسلات والجدول", '📺', Screen::Library),
+    ("go:status", "حالة المصادر", '📡', Screen::Status),
+    ("go:daily", "منشورات يومية", '🗓', Screen::Daily),
+    ("go:poll", "تصويت أسبوعي", '🍿', Screen::Poll),
+    ("go:perms", "صلاحيات الرتب", '🔐', Screen::Perms),
+    ("go:watch", "ليلة مشاهدة", '🎬', Screen::Watch),
     ("go:reset", "إعادة الضبط", '🗑', Screen::Reset),
 ];
+
+/// Only the application owner sees this button.
+pub const OWNER_HOME: (&str, &str, char, Screen) = ("go:owner", "للمالك", '👑', Screen::Owner);
 
 const T_NSFW: &str = "s:nsfw";
 const T_MATURE: &str = "s:mature";
@@ -98,6 +112,8 @@ pub struct State {
     pub spoiler: bool,
     pub digest_hours: i64,
     pub overrides: std::collections::HashMap<String, crate::tmdb::model::Target>,
+    /// The round-8 sections (status, daily posts, poll, permissions, watch nights, owner tools).
+    pub ext: super::admin_ext::ExtState,
 }
 
 pub const POPULARITY_CHOICES: [i64; 5] = [500, 1500, 3000, 5000, 10_000];
@@ -124,7 +140,7 @@ fn kind_label(k: &str) -> &'static str {
     }
 }
 
-fn yes_no(b: bool) -> &'static str {
+pub(super) fn yes_no(b: bool) -> &'static str {
     if b {
         "✅ مفعّل"
     } else {
@@ -295,7 +311,7 @@ pub fn cooldown_options(current: i64) -> Vec<Opt> {
         .collect()
 }
 
-fn menu(
+pub(super) fn menu(
     id: &str,
     placeholder: &str,
     opts: Vec<Opt>,
@@ -334,7 +350,7 @@ fn role_menu(id: &str, placeholder: &str, enabled: bool) -> serenity::CreateActi
     )
 }
 
-fn toggle(id: &str, label: &str, on: bool, enabled: bool) -> serenity::CreateButton {
+pub(super) fn toggle(id: &str, label: &str, on: bool, enabled: bool) -> serenity::CreateButton {
     serenity::CreateButton::new(id)
         .label(format!("{label}: {}", if on { "✅" } else { "❌" }))
         .style(if on {
@@ -352,11 +368,20 @@ pub struct AdminView {
     screen: Screen,
     state: State,
     notice: Option<String>,
+    user: i64,
+    tools: super::admin_ext::Tools,
+    /// A card (the backup file) to send privately after a press.
+    card: Option<crate::ui::session::CardFollowup>,
 }
 
 impl AdminView {
-    async fn load(pool: &SqlitePool, guilds: &GuildStore, guild: i64) -> Result<State, Error> {
-        Ok(State {
+    async fn load(
+        pool: &SqlitePool,
+        guilds: &GuildStore,
+        guild: i64,
+        tools: &super::admin_ext::Tools,
+    ) -> Result<State, Error> {
+        let mut st = State {
             nsfw: custom::nsfw_mode(pool, guild).await?,
             mature: custom::mature_themes(pool, guild).await?,
             games: custom::games_enabled(pool, guild).await?,
@@ -374,11 +399,15 @@ impl AdminView {
             digest_hours: cdb::digest_hours(pool, guild).await?,
             spoiler: adb::spoiler_guard(pool, guild).await?,
             overrides: crate::db::notify::drama_overrides(pool, guild).await?,
-        })
+            ext: Default::default(),
+        };
+        st.ext =
+            super::admin_ext::ExtState::load(pool, guild, tools, &st.chapters, &st.feeds).await?;
+        Ok(st)
     }
 
     async fn reload(&mut self) {
-        match Self::load(&self.pool, &self.guilds, self.guild).await {
+        match Self::load(&self.pool, &self.guilds, self.guild, &self.tools).await {
             Ok(s) => self.state = s,
             Err(e) => {
                 tracing::warn!("admin panel reload failed: {e:#}");
@@ -466,6 +495,7 @@ pub fn embed_for(screen: Screen, s: &State, guild: i64) -> Emb {
             if s.chapters.lang == "ar" { "العربية" } else { "English" },
             crate::commands::notify_panel::digest_label(s.digest_hours)
         )),
+        Screen::Status | Screen::Daily | Screen::Poll | Screen::Perms | Screen::Watch | Screen::Owner => super::admin_ext::embed(screen, &s.ext),
         Screen::Library => e.title("📺 المسلسلات والجدول").description(format!(
             "• منطقة الجدول: **{}**\n• حماية الحرق (إخفاء ملخص العمل خلف ||سبويلر||): {}\n• تصنيف البلدان: الدراما الآسيوية في `/drama` وبقية العالم في `/series`، ويمكنك نقل أي بلد للآخر من القائمة الثانية.\n\nالبلدان المنقولة حاليًا: {}",
             TIMEZONES.iter().find(|(_, tz)| *tz == s.timezone).map_or(s.timezone.as_str(), |(l, _)| *l),
@@ -494,25 +524,29 @@ pub fn components_for(
     };
     match screen {
         Screen::Home => {
-            let mk = |slice: &[(&str, &str, char, Screen)]| {
-                buttons(
-                    slice
-                        .iter()
-                        .map(|(id, label, emoji, _)| {
-                            serenity::CreateButton::new(*id)
-                                .label(*label)
-                                .emoji(*emoji)
-                                .style(serenity::ButtonStyle::Secondary)
-                                .disabled(!enabled)
-                        })
-                        .collect(),
-                )
-            };
-            vec![
-                mk(&HOME[..4]),
-                mk(&HOME[4..]),
-                buttons(vec![close_button(enabled)]),
-            ]
+            let mut all: Vec<&(&str, &str, char, Screen)> = HOME.iter().collect();
+            if s.ext.is_owner {
+                all.push(&OWNER_HOME);
+            }
+            let mut rows: Vec<serenity::CreateActionRow> = all
+                .chunks(5)
+                .map(|chunk| {
+                    buttons(
+                        chunk
+                            .iter()
+                            .map(|(id, label, emoji, _)| {
+                                serenity::CreateButton::new(*id)
+                                    .label(*label)
+                                    .emoji(*emoji)
+                                    .style(serenity::ButtonStyle::Secondary)
+                                    .disabled(!enabled)
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
+            rows.push(buttons(vec![close_button(enabled)]));
+            rows
         }
         Screen::Safety => vec![
             buttons(vec![
@@ -561,6 +595,12 @@ pub fn components_for(
                 enabled,
             ),
         ],
+        Screen::Status
+        | Screen::Daily
+        | Screen::Poll
+        | Screen::Perms
+        | Screen::Watch
+        | Screen::Owner => super::admin_ext::components(screen, &s.ext, enabled),
         Screen::Library => vec![
             buttons(vec![
                 toggle(LIB_SPOILER, "حماية الحرق", s.spoiler, enabled),
@@ -749,14 +789,39 @@ impl View for AdminView {
         true
     }
 
+    fn take_card(&mut self) -> Option<crate::ui::session::CardFollowup> {
+        self.card.take()
+    }
+
     fn modal_for(&self, id: &str) -> Option<ModalSpec> {
-        (id == CH_ADD_FEED).then(|| ModalSpec {
-            title: "إضافة رابط RSS".into(),
-            label: "الرابط | عنوان العمل".into(),
-        })
+        match id {
+            CH_ADD_FEED => Some(ModalSpec {
+                title: "إضافة رابط RSS".into(),
+                label: "الرابط | عنوان العمل".into(),
+            }),
+            "w:new" => Some(ModalSpec {
+                title: "ليلة مشاهدة جديدة".into(),
+                label: "اسم العمل | 2026-11-21 21:00 | وصف اختياري".into(),
+            }),
+            _ => None,
+        }
     }
 
     async fn on_modal(&mut self, id: &str, input: String) -> Outcome {
+        if id == "w:new" {
+            self.notice = Some(
+                super::admin_ext::create_night(
+                    &self.tools,
+                    &self.pool,
+                    self.guild,
+                    self.user,
+                    &input,
+                )
+                .await,
+            );
+            self.reload().await;
+            return Outcome::Update;
+        }
         if id != CH_ADD_FEED {
             return Outcome::Keep;
         }
@@ -891,8 +956,24 @@ impl View for AdminView {
                     self.guilds.reset(g).await?;
                     self.screen = Screen::Home;
                 }
+                id if super::admin_ext::handles(id) => {
+                    let reply = super::admin_ext::handle(
+                        &self.tools,
+                        &pool,
+                        g,
+                        &self.state.ext,
+                        id,
+                        values,
+                    )
+                    .await?;
+                    self.notice = reply.notice;
+                    self.card = reply.card;
+                }
                 other => {
-                    if let Some((_, _, _, screen)) = HOME.iter().find(|h| h.0 == other) {
+                    let owner_home = self.state.ext.is_owner.then_some(&OWNER_HOME);
+                    if let Some((_, _, _, screen)) =
+                        HOME.iter().chain(owner_home).find(|h| h.0 == other)
+                    {
                         self.screen = *screen;
                     }
                     return Ok(());
@@ -959,7 +1040,18 @@ pub async fn admin(ctx: Context<'_>) -> Result<(), Error> {
     }
     let pool = ctx.data().db.clone();
     let guilds = ctx.data().guilds.clone();
-    let state = AdminView::load(&pool, &guilds, g).await?;
+    let data = ctx.data();
+    let tools = super::admin_ext::Tools {
+        http: data.http.clone(),
+        tmdb: data.tmdb.clone(),
+        providers: data.providers.clone(),
+        ops: data.ops.clone(),
+        is_owner: data.ops.is_owner(ctx.author().id.get()),
+        guild_count: ctx.cache().guild_count(),
+        discord: ctx.serenity_context().http.clone(),
+        anilist: data.anilist.clone(),
+    };
+    let state = AdminView::load(&pool, &guilds, g, &tools).await?;
     session::run(
         ctx,
         AdminView {
@@ -969,6 +1061,9 @@ pub async fn admin(ctx: Context<'_>) -> Result<(), Error> {
             screen: Screen::Home,
             state,
             notice: None,
+            user: ctx.author().id.get() as i64,
+            tools,
+            card: None,
         },
     )
     .await
@@ -992,6 +1087,7 @@ mod tests {
             reminder_ping: false,
             chapters: cdb::Settings::default(),
             timezone: "Asia/Muscat".into(),
+            ext: Default::default(),
             digest_hours: 2,
             spoiler: false,
             overrides: Default::default(),
@@ -1013,7 +1109,7 @@ mod tests {
         }
     }
 
-    const SCREENS: [Screen; 10] = [
+    const SCREENS: [Screen; 16] = [
         Screen::Home,
         Screen::Safety,
         Screen::Notifications,
@@ -1023,6 +1119,12 @@ mod tests {
         Screen::Limits,
         Screen::Chapters,
         Screen::Library,
+        Screen::Status,
+        Screen::Daily,
+        Screen::Poll,
+        Screen::Perms,
+        Screen::Watch,
+        Screen::Owner,
         Screen::Reset,
     ];
 
@@ -1050,13 +1152,27 @@ mod tests {
     }
 
     #[test]
-    fn home_has_every_section_in_two_rows_of_buttons() {
-        assert_eq!(HOME.len(), 9);
+    fn home_has_every_section_and_the_owner_button_only_for_the_owner() {
+        assert_eq!(HOME.len(), 14);
         let rows = components_for(Screen::Home, &state(), 1, false, true);
+        assert!(rows.len() <= 5, "{} rows", rows.len());
         let json = serde_json::to_string(&rows).expect("json");
         for (id, ..) in HOME {
             assert!(json.contains(id), "{id}");
         }
+        assert!(
+            !json.contains("go:owner"),
+            "members and admins do not see the owner section"
+        );
+        let mut owner = state();
+        owner.ext.is_owner = true;
+        let rows = components_for(Screen::Home, &owner, 1, false, true);
+        assert!(
+            rows.len() <= 5
+                && serde_json::to_string(&rows)
+                    .expect("json")
+                    .contains("go:owner")
+        );
     }
 
     #[test]

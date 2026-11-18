@@ -736,18 +736,35 @@ impl SafeAniList {
 
     /// Safe characters whose birthday is today, most favourited first (one page of up to 10).
     pub async fn birthdays_today(&self, policy: ContentPolicy) -> Result<Vec<Character>, AniError> {
+        Ok(self.birthdays_page(1, policy).await?.0)
+    }
+
+    /// One page (10) of today's birthdays and whether another page exists.
+    pub async fn birthdays_page(
+        &self,
+        page: u32,
+        policy: ContentPolicy,
+    ) -> Result<(Vec<Character>, bool), AniError> {
         // The key carries the UTC day so the cache never serves yesterday's birthdays.
         let day = chrono::Utc::now().format("%Y-%m-%d");
-        let key = format!("bd:{day}");
-        let list: Vec<Character> = match self
+        let key = format!("bd:{day}:{page}");
+        let (list, more): (Vec<Character>, bool) = match self
             .client
-            .get(Which::Search, key, queries::BIRTHDAYS, json!({"page": 1}))
+            .get(
+                Which::Search,
+                key,
+                queries::BIRTHDAYS,
+                json!({"page": page}),
+            )
             .await?
         {
-            Some(doc) => parse(&doc, "/Page/characters")?,
-            None => Vec::new(),
+            Some(doc) => (
+                parse(&doc, "/Page/characters")?,
+                page_flags(&doc, "/Page").0,
+            ),
+            None => (Vec::new(), false),
         };
-        Ok(self.visible(list, policy).await)
+        Ok((self.visible(list, policy).await, more))
     }
 
     /// The same character for everyone on a given day: `seed` (e.g. a hash of date and server) picks

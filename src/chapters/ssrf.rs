@@ -119,9 +119,15 @@ pub async fn fetch_feed(raw: &str) -> Option<String> {
         .build()
         .ok()?;
     let mut resp = client.get(url).send().await.ok()?;
-    if !resp.status().is_success() || resp.content_length().is_some_and(|n| n as usize > MAX_BODY) {
+    if !resp.status().is_success() {
+        // Only the host is logged: a feed address may carry a private token in its query.
+        crate::http_log::failed(&format!("rss:{host}"), &host, resp).await;
         return None;
     }
+    if resp.content_length().is_some_and(|n| n as usize > MAX_BODY) {
+        return None;
+    }
+    crate::ops::health::ok(&format!("rss:{host}"));
     let mut body: Vec<u8> = Vec::new();
     while let Some(chunk) = resp.chunk().await.ok()? {
         body.extend_from_slice(&chunk);

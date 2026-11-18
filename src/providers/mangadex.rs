@@ -38,7 +38,9 @@ impl CatalogProvider for MangaDex {
             .await
             .map_err(|e| ProviderError::Http(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Http(resp.status().to_string()));
+            return Err(ProviderError::Http(
+                crate::http_log::failed("mangadex", "manga search", resp).await,
+            ));
         }
         let doc: Value = resp
             .json()
@@ -114,5 +116,6 @@ fn parse_one(item: &Value) -> Option<Work> {
         } else {
             genres
         },
+        work_key: None,
     })
 }

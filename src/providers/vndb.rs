@@ -10,11 +10,69 @@ use std::{collections::HashMap, time::Duration};
 use tokio::sync::Semaphore;
 
 const API: &str = "https://api.vndb.org/kana";
-const VN_FIELDS: &str = "title,alttitle,released,rating,devstatus,image.url,image.sexual,image.violence,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating,releases.minage";
-#[cfg(test)]
-pub(super) const VN_FIELDS_FOR_TESTS: &str = VN_FIELDS;
+const VN_FIELDS: &str = "id,title,alttitle,image.url,image.sexual,image.violence,rating,votecount,released,devstatus,description,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating";
 /// What the verdict of a novel needs (used when characters are vetted through their novels).
-const VERDICT_FIELDS: &str = "image.sexual,image.violence,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating,releases.minage";
+const VERDICT_FIELDS: &str = "id,image.sexual,image.violence,screenshots.sexual,screenshots.violence,tags.id,tags.name,tags.category,tags.rating";
+const CHARACTER_FIELDS: &str = "id,name,original,image.url,image.sexual,image.violence,vns.id,vns.title,traits.name,traits.group_name";
+
+// ---- request bodies (pure, so the exact JSON is tested) ------------------------------------------------
+// Every field and filter below comes from the Kana API documentation (https://api.vndb.org/kana). A field that does
+// not exist on an endpoint answers 400 Bad Request: `releases.minage`, for example, belongs to /release, not /vn.
+
+pub(super) fn vn_search_body(query: &str) -> Value {
+    json!({"filters": ["search", "=", query], "fields": VN_FIELDS, "results": 20})
+}
+
+pub(super) fn vn_by_id_body(id: &str) -> Value {
+    json!({"filters": ["id", "=", id], "fields": VN_FIELDS, "results": 1})
+}
+
+/// One page of the most voted novels (sorted by votes, so no `search` filter is used with it).
+pub(super) fn vn_popular_body(page: u32) -> Value {
+    json!({"filters": ["votecount", ">=", 100], "fields": VN_FIELDS, "sort": "votecount", "reverse": true, "results": 20, "page": page.max(1)})
+}
+
+/// Novels by id, only the fields the verdict needs (at most 100 results).
+pub(super) fn vn_verdict_body(ids: &[String]) -> Value {
+    let mut filter = vec![json!("or")];
+    filter.extend(ids.iter().take(45).map(|id| json!(["id", "=", id])));
+    json!({"filters": filter, "fields": VERDICT_FIELDS, "results": 100})
+}
+
+pub(super) fn character_search_body(query: &str) -> Value {
+    json!({"filters": ["search", "=", query], "fields": CHARACTER_FIELDS, "results": 20})
+}
+
+pub(super) fn character_by_id_body(n: i64) -> Value {
+    json!({"filters": ["id", "=", format!("c{n}")], "fields": CHARACTER_FIELDS, "results": 1})
+}
+
+/// The characters of one visual novel (`v17`).
+pub(super) fn characters_of_vn_body(vn: &str) -> Value {
+    json!({"filters": ["vn", "=", ["id", "=", vn]], "fields": CHARACTER_FIELDS, "results": 50})
+}
+
+pub(super) fn character_popular_body(page: u32) -> Value {
+    json!({"filters": ["id", ">=", "c1"], "fields": CHARACTER_FIELDS, "results": 40, "page": page.max(1)})
+}
+
+#[cfg(test)]
+pub(super) fn all_bodies_for_tests() -> Vec<(&'static str, &'static str, Value)> {
+    vec![
+        ("vn", "search", vn_search_body("silent hill")),
+        ("vn", "by id", vn_by_id_body("v17")),
+        ("vn", "popular", vn_popular_body(3)),
+        (
+            "vn",
+            "verdict",
+            vn_verdict_body(&["v1".into(), "v2".into()]),
+        ),
+        ("character", "search", character_search_body("alice")),
+        ("character", "by id", character_by_id_body(5)),
+        ("character", "of a novel", characters_of_vn_body("v17")),
+        ("character", "popular", character_popular_body(2)),
+    ]
+}
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -44,17 +102,30 @@ impl Vndb {
             .await
             .map_err(|_| ProviderError::NotConfigured)?;
         self.limit.until_ready().await;
+        crate::ops::stats::bump("api", "vndb");
         let resp = self
             .http
             .post(format!("{API}/{endpoint}"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(
+                reqwest::header::USER_AGENT,
+                concat!(
+                    "anpot-discord-bot/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (+https://github.com/BIOALOFS/anpot)"
+                ),
+            )
             .json(&body)
             .timeout(Duration::from_secs(5))
             .send()
             .await
             .map_err(|e| ProviderError::Http(e.without_url().to_string()))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Http(resp.status().to_string()));
+            return Err(ProviderError::Http(
+                crate::http_log::failed("vndb", endpoint, resp).await,
+            ));
         }
+        crate::ops::health::ok("vndb");
         resp.json()
             .await
             .map_err(|e| ProviderError::Parse(e.to_string()))
@@ -65,9 +136,7 @@ impl Vndb {
         query: &str,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let doc = self
-            .post("vn", json!({"filters": ["search", "=", query], "fields": VN_FIELDS, "sort": "searchrank", "results": 15}))
-            .await?;
+        let doc = self.post("vn", vn_search_body(query)).await?;
         let mut out = parse_vns(&doc, allow_mature);
         out.truncate(10);
         Ok(out)
@@ -79,9 +148,7 @@ impl Vndb {
         page: u32,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let doc = self
-            .post("vn", json!({"filters": ["votecount", ">=", 100], "fields": VN_FIELDS, "sort": "votecount", "reverse": true, "results": 20, "page": page.max(1)}))
-            .await?;
+        let doc = self.post("vn", vn_popular_body(page)).await?;
         Ok(parse_vns(&doc, allow_mature))
     }
 
@@ -91,23 +158,16 @@ impl Vndb {
         vn: &str,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let doc = self
-            .post(
-                "character",
-                character_request(json!(["vn", "=", ["id", "=", vn]]), 25),
-            )
-            .await?;
+        let doc = self.post("character", characters_of_vn_body(vn)).await?;
         self.vet_characters(&doc, allow_mature).await
     }
 
-    pub async fn popular_characters(&self, allow_mature: bool) -> Result<Vec<Work>, ProviderError> {
-        let doc = self
-            .post("character", {
-                let mut r = character_request(json!(["id", ">=", "c1"]), 40);
-                r["page"] = json!(rand::random_range(1..=40u32));
-                r
-            })
-            .await?;
+    pub async fn popular_characters(
+        &self,
+        allow_mature: bool,
+        page: u32,
+    ) -> Result<Vec<Work>, ProviderError> {
+        let doc = self.post("character", character_popular_body(page)).await?;
         self.vet_characters(&doc, allow_mature).await
     }
 
@@ -116,12 +176,7 @@ impl Vndb {
         id: &str,
         allow_mature: bool,
     ) -> Result<Option<Work>, ProviderError> {
-        let doc = self
-            .post(
-                "vn",
-                json!({"filters": ["id", "=", id], "fields": VN_FIELDS, "results": 1}),
-            )
-            .await?;
+        let doc = self.post("vn", vn_by_id_body(id)).await?;
         Ok(parse_vns(&doc, allow_mature).into_iter().next())
     }
 
@@ -130,12 +185,7 @@ impl Vndb {
         query: &str,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let doc = self
-            .post(
-                "character",
-                character_request(json!(["search", "=", query]), 12),
-            )
-            .await?;
+        let doc = self.post("character", character_search_body(query)).await?;
         self.vet_characters(&doc, allow_mature).await
     }
 
@@ -144,12 +194,7 @@ impl Vndb {
         n: i64,
         allow_mature: bool,
     ) -> Result<Option<Work>, ProviderError> {
-        let doc = self
-            .post(
-                "character",
-                character_request(json!(["id", "=", format!("c{n}")]), 1),
-            )
-            .await?;
+        let doc = self.post("character", character_by_id_body(n)).await?;
         Ok(self
             .vet_characters(&doc, allow_mature)
             .await?
@@ -167,14 +212,7 @@ impl Vndb {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut filter = vec![json!("or")];
-        filter.extend(ids.iter().map(|id| json!(["id", "=", id])));
-        let vns = self
-            .post(
-                "vn",
-                json!({"filters": filter, "fields": VERDICT_FIELDS, "results": 100}),
-            )
-            .await?;
+        let vns = self.post("vn", vn_verdict_body(&ids)).await?;
         Ok(parse_characters(
             doc,
             &vn_verdicts(&vns, allow_mature),
@@ -190,10 +228,6 @@ impl CatalogProvider for Vndb {
     async fn search(&self, query: &str) -> Result<Vec<Work>, ProviderError> {
         self.search_vns(query, true).await
     }
-}
-
-fn character_request(filter: Value, results: u32) -> Value {
-    json!({"filters": filter, "fields": "name,original,image.url,image.sexual,image.violence,traits.name,traits.group_name,vns.id,vns.title", "results": results})
 }
 
 fn max_flag(v: &Value, key: &str) -> Option<i64> {
@@ -225,16 +259,6 @@ fn vn_facts(v: &Value) -> VnFacts {
         image_sexual: max_flag(v, "sexual"),
         image_violence: max_flag(v, "violence"),
         sexual_tag,
-        adult_minage: v
-            .get("releases")
-            .and_then(Value::as_array)
-            .is_some_and(|r| {
-                r.iter().any(|x| {
-                    x.get("minage")
-                        .and_then(Value::as_i64)
-                        .is_some_and(|m| m >= 18)
-                })
-            }),
         // An empty tag list is a real answer (nothing sexual is tagged); only a missing list gives no verdict.
         tags_known: tags.is_some(),
     }
@@ -256,6 +280,7 @@ pub(super) fn parse_vns(doc: &Value, allow_mature: bool) -> Vec<Work> {
                 .and_then(|d| d.get(..4))
                 .and_then(|y| y.parse().ok());
             Some(Work {
+                work_key: None,
                 id: format!("vndb:{id}"),
                 source: Source::Vndb,
                 kind: Kind::VisualNovel,
@@ -380,6 +405,11 @@ pub(super) fn parse_characters(
             }
             let id = c.get("id")?.as_str()?;
             Some(Work {
+                work_key: vns
+                    .first()
+                    .and_then(|v| v.get("id"))
+                    .and_then(Value::as_str)
+                    .map(|id| format!("vndb:{id}")),
                 id: format!("vndb:{id}"),
                 source: Source::Vndb,
                 kind: Kind::Character,

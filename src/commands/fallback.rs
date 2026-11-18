@@ -96,7 +96,12 @@ async fn add_inner(pool: &SqlitePool, user: i64, w: &Work) -> Result<Whisper, Er
                     })
                 });
                 Whisper {
-                    text: i18n::added_character(&w.title, pos),
+                    text: crate::features::badges::announce(
+                        pool,
+                        user,
+                        i18n::added_character(&w.title, pos),
+                    )
+                    .await,
                     undo: Some(undo),
                 }
             }
@@ -135,7 +140,8 @@ async fn add_inner(pool: &SqlitePool, user: i64, w: &Work) -> Result<Whisper, Er
                 })
             });
             Whisper {
-                text: i18n::WORK_ADDED.to_string(),
+                text: crate::features::badges::announce(pool, user, i18n::WORK_ADDED.to_string())
+                    .await,
                 undo: Some(undo),
             }
         }
@@ -155,25 +161,38 @@ pub fn cover_name(bytes: &[u8]) -> &'static str {
     }
 }
 
+/// The card of a game or visual-novel character: the picture, the name and the game(s) it appears in, nothing else (no
+/// gender, description, aliases or popularity: the sources give none that is reliable). Without a picture the card
+/// still works and says how to set one.
+pub fn character_card(w: &Work, has_cover: bool, cover_name: &str) -> Emb {
+    let mut e = Emb::new().title(&w.title).url(w.url.clone());
+    e.footer = Some(w.source.credit().to_string());
+    let mut lines = Vec::new();
+    if let Some(games) = w.subtitle.as_deref().filter(|g| !g.is_empty()) {
+        lines.push(format!("{} {games}", i18n::CHARACTER_FROM));
+    }
+    if has_cover {
+        e = e.image(Some(format!("attachment://{cover_name}")));
+    } else {
+        lines.push(i18n::CHARACTER_NO_IMAGE.to_string());
+    }
+    if !lines.is_empty() {
+        e = e.description(lines.join("\n"));
+    }
+    e
+}
+
 pub fn card(w: &Work, has_cover: bool, cover_name: &str) -> Emb {
+    if w.kind == Kind::Character {
+        return character_card(w, has_cover, cover_name);
+    }
     let mut e = Emb::new().title(&w.title).url(w.url.clone());
     e = e.author(w.source.credit());
     e.footer = Some(w.source.credit().to_string());
     if has_cover {
         e = e.image(Some(format!("attachment://{cover_name}")));
     }
-    if w.kind == Kind::Character {
-        let mut lines = Vec::new();
-        if let Some(n) = &w.native {
-            lines.push(n.clone());
-        }
-        if let Some(from) = &w.subtitle {
-            lines.push(format!("{} {from}", i18n::CHARACTER_FROM));
-        }
-        if !lines.is_empty() {
-            e = e.description(lines.join("\n"));
-        }
-    } else if !w.genres.is_empty() {
+    if !w.genres.is_empty() {
         e = e.description(
             w.genres
                 .iter()
@@ -197,9 +216,6 @@ pub fn card(w: &Work, has_cover: bool, cover_name: &str) -> Emb {
     // The shared rating / popularity lines (`ui::rating`) per source.
     let on_100 = w.rating.map(|r| f64::from(r) * 10.0);
     match (w.kind, w.source) {
-        (Kind::Character, _) => {
-            e = e.field(i18n::F_STATS, crate::ui::rating::no_popularity(), false)
-        }
         (_, crate::providers::Source::Igdb) => {
             e = e.field(
                 i18n::F_STATS,
@@ -220,6 +236,7 @@ pub fn card(w: &Work, has_cover: bool, cover_name: &str) -> Emb {
 }
 
 struct FallbackView {
+    note: Option<String>,
     pool: SqlitePool,
     user: i64,
     whisper: Option<Whisper>,
@@ -239,6 +256,20 @@ impl FallbackView {
 
 impl View for FallbackView {
     fn render(&self, enabled: bool) -> Page {
+        self.render_inner(enabled).notice(self.note.clone())
+    }
+
+    fn take_whisper(&mut self) -> Option<Whisper> {
+        self.whisper.take()
+    }
+
+    async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
+        self.press(id, values).await
+    }
+}
+
+impl FallbackView {
+    fn render_inner(&self, enabled: bool) -> Page {
         match self.chosen {
             Some(i) => {
                 let w = &self.works[i];
@@ -310,11 +341,7 @@ impl View for FallbackView {
         }
     }
 
-    fn take_whisper(&mut self) -> Option<Whisper> {
-        self.whisper.take()
-    }
-
-    async fn on_interaction(&mut self, id: &str, values: &[String]) -> Outcome {
+    async fn press(&mut self, id: &str, values: &[String]) -> Outcome {
         match id {
             CLOSE => Outcome::Close,
             BTN_PROVIDER_ADD => {
@@ -360,7 +387,17 @@ pub async fn run(ctx: Context<'_>, query: &str) -> Result<bool, Error> {
 
 /// Show provider results: a select menu for several, the card for one.
 pub async fn show(ctx: Context<'_>, works: Vec<Work>) -> Result<(), Error> {
+    show_with_note(ctx, works, None).await
+}
+
+/// Same, with a short note above the card (for example "VNDB did not answer, these are IGDB results only").
+pub async fn show_with_note(
+    ctx: Context<'_>,
+    works: Vec<Work>,
+    note: Option<String>,
+) -> Result<(), Error> {
     let mut view = FallbackView {
+        note,
         pool: ctx.data().db.clone(),
         user: ctx.author().id.get() as i64,
         whisper: None,
@@ -383,6 +420,7 @@ mod tests {
 
     fn work() -> Work {
         Work {
+            work_key: None,
             id: "mdex:a".into(),
             source: Source::MangaDex,
             kind: crate::providers::Kind::Manga,
@@ -420,5 +458,43 @@ mod tests {
         assert_eq!(cover_name(b"GIF89a"), "cover.gif");
         assert_eq!(cover_name(b"RIFF\0\0\0\0WEBPVP8"), "cover.webp");
         assert_eq!(cover_name(&[0xFF, 0xD8, 0xFF]), "cover.jpg");
+    }
+
+    #[test]
+    fn a_game_character_card_shows_only_picture_name_and_games() {
+        let mut c = work();
+        c.kind = Kind::Character;
+        c.source = crate::providers::Source::Igdb;
+        c.title = "James Sunderland".into();
+        c.native = Some("ジェームズ".into());
+        c.subtitle = Some("Silent Hill 2".into());
+        c.genres = vec!["Horror".into()];
+        c.rating = Some(9.0);
+        c.year = Some(2001);
+        let e = card(&c, true, "cover.jpg");
+        assert_eq!(e.title.as_deref(), Some("James Sunderland"));
+        assert_eq!(e.image.as_deref(), Some("attachment://cover.jpg"));
+        assert_eq!(e.footer.as_deref(), Some("Data from IGDB.com"));
+        let d = e.description.as_deref().unwrap_or("");
+        assert!(
+            d.contains("Silent Hill 2") && !d.contains("ジェームズ") && !d.contains("Horror"),
+            "{d}"
+        );
+        assert!(
+            e.fields.is_empty(),
+            "no gender, no popularity line, no extra fields: {:?}",
+            e.fields
+        );
+        assert!(e.author.is_none());
+    }
+
+    #[test]
+    fn a_character_without_a_picture_still_gets_a_working_card() {
+        let mut c = work();
+        c.kind = Kind::Character;
+        c.subtitle = None;
+        let e = card(&c, false, "cover.jpg");
+        assert!(e.image.is_none());
+        assert!(e.description.as_deref().unwrap_or("").contains("/edit"));
     }
 }

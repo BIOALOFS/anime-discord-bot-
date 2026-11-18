@@ -17,7 +17,7 @@ const API: &str = "https://api.igdb.com/v4";
 const TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
 const IMAGE: &str = "https://images.igdb.com/igdb/image/upload/t_cover_big";
 pub(super) const GAME_FIELDS: &str = "name,summary,url,first_release_date,total_rating,total_rating_count,cover.image_id,genres.name,themes.id,themes.name,keywords.name";
-pub(super) const CHARACTER_FIELDS: &str = "name,url,mug_shot.image_id,games.name,games.total_rating_count,games.genres.name,games.themes.id,games.themes.name,games.keywords.name";
+pub(super) const CHARACTER_FIELDS: &str = "name,akas,url,mug_shot.image_id,games.name,games.cover.image_id,games.total_rating_count,games.genres.name,games.themes.id,games.themes.name,games.keywords.name";
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -70,7 +70,10 @@ impl Igdb {
             // The error text never contains the request URL (it carries the secret).
             .map_err(|e| ProviderError::Http(e.without_url().to_string()))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Http(format!("token {}", resp.status())));
+            return Err(ProviderError::Http(format!(
+                "token {}",
+                crate::http_log::failed("igdb", "twitch token", resp).await
+            )));
         }
         let doc: Value = resp
             .json()
@@ -103,6 +106,7 @@ impl Igdb {
                 .await
                 .map_err(|_| ProviderError::NotConfigured)?;
             self.limit.until_ready().await;
+            crate::ops::stats::bump("api", "igdb");
             let resp = self
                 .http
                 .post(format!("{API}/{endpoint}"))
@@ -118,7 +122,9 @@ impl Igdb {
                 continue;
             }
             if !resp.status().is_success() {
-                return Err(ProviderError::Http(resp.status().to_string()));
+                return Err(ProviderError::Http(
+                    crate::http_log::failed("igdb", endpoint, resp).await,
+                ));
             }
             let doc: Value = resp
                 .json()
@@ -126,9 +132,17 @@ impl Igdb {
                 .map_err(|e| ProviderError::Parse(e.to_string()))?;
             // An error body is a failure, not an empty answer: nothing may be judged from it.
             ensure_games(&doc)?;
+            crate::ops::health::ok("igdb");
             return Ok(doc);
         }
         Err(ProviderError::Http("unauthorized".into()))
+    }
+
+    /// The smallest possible request (the status panel): does IGDB answer with our token?
+    pub async fn ping(&self) -> bool {
+        self.query("games", "fields name; limit 1;".to_string())
+            .await
+            .is_ok()
     }
 
     pub async fn search_games(
@@ -136,11 +150,7 @@ impl Igdb {
         query: &str,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let body = format!(
-            "search {}; fields {GAME_FIELDS}; where version_parent = null; limit 50;",
-            quote(query)
-        );
-        let doc = self.query("games", body).await?;
+        let doc = self.query("games", games_search_body(query, None)).await?;
         Ok(rank(parse_games(&doc, allow_mature), 10))
     }
 
@@ -151,16 +161,14 @@ impl Igdb {
         platform: &str,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let body = format!(
-            "search {}; fields {GAME_FIELDS}; where version_parent = null & platforms.name ~ *{}*; limit 50;",
-            quote(query),
-            quote(platform)
-        );
-        let doc = self.query("games", body).await?;
+        let doc = self
+            .query("games", games_search_body(query, Some(platform)))
+            .await?;
         Ok(rank(parse_games(&doc, allow_mature), 10))
     }
 
-    /// One page (20) of well-known games, most rated first; `offset` picks a random neighbourhood. `platform` narrows it.
+    /// One page (40) of well-known main games, most rated first; `offset` picks the neighbourhood and `min_votes` the
+    /// popularity floor. `platform` narrows it.
     pub async fn popular_games(
         &self,
         offset: u32,
@@ -168,30 +176,25 @@ impl Igdb {
         platform: Option<&str>,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let plat = platform
-            .map(|p| format!(" & platforms.name ~ *{}*", quote(p)))
-            .unwrap_or_default();
-        let body = format!(
-            "fields {GAME_FIELDS}; where version_parent = null & total_rating_count > {min_votes}{plat}; sort total_rating_count desc; limit 40; offset {offset};"
-        );
-        let doc = self.query("games", body).await?;
+        let doc = self
+            .query("games", popular_games_body(offset, min_votes, platform))
+            .await?;
         Ok(parse_games(&doc, allow_mature)
             .into_iter()
             .map(|(w, _)| w)
             .collect())
     }
 
-    /// The characters of one game.
+    /// The characters of one game (the game itself is judged through the same fields).
     pub async fn characters_of(
         &self,
         game: i64,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let body = format!(
-            "fields {CHARACTER_FIELDS}; where games = ({game}) & mug_shot != null; limit 25;"
-        );
-        let doc = self.query("characters", body).await?;
-        Ok(rank(parse_characters(&doc, allow_mature), 25))
+        let doc = self
+            .query("characters", characters_of_game_body(game))
+            .await?;
+        Ok(rank(parse_characters(&doc, allow_mature), 50))
     }
 
     pub async fn popular_characters(
@@ -199,10 +202,9 @@ impl Igdb {
         offset: u32,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let body = format!(
-            "fields {CHARACTER_FIELDS}; where mug_shot != null; limit 40; offset {offset};"
-        );
-        let doc = self.query("characters", body).await?;
+        let doc = self
+            .query("characters", popular_characters_body(offset))
+            .await?;
         Ok(parse_characters(&doc, allow_mature)
             .into_iter()
             .map(|(w, _)| w)
@@ -214,8 +216,7 @@ impl Igdb {
         id: i64,
         allow_mature: bool,
     ) -> Result<Option<Work>, ProviderError> {
-        let body = format!("fields {GAME_FIELDS}; where id = {id}; limit 1;");
-        let doc = self.query("games", body).await?;
+        let doc = self.query("games", game_by_id_body(id)).await?;
         Ok(parse_games(&doc, allow_mature)
             .into_iter()
             .next()
@@ -227,11 +228,9 @@ impl Igdb {
         query: &str,
         allow_mature: bool,
     ) -> Result<Vec<Work>, ProviderError> {
-        let body = format!(
-            "search {}; fields {CHARACTER_FIELDS}; limit 50;",
-            quote(query)
-        );
-        let doc = self.query("characters", body).await?;
+        let doc = self
+            .query("characters", characters_search_body(query))
+            .await?;
         Ok(rank(parse_characters(&doc, allow_mature), 10))
     }
 
@@ -240,13 +239,63 @@ impl Igdb {
         id: i64,
         allow_mature: bool,
     ) -> Result<Option<Work>, ProviderError> {
-        let body = format!("fields {CHARACTER_FIELDS}; where id = {id}; limit 1;");
-        let doc = self.query("characters", body).await?;
+        let doc = self.query("characters", character_by_id_body(id)).await?;
         Ok(parse_characters(&doc, allow_mature)
             .into_iter()
             .next()
             .map(|(w, _)| w))
     }
+}
+
+// ---- request bodies (Apicalypse, pure so the exact text is tested) ------------------------------------
+// Fields come from the IGDB documentation. Main games are `version_parent = null & parent_game = null` (no editions,
+// DLC, expansions or bundle parts) so the deprecated `category` field is not needed.
+
+/// The "main games only" condition.
+pub(super) const MAIN_GAMES: &str = "version_parent = null & parent_game = null";
+
+fn platform_clause(platform: Option<&str>) -> String {
+    platform
+        .map(|p| format!(" & platforms.name ~ *{}*", quote(p)))
+        .unwrap_or_default()
+}
+
+pub(super) fn games_search_body(query: &str, platform: Option<&str>) -> String {
+    format!(
+        "search {}; fields {GAME_FIELDS}; where {MAIN_GAMES}{}; limit 50;",
+        quote(query),
+        platform_clause(platform)
+    )
+}
+
+pub(super) fn game_by_id_body(id: i64) -> String {
+    format!("fields {GAME_FIELDS}; where id = {id}; limit 1;")
+}
+
+pub(super) fn popular_games_body(offset: u32, min_votes: u32, platform: Option<&str>) -> String {
+    format!(
+        "fields {GAME_FIELDS}; where {MAIN_GAMES} & total_rating_count > {min_votes}{}; sort total_rating_count desc; limit 40; offset {offset};",
+        platform_clause(platform)
+    )
+}
+
+pub(super) fn characters_search_body(query: &str) -> String {
+    format!(
+        "search {}; fields {CHARACTER_FIELDS}; limit 20;",
+        quote(query)
+    )
+}
+
+pub(super) fn characters_of_game_body(game: i64) -> String {
+    format!("fields {CHARACTER_FIELDS}; where games = ({game}); limit 50;")
+}
+
+pub(super) fn character_by_id_body(id: i64) -> String {
+    format!("fields {CHARACTER_FIELDS}; where id = {id}; limit 1;")
+}
+
+pub(super) fn popular_characters_body(offset: u32) -> String {
+    format!("fields {CHARACTER_FIELDS}; where mug_shot != null; limit 40; offset {offset};")
 }
 
 impl CatalogProvider for Igdb {
@@ -360,6 +409,7 @@ pub(super) fn parse_games(doc: &Value, allow_mature: bool) -> Vec<(Work, u64)> {
                     .iter()
                     .filter_map(|x| x.get("name").and_then(Value::as_str).map(str::to_string))
                     .collect(),
+                work_key: None,
             };
             Some((
                 work,
@@ -384,29 +434,33 @@ pub(super) fn parse_characters(doc: &Value, allow_mature: bool) -> Vec<(Work, u6
             if facts.iter().any(safety::is_sexual) {
                 return None;
             }
-            let mut main: Option<(&Value, u64)> = None;
-            let mut weight = 0;
+            // The games the character appears in that may be shown, most rated first.
+            let mut shown: Vec<(&Value, u64)> = Vec::new();
             for (g, f) in games.iter().zip(&facts) {
-                if !safety::game_allowed(f, allow_mature) {
-                    continue;
-                }
-                let n = g
-                    .get("total_rating_count")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                weight += n;
-                if main.is_none_or(|(_, best)| n > best) {
-                    main = Some((g, n));
+                if safety::game_allowed(f, allow_mature) {
+                    shown.push((
+                        g,
+                        g.get("total_rating_count")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                    ));
                 }
             }
-            let (main, _) = main?;
+            shown.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            let weight: u64 = shown.iter().map(|(_, n)| n).sum();
+            let (main, _) = *shown.first()?;
+            let titles: Vec<&str> = shown
+                .iter()
+                .filter_map(|(g, _)| g.get("name").and_then(Value::as_str))
+                .take(3)
+                .collect();
             let work = Work {
                 id: format!("igdb:c{id}"),
                 source: Source::Igdb,
                 kind: Kind::Character,
                 title: c.get("name")?.as_str()?.to_string(),
                 native: None,
-                subtitle: main.get("name").and_then(Value::as_str).map(str::to_string),
+                subtitle: Some(titles.join(" · ")).filter(|t| !t.is_empty()),
                 year: None,
                 status: None,
                 rating: None,
@@ -417,6 +471,10 @@ pub(super) fn parse_characters(doc: &Value, allow_mature: bool) -> Vec<(Work, u6
                     .map(str::to_string),
                 cover_url: image(c, "mug_shot"),
                 genres: Vec::new(),
+                work_key: main
+                    .get("id")
+                    .and_then(Value::as_i64)
+                    .map(|g| format!("igdb:{g}")),
             };
             Some((work, weight))
         })

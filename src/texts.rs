@@ -157,9 +157,6 @@ pub const WORK_ADDED: &str = "✅ أضفته إلى بروفايلك";
 pub const WORK_REMOVED: &str = "أزلتُه من بروفايلك";
 pub const UNDONE: &str = "تراجعتُ عن ذلك.";
 pub const BTN_ADDED: &str = "مضاف";
-pub const BADGE_COLLECTOR: &str = "🏅 جامع";
-pub const BADGE_GAMER: &str = "🎮 لاعب";
-pub const BADGE_WATCHER: &str = "📺 متابع وفيّ";
 pub const SELECT_ITEM_PLACEHOLDER: &str = "افتح عنصرًا…";
 pub const BTN_SECTION_WORKS: &str = "أعمال";
 pub const BTN_SECTION_CHARACTERS: &str = "شخصيات";
@@ -435,6 +432,35 @@ pub const CHAPTER_DIGEST_EXPIRED: &str =
 
 pub const GAMES_DOWN: &str =
     "مصدر الألعاب لا يستجيب الآن، فلا أستطيع الحكم على الألعاب بأمان. جرّب بعد قليل.";
+pub fn game_without_characters(title: &str) -> String {
+    format!("لا أجد شخصيات مسجّلة للعبة «{title}» في المصادر. جرّب البحث عن الشخصية باسمها مباشرة.")
+}
+pub fn roster_of_game(title: &str) -> String {
+    format!("📚 شخصيات لعبة {title}")
+}
+pub const CHARACTER_NO_IMAGE: &str =
+    "لا توجد صورة لهذه الشخصية. يمكنك تعيين صورة لها من /edit بعد إضافتها لبروفايلك.";
+pub const MAINTENANCE: &str = "البوت في صيانة قصيرة، نعود قريبًا 🛠";
+/// Why an action was refused, naming the roles that may do it.
+pub fn permission_denied(action: &str, roles: &[i64]) -> String {
+    let who = roles
+        .iter()
+        .map(|r| format!("<@&{r}>"))
+        .collect::<Vec<_>>()
+        .join("، ");
+    format!(
+        "هذا الإجراء ({action}) متاح في هذا السيرفر لأصحاب الرتب: {who}. اطلب من المشرفين إضافتك."
+    )
+}
+pub const POLL_CLOSED: &str = "انتهى هذا التصويت، ننتظرك في التصويت القادم.";
+pub const WATCH_STARTED: &str = "بدأت ليلة المشاهدة هذه أو لم تعد موجودة.";
+pub const COMPARE_YOURSELF: &str = "قارن مع عضو آخر، فمقارنتك مع نفسك ستكون 100% دائمًا 😄";
+pub const COMPARE_PRIVATE: &str = "لا يمكن المقارنة: أحد البروفايلين خاص أو لا يمكنك رؤيته.";
+pub const COMPARE_WORKS_PLACEHOLDER: &str = "افتح عملًا مشتركًا";
+pub const COMPARE_CHARS_PLACEHOLDER: &str = "افتح شخصية مشتركة";
+pub const REC_GENERAL_WHY: &str = "ترشيح عام من الأعمال الرائجة";
+pub const REC_TMDB_FIELD: &str = "🎬 مسلسلات وأفلام";
+pub const REC_TMDB_PLACEHOLDER: &str = "افتح مسلسلًا أو فيلمًا";
 
 #[cfg(test)]
 mod tests {

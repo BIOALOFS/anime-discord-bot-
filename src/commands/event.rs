@@ -433,6 +433,12 @@ pub async fn event(
     category: Option<String>,
 ) -> Result<(), Error> {
     ctx.defer().await?;
+    // Starting a game may be limited to some roles; the leaderboard stays open to everyone.
+    if mode.trim() != "leaderboard" {
+        if let Some(text) = crate::features::perms::denied(ctx, "event").await {
+            return say_ephemeral(ctx, &text).await;
+        }
+    }
     let guild = ctx.guild_id().map(|g| g.get() as i64);
     if let Some(g) = guild {
         if !custom::games_enabled(&ctx.data().db, g).await? {

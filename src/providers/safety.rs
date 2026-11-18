@@ -156,18 +156,15 @@ pub struct VnFacts {
     pub image_violence: Option<i64>,
     /// A sexual-content tag (category, id or name).
     pub sexual_tag: bool,
-    /// A release with a minimum age of 18 or more.
-    pub adult_minage: bool,
     /// The tag list was part of the response (empty is a real answer; absence means no verdict is possible).
     pub tags_known: bool,
 }
 
-/// May a visual novel be shown? Hidden on a sexual tag, an image flagged above safe, or an adult minimum age together
-/// with sexual tags. Violence is allowed unless `mature-themes` is off, which also hides brutal images.
+/// May a visual novel be shown? Hidden on a sexual tag or an image flagged above safe (an 18+ release is only judged
+/// together with sexual tags, which already hide it, so release ages are not requested). Violence is allowed unless `mature-themes` is off, which also hides brutal images.
 pub fn vn_allowed(f: &VnFacts, allow_mature_themes: bool) -> bool {
     f.tags_known
         && !f.sexual_tag
-        && !(f.adult_minage && f.sexual_tag)
         && f.image_sexual.is_none_or(|s| s < 1)
         && (allow_mature_themes || f.image_violence.is_none_or(|v| v < 2))
 }

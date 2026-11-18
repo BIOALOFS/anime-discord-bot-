@@ -32,7 +32,14 @@ pub(super) async fn fail_private(ctx: Context<'_>, e: AniError) -> Result<(), Er
 pub async fn add_and_cache(pool: &SqlitePool, user: i64, c: &Character) -> Result<String, Error> {
     db::upsert_cache(pool, &cache_row(c, now())).await?;
     Ok(match db::add_character(pool, user, c.id).await? {
-        AddOutcome::Added(pos) => i18n::added_character(c.display_name(), pos),
+        AddOutcome::Added(pos) => {
+            crate::features::badges::announce(
+                pool,
+                user,
+                i18n::added_character(c.display_name(), pos),
+            )
+            .await
+        }
         AddOutcome::Duplicate => i18n::ALREADY_ADDED.to_string(),
     })
 }
@@ -87,7 +94,13 @@ pub(super) async fn add(ctx: Context<'_>, character: String) -> Result<(), Error
     // A TMDB cast entry or a game / visual-novel character picked from a suggestion or a roster.
     let key = character.trim();
     if key.starts_with("tmdb-cast:") || key.starts_with("igdb:c") || key.starts_with("vndb:c") {
-        let text = crate::global::add(ctx.data(), key, uid(ctx)).await;
+        let text = crate::global::add(
+            ctx.data(),
+            key,
+            uid(ctx),
+            super::super::fallback::game_flags(ctx).await.1,
+        )
+        .await;
         return private_reply(ctx, text).await;
     }
     let api = ctx.data().anilist.clone();

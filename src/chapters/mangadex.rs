@@ -37,8 +37,11 @@ impl MangaDex {
             .await
             .map_err(|e| SourceError::Http(e.without_url().to_string()))?;
         if !resp.status().is_success() {
-            return Err(SourceError::Http(resp.status().to_string()));
+            return Err(SourceError::Http(
+                crate::http_log::failed("mangadex", "chapter feed", resp).await,
+            ));
         }
+        crate::ops::health::ok("mangadex");
         resp.json()
             .await
             .map_err(|e| SourceError::Parse(e.to_string()))
