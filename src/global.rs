@@ -117,6 +117,9 @@ pub async fn mature_for(data: &Data, guild: Option<i64>) -> bool {
 }
 
 pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
+    if let Some((wiki, page)) = crate::wiki::parse_key(key) {
+        return crate::wiki::msgs::page_msg(&data.wikis, wiki, page).await;
+    }
     let current = status::get(&data.db, user, key).await.ok().flatten();
     if let Some(id) = key
         .strip_prefix("anilist:")
@@ -156,7 +159,21 @@ pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
             let name = cover
                 .as_ref()
                 .map_or("cover.jpg", |c| crate::commands::fallback::cover_name(c));
-            let e = crate::commands::fallback::card(&w, cover.is_some(), name);
+            let mut e = crate::commands::fallback::card(&w, cover.is_some(), name);
+            // A game that lacks a picture or a text may get them from a matching wiki page (empty fields only,
+            // within a short budget; the lookup finishes in the background for the next view).
+            if let Some(fill) = data
+                .wikis
+                .fill_within(
+                    &w.title,
+                    None,
+                    crate::wiki::Kind::Game,
+                    crate::wiki::FILL_BUDGET,
+                )
+                .await
+            {
+                crate::wiki::fill::enrich(&mut e, cover.is_some(), &fill);
+            }
             let mut m = Msg::card(
                 e,
                 work_rows(
@@ -182,6 +199,9 @@ pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
 
 /// One page of the characters of a work (0-based), as a message with a menu of them and page buttons.
 pub async fn roster_msg(data: &Data, key: &str, page: usize, mature: bool) -> Msg {
+    if let Some((wiki, game)) = crate::wiki::parse_key(key) {
+        return crate::wiki::msgs::roster_msg(&data.wikis, wiki, game).await;
+    }
     if let Some(id) = key
         .strip_prefix("anilist:")
         .and_then(|n| n.parse::<i64>().ok())
@@ -341,6 +361,7 @@ async fn search_params(
         ty,
         mature: mature_for(data, guild).await,
         games_on,
+        live_wikis: true,
     }
 }
 
@@ -392,6 +413,9 @@ async fn has_performers(data: &Data, key: &str, mature: bool) -> bool {
 
 /// The card of a character of any source. `value` is an AniList character id, a `tmdb-cast:` key or a provider key.
 pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
+    if let Some((wiki, page)) = crate::wiki::parse_key(value) {
+        return crate::wiki::msgs::page_msg(&data.wikis, wiki, page).await;
+    }
     // A person added to a profile is listed with the characters: its stored id opens the person card.
     if crate::people::parse_key(value).is_some() {
         return crate::people::msgs::person_msg(data, value, mature).await;
@@ -442,7 +466,20 @@ pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
             let name = cover
                 .as_ref()
                 .map_or("cover.jpg", |c| crate::commands::fallback::cover_name(c));
-            let e = crate::commands::fallback::card(&w, cover.is_some(), name);
+            let mut e = crate::commands::fallback::card(&w, cover.is_some(), name);
+            // The same fill for a character, only for a strong match (same name AND same game).
+            if let Some(fill) = data
+                .wikis
+                .fill_within(
+                    &w.title,
+                    w.subtitle.as_deref(),
+                    crate::wiki::Kind::Character,
+                    crate::wiki::FILL_BUDGET,
+                )
+                .await
+            {
+                crate::wiki::fill::enrich(&mut e, cover.is_some(), &fill);
+            }
             // "أظهر العمل": the game (or novel) card, as a new message.
             let mut row = components::standard_actions(ItemKind::Character, w.work_key.as_deref());
             row.push(components::add_button(value));

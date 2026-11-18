@@ -45,6 +45,23 @@ pub trait Transport: Send + Sync {
         params: Vec<(String, String)>,
         timeout: Duration,
     ) -> impl Future<Output = Result<Value, WikiError>> + Send;
+
+    /// Is this a real, reasonably sized image? (`Content-Type: image/*` and at most 8 MB.) Used before a picture of
+    /// a wiki fills a gap in a card. The thumbnails asked from the API are at most 600 px wide, so the pixel count is
+    /// bounded by the request itself.
+    fn probe_image(&self, _url: &str) -> impl Future<Output = bool> + Send {
+        async { true }
+    }
+}
+
+/// The largest picture a wiki may fill a card with.
+pub const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The decision of the image check from what the server said.
+pub fn image_ok(content_type: Option<&str>, length: Option<u64>) -> bool {
+    content_type.is_some_and(|c| {
+        c.trim().to_lowercase().starts_with("image/") && !c.to_lowercase().contains("svg")
+    }) && length.is_none_or(|l| l > 0 && l <= MAX_IMAGE_BYTES)
 }
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -99,6 +116,32 @@ pub fn is_maxlag(doc: &Value) -> bool {
 }
 
 impl Transport for HttpTransport {
+    async fn probe_image(&self, url: &str) -> bool {
+        if !super::safety::image_url_ok(url) {
+            return false;
+        }
+        let Ok(resp) = self
+            .http
+            .head(url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        else {
+            return false;
+        };
+        let header = |n: &str| {
+            resp.headers()
+                .get(n)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        resp.status().is_success()
+            && image_ok(
+                header("content-type").as_deref(),
+                header("content-length").and_then(|l| l.parse().ok()),
+            )
+    }
+
     async fn get(
         &self,
         api_url: &str,
@@ -426,7 +469,7 @@ impl<T: Transport> Api<T> {
     /// The pages of a category as a count (for the preview after the owner edits the category).
     pub async fn count_category(&self, api_url: &str, category: &str) -> Option<u64> {
         let t = parse::category_title(category);
-        self.category_counts(api_url, &[t.clone()])
+        self.category_counts(api_url, std::slice::from_ref(&t))
             .await
             .ok()?
             .into_iter()
@@ -754,6 +797,20 @@ mod tests {
         assert_eq!(hits.len(), 1, "the talk page is filtered out");
         assert_eq!(api.count_category("u", "Characters").await, Some(7));
         assert_eq!(api.count_category("u", "Category:Nothing").await, None);
+    }
+
+    #[test]
+    fn the_image_check_wants_a_real_image_of_a_sane_size() {
+        assert!(image_ok(Some("image/png"), Some(1_000)));
+        assert!(image_ok(Some("image/webp; charset=binary"), None));
+        assert!(!image_ok(Some("text/html"), Some(10)));
+        assert!(!image_ok(Some("image/svg+xml"), Some(10)), "no SVG");
+        assert!(!image_ok(None, Some(10)));
+        assert!(
+            !image_ok(Some("image/png"), Some(MAX_IMAGE_BYTES + 1)),
+            "over 8 MB"
+        );
+        assert!(!image_ok(Some("image/png"), Some(0)));
     }
 
     #[test]

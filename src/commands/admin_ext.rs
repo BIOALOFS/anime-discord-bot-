@@ -42,6 +42,8 @@ pub struct Tools {
     pub guild_count: usize,
     pub discord: Arc<serenity::Http>,
     pub anilist: Arc<crate::anilist::SafeAniList>,
+    /// The owner's wikis (the panel manages them; owner only).
+    pub wikis: Arc<crate::wiki::service::Wikis>,
 }
 
 /// One line of the provider status panel.
@@ -474,6 +476,7 @@ pub fn components(
         S::Owner => vec![nav(vec![
             action("o:backup", "نسخة احتياطية الآن"),
             toggle("o:maint", "وضع الصيانة", e.maintenance, enabled),
+            action("go:wikis", "إدارة الويكيات"),
         ])],
         _ => Vec::new(),
     }

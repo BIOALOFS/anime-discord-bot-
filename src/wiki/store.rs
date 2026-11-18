@@ -22,6 +22,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Source>> {
     .await
 }
 
+#[cfg(test)]
 pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<Source>> {
     sqlx::query_as(&format!(
         "SELECT {SOURCE_COLUMNS} FROM wiki_sources WHERE id = ?1"
@@ -254,7 +255,7 @@ pub async fn suggest(
     .bind(kind.map(Kind::key))
     .bind(wiki)
     .bind(&norm)
-    .bind(format!("{}%", norm.replace('%', "").replace('_', "")))
+    .bind(format!("{}%", norm.replace(['%', '_'], "")))
     .bind(limit)
     .fetch_all(pool)
     .await?;

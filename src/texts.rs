@@ -471,6 +471,7 @@ pub fn search_results_for(q: &str) -> String {
 }
 pub const SEARCH_NEEDS_NAME: &str = "اكتب اسم عمل أو شخصية أو شخص للبحث.";
 pub const PERSON_NOT_ADDABLE: &str = "الشركات ما تُضاف للبروفايل، فقط الأشخاص.";
+pub const WIKI_PICK_TITLE: &str = "نتائج من الويكي";
 pub const PICK_PERSON_TITLE: &str = "من تقصد؟";
 pub const PICK_PERSON_PLACEHOLDER: &str = "افتح بطاقة شخص…";
 pub const PICK_PERFORMER_PLACEHOLDER: &str = "اختر المؤدي…";
@@ -489,6 +490,49 @@ pub fn crew_of(title: &str) -> String {
 }
 pub fn performers_of(name: &str) -> String {
     format!("مؤدّو {name}")
+}
+
+// ---- wikis (owner) ---------------------------------------------------------------------------------
+pub const WIKI_ADMIN_TITLE: &str = "📚 إدارة الويكيات";
+pub const WIKI_ADMIN_INTRO: &str = "الويكيات مصادر إضافية تعمل في كل السيرفرات: تدخل في البحث تلقائيًا، وتكمل ما ينقص البطاقات (صورة أو ملخص أو اللعبة)، وتعطي قوائم الشخصيات. تُقرأ من واجهة MediaWiki الرسمية فقط.";
+pub const WIKI_NONE: &str = "لا توجد ويكيات بعد. اضغط «إضافة ويكي» وألصق رابطها.";
+pub const WIKI_ADD_TITLE: &str = "إضافة ويكي";
+pub const WIKI_ADD_LABEL: &str = "رابط الويكي (مثل silenthill.fandom.com)";
+pub const WIKI_RENAME_TITLE: &str = "اسم الويكي";
+pub const WIKI_RENAME_LABEL: &str = "الاسم الظاهر";
+pub const WIKI_CHAR_CAT_TITLE: &str = "تصنيف الشخصيات";
+pub const WIKI_CHAR_CAT_LABEL: &str = "اسم التصنيف (فارغ = بحث فقط)";
+pub const WIKI_GAME_CAT_TITLE: &str = "تصنيف الألعاب";
+pub const WIKI_GAME_CAT_LABEL: &str = "اسم التصنيف (فارغ = بحث فقط)";
+pub const WIKI_BAD_ADDRESS: &str =
+    "هذا العنوان لا يصلح: لازم رابط HTTPS لموقع عام (بلا عناوين محلية أو IP).";
+pub const WIKI_NOT_MEDIAWIKI: &str = "ما قدرت أتصل بهذا الموقع كواجهة MediaWiki. تأكد من الرابط.";
+pub const WIKI_SAVED: &str = "✅ أضفتُ الويكي وهي تعمل الآن في كل السيرفرات.";
+pub const WIKI_DUPLICATE: &str = "هذه الويكي مضافة من قبل.";
+pub const WIKI_CANCELLED: &str = "أُلغيت الإضافة.";
+pub const WIKI_ENABLED: &str = "✅ فعّلتُ الويكي في كل السيرفرات.";
+pub const WIKI_DISABLED: &str = "⏸️ عطّلتُ الويكي في كل السيرفرات.";
+pub const WIKI_DELETED: &str = "🗑 حذفتُ الويكي. بيانات الأعضاء لم تُمسّ، وصفحاتها المخزنة تنتهي وحدها.";
+pub const WIKI_CONFIRM_DELETE: &str = "هل تحذف هذه الويكي من كل السيرفرات؟ اضغط «تأكيد الحذف».";
+pub const WIKI_RENAMED: &str = "✅ حفظتُ التعديل.";
+pub const WIKI_KILL_ON: &str = "✅ شغّلتُ الويكيات في كل السيرفرات.";
+pub const WIKI_KILL_OFF: &str = "⏸️ أوقفتُ كل الويكيات في كل السيرفرات.";
+pub const WIKI_CACHE_CLEARED: &str =
+    "مسحتُ صفحات الويكيات المخزنة (التعريفات وبيانات الأعضاء لم تُمسّ).";
+pub const WIKI_CONNECTION_OK: &str = "✅ الاتصال سليم.";
+pub const WIKI_CONNECTION_FAIL: &str = "❌ تعذّر الاتصال بالويكي.";
+pub const WIKI_NO_SELECTION: &str = "اختر ويكي من القائمة أولًا.";
+pub const WIKI_OWNER_ONLY: &str = "إدارة الويكيات للمالك فقط.";
+pub const WIKI_PICK_PLACEHOLDER: &str = "اختر ويكي لإدارتها…";
+pub fn wiki_preview_found(n: u64, samples: &[String]) -> String {
+    if samples.is_empty() {
+        format!("وجدت {n} شخصية.")
+    } else {
+        format!("وجدت {n} شخصية، مثال: {}.", samples.join("، "))
+    }
+}
+pub fn wiki_connection_failed(why: &str) -> String {
+    format!("❌ تعذّر الاتصال بالويكي: {why}")
 }
 
 #[cfg(test)]

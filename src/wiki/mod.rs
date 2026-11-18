@@ -4,12 +4,17 @@
 
 pub mod admin;
 pub mod client;
+pub mod fill;
+pub mod msgs;
 pub mod parse;
 pub mod safety;
 pub mod service;
 pub mod store;
 
 use serde::{Deserialize, Serialize};
+
+/// How long a card waits for a wiki to fill its gaps; the lookup goes on in the background after that.
+pub const FILL_BUDGET: std::time::Duration = std::time::Duration::from_millis(1200);
 
 /// What a wiki page is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

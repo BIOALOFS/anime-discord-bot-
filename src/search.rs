@@ -160,6 +160,8 @@ pub struct Entry {
     /// "عمل · أنمي · 2019", "شخصية · من Silent Hill", "شخص · مؤدي أصوات".
     pub tail: String,
     pub popularity: i64,
+    /// The game or work a character belongs to (used to tell two characters of the same name apart).
+    pub parent: Option<String>,
 }
 
 impl Entry {
@@ -187,13 +189,15 @@ pub struct Params {
     pub ty: Ty,
     pub mature: bool,
     pub games_on: bool,
+    /// Ask the wikis live (a submitted search) or read only their local index (autocomplete, which may not wait).
+    pub live_wikis: bool,
 }
 
 /// Everything found, and the sources that did not answer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Gathered {
     pub entries: Vec<Entry>,
-    pub failed: Vec<&'static str>,
+    pub failed: Vec<String>,
 }
 
 impl Gathered {
@@ -257,6 +261,7 @@ pub async fn gather(
                     name: m.title.main().to_string(),
                     tail: work_tail(cards::kind_label(kind_of(m)), m.year()),
                     popularity: m.popularity.unwrap_or(0),
+                    parent: None,
                 })
                 .collect(),
             Err(e) => {
@@ -285,6 +290,7 @@ pub async fn gather(
                         None => "شخصية".to_string(),
                     },
                     popularity: c.favourites.unwrap_or(0),
+                    parent: c.main_work().map(str::to_string),
                 })
                 .collect(),
             Err(e) => {
@@ -350,6 +356,7 @@ pub async fn gather(
                     w.year,
                 ),
                 popularity: w.popularity.map_or(0, |x| (x * 100.0) as i64),
+                parent: None,
             })
             .collect()
     };
@@ -378,6 +385,7 @@ pub async fn gather(
                     w.year,
                 ),
                 popularity: w.rating.map_or(0, |r| (r * 100.0) as i64),
+                parent: None,
             })
             .collect();
         (entries, failed)
@@ -400,6 +408,7 @@ pub async fn gather(
                     None => "شخصية".to_string(),
                 },
                 popularity: 0,
+                parent: w.subtitle.clone(),
             })
             .collect()
     };
@@ -422,21 +431,96 @@ pub async fn gather(
                     format!("شخص · {}", h.hint)
                 },
                 popularity: h.popularity,
+                parent: None,
             })
             .collect();
         (entries, failed)
     };
-    let (aw, ac, tw, (gw, gf), gc, (pe, pf)) =
-        futures::join!(ani_works, ani_chars, tmdb_works, games, game_chars, persons);
+    // The wikis of the owner (global): searched live for a submitted search, from the local index for autocomplete.
+    let wikis = async {
+        if !(want_works || want_chars) || !p.cat.games() || q.chars().count() < 2 {
+            return (Vec::new(), Vec::new());
+        }
+        let found = if p.live_wikis {
+            src.wikis.search(q, None, None).await
+        } else {
+            crate::wiki::service::Found {
+                pages: src.wikis.suggest(q, None, None, 10).await,
+                failed: Vec::new(),
+            }
+        };
+        let names: std::collections::HashMap<i64, String> = src
+            .wikis
+            .sources()
+            .await
+            .iter()
+            .map(|w| (w.id, w.name.clone()))
+            .collect();
+        let entries = found
+            .pages
+            .iter()
+            .filter_map(|pg| {
+                let wiki = names.get(&pg.wiki_id).cloned().unwrap_or_default();
+                match pg.kind {
+                    crate::wiki::Kind::Character if want_chars => Some(Entry {
+                        group: Group::Character,
+                        key: pg.key(),
+                        name: pg.title.clone(),
+                        tail: match &pg.parent_title {
+                            Some(g) => format!("شخصية · من {g} · {wiki}"),
+                            None => format!("شخصية · {wiki}"),
+                        },
+                        popularity: 0,
+                        parent: pg.parent_title.clone(),
+                    }),
+                    crate::wiki::Kind::Game if want_works => Some(Entry {
+                        group: Group::Work,
+                        key: pg.key(),
+                        name: pg.title.clone(),
+                        tail: format!("عمل · {} · {wiki}", i18n::KIND_GAME),
+                        popularity: 0,
+                        parent: None,
+                    }),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        (entries, found.failed)
+    };
+    let (aw, ac, tw, (gw, gf), gc, (pe, pf), (we, wf)) =
+        futures::join!(ani_works, ani_chars, tmdb_works, games, game_chars, persons, wikis);
     let mut out = Gathered::default();
-    for list in [aw, tw, gw, ac, gc, pe] {
+    for list in [aw, tw, gw, ac, gc, pe, we] {
         out.entries.extend(list);
     }
-    out.failed.extend(gf);
-    out.failed.extend(pf);
+    out.failed.extend(gf.iter().map(|n| n.to_string()));
+    out.failed.extend(pf.iter().map(|n| n.to_string()));
+    out.failed.extend(wf);
     out.failed.dedup();
-    out.entries = rank(out.entries, q);
+    out.entries = dedupe_characters(rank(out.entries, q));
     out
+}
+
+/// The same character from several sources is one entry: the same name AND the same game (both known) merge, keeping
+/// the first (the best ranked); a name alone never merges two characters.
+pub fn dedupe_characters(entries: Vec<Entry>) -> Vec<Entry> {
+    let mut kept: Vec<Entry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        let dup = e.group == Group::Character
+            && kept.iter().any(|k| {
+                k.group == Group::Character
+                    && crate::wiki::same_identity(
+                        &k.name,
+                        k.parent.as_deref(),
+                        &e.name,
+                        e.parent.as_deref(),
+                    )
+            });
+        if !dup {
+            kept.push(e);
+        }
+    }
+    kept
 }
 
 /// Exact name first, then popularity; one entry per key.
@@ -601,6 +685,7 @@ mod tests {
                 Group::Person => "شخص · مؤدي أصوات".into(),
             },
             popularity: pop,
+            parent: None,
         }
     }
 
@@ -744,6 +829,7 @@ mod tests {
             ty: Ty::All,
             mature: true,
             games_on: true,
+            live_wikis: true,
         };
         let m = results_msg(&g, p, "silent", 0);
         assert_eq!(m.rows.len(), 2);
@@ -769,7 +855,7 @@ mod tests {
         // a partial answer is said in Arabic
         let g = Gathered {
             entries: mixed()[..3].to_vec(),
-            failed: vec!["IGDB"],
+            failed: vec!["IGDB".to_string()],
         };
         let m = results_msg(&g, p, "x", 0);
         assert_eq!(m.rows.len(), 1, "no page buttons for one page");
@@ -802,5 +888,66 @@ mod tests {
         }
         assert_eq!(Cat::Drama.people_scope(), Scope::Screen);
         assert_eq!(Cat::All.people_scope(), Scope::All);
+    }
+
+    fn character(key: &str, name: &str, parent: Option<&str>, pop: i64) -> Entry {
+        Entry {
+            group: Group::Character,
+            key: key.into(),
+            name: name.into(),
+            tail: "شخصية".into(),
+            popularity: pop,
+            parent: parent.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_same_character_from_a_provider_and_two_wikis_is_one_entry() {
+        let merged = dedupe_characters(vec![
+            character("igdb:c1", "Pyramid Head", Some("Silent Hill 2"), 9),
+            character("wiki:1:5", "Pyramid-Head", Some("silent hill 2"), 0),
+            character("wiki:2:9", "Pyramid Head (Silent Hill 2)", None, 0),
+        ]);
+        assert_eq!(
+            merged.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(),
+            vec!["igdb:c1"],
+            "one entry, the best ranked"
+        );
+    }
+
+    #[test]
+    fn the_same_name_in_another_game_or_with_no_known_game_stays_separate() {
+        let kept = dedupe_characters(vec![
+            character("igdb:c1", "Pyramid Head", Some("Silent Hill 2"), 9),
+            character(
+                "wiki:1:6",
+                "Pyramid Head",
+                Some("Silent Hill: Homecoming"),
+                0,
+            ),
+            character("wiki:1:7", "Pyramid Head", None, 0),
+            character("wiki:1:8", "Heather", Some("Silent Hill 3"), 0),
+        ]);
+        assert_eq!(kept.len(), 4, "a name alone never merges two characters");
+        // works are never merged across sources
+        let works = vec![
+            Entry {
+                group: Group::Work,
+                key: "igdb:1".into(),
+                name: "Silent Hill 2".into(),
+                tail: "x".into(),
+                popularity: 1,
+                parent: None,
+            },
+            Entry {
+                group: Group::Work,
+                key: "wiki:1:2".into(),
+                name: "Silent Hill 2".into(),
+                tail: "x".into(),
+                popularity: 0,
+                parent: None,
+            },
+        ];
+        assert_eq!(dedupe_characters(works).len(), 2);
     }
 }

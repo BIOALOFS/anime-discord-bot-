@@ -237,3 +237,27 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 | Every other message (search, results, rosters, `/top`, `/schedule`, `/suggest`, `/recommend`, `/airing`, `/help`, `/admin`, cards, private views) | 1 minute, extended by every press, 10 minutes at most |
 
 At the end of the time the bot edits the message and greys out every button and menu. The content stays exactly as it was; no new message and no "expired" note are sent. A press on a control of a message that is no longer tracked (for example after a restart) is acknowledged and ignored. The sessions are stored in the `message_sessions` table (message, owner, class, expiry, the Back stack and the components as last shown, never an interaction token), so messages are greyed out on time even after a restart; ephemeral messages are tracked in memory only (their token lives 15 minutes). A sweeper runs every 30 seconds with four edits at a time and backs off on rate limits.
+
+## Wikis (Round 11)
+The bot owner can add MediaWiki sites (Fandom, wiki.gg, Wikipedia-style) as extra sources from `/admin` → **للمالك** → **إدارة الويكيات**. Only the official `api.php` is used, never HTML pages.
+
+- **Global.** A wiki is defined once and applies to every server; there is no per-server switch. A new wiki is **enabled on creation**, with no restart (the list is read from the database with a one-minute cache that every add, edit, toggle and delete drops).
+- **Owner only.** Add, edit, enable/disable, delete and "اختبار الاتصال" are refused for everyone else (the same rule as the other owner tools). Members only benefit. The panel also has an **emergency switch** for all wikis (`wiki_global_enabled`, on by default), "مسح الكاش" (the cached pages only) and a read-only line: wikis, cached pages, requests today and the last errors.
+- **Adding.** Paste a page URL, a bare host or an `api.php` URL; it is normalised to the host and `/api.php` (then `/w/api.php`). The address must be HTTPS on a public host name (no localhost, no IP addresses, no `.local`/`.internal`, no other port). The bot reads `siteinfo` (name, language, license), detects the **character category** (it tries `Characters`, `Playable characters`, `Main characters`, `Non-playable characters`, `Heroes`, `Villains` and categories that start with `Char`, ignoring image/template/hub categories, and keeps the one with the most pages) and the **game category** (`Games`, `Video games`), and shows "وجدت N شخصية، مثال: …" with confirm / edit category / cancel. Nothing is saved before the owner confirms; with no category found a wiki can still be saved search-only.
+- **Automatic.** For `/game`, the game-character search and `/search` the main providers and every enabled wiki are asked together; a failing wiki never fails the search (its cached pages stand in and the owner sees the last error). If the main providers have nothing, wiki results are shown directly. In `/game`, **المصدر** offers IGDB, VNDB, **كل الويكيات** (wikis only) and each wiki by name (within Discord's 25 options). Autocomplete reads only the local index (SQLite FTS5), never a wiki, because of Discord's three seconds; the index fills from searches, category fetches and a low-priority background warmer.
+- **Filling gaps.** A card from IGDB or VNDB (a game or a character) that lacks a picture or a text gets them from a matching wiki page: only empty fields, never over what the provider gave, only for a strong match (the same name AND the same game for characters), cached for 7 days, the picture checked as a real image of at most 8 MB (the API thumbnails are at most 600 px), within a short budget (the lookup finishes in the background for the next view).
+- **No duplicates.** Names are compared lower-cased, without accents or punctuation ("Pyramid-Head" = "pyramid head"); two characters are the same only with the same name and the same game. The same name in different games, or with an unknown game, stays separate.
+- **Safety.** Every page (title, aliases, text, categories, picture address) passes the content filter (explicit words, adult categories); a doubtful page is dropped silently. There are no age ratings. Wiki data has no rating or popularity: none is shown, none is invented.
+- **Attribution.** A wiki card names the wiki and its license in the footer and links the page from the title and a button (CC BY-SA).
+- **Data.** Migration 0020 is additive (`wiki_sources`, `wiki_cache`, an FTS5 index). Deleting a wiki removes only its definition; its cached pages expire (a week) and are never shown meanwhile. Member data is never touched.
+- **Optional setting:** `WIKI_REQUESTS_PER_SECOND` (default `2`, per wiki).
+
+### Owner checklist
+1. `/admin` → للمالك → إدارة الويكيات → إضافة ويكي → `silenthill.fandom.com` → check the preview → تأكيد.
+2. `/game` type شخصية, name "Pyramid Head", no source: a single card with the wiki footer.
+3. `/game` type عمل with a title that IGDB and VNDB do not have: the wiki results are shown.
+4. Pick the source "كل الويكيات", then a single wiki.
+5. Add a second wiki: it works in another server at once.
+6. Disable it: gone everywhere; delete it: member data untouched.
+7. Typing in the name field answers in under three seconds.
+

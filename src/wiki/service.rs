@@ -78,6 +78,8 @@ pub struct Wikis<T: Transport = HttpTransport> {
     pub api: Api<T>,
     sources: Cache<(), Arc<Vec<Source>>>,
     searches: Cache<String, Arc<Vec<Page>>>,
+    /// Fills for cards (a matching page's picture and text), kept for a week; a "no match" is kept too.
+    pub(super) fills: Cache<String, Arc<Option<super::fill::Fill>>>,
     requests: AtomicU64,
     day: AtomicI64,
 }
@@ -100,6 +102,10 @@ impl<T: Transport + 'static> Wikis<T> {
             searches: Cache::builder()
                 .time_to_live(Duration::from_secs(3600))
                 .max_capacity(5_000)
+                .build(),
+            fills: Cache::builder()
+                .time_to_live(Duration::from_secs(7 * 24 * 3600))
+                .max_capacity(10_000)
                 .build(),
             requests: AtomicU64::new(0),
             day: AtomicI64::new(today()),
@@ -126,6 +132,7 @@ impl<T: Transport + 'static> Wikis<T> {
     pub async fn invalidate(&self) {
         self.sources.invalidate_all();
         self.searches.invalidate_all();
+        self.fills.invalidate_all();
         self.sources.run_pending_tasks().await;
     }
 
@@ -520,7 +527,7 @@ pub struct Stats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wiki::client::fake::{FakeWiki, *};
+    use crate::wiki::client::fake::FakeWiki;
     use serde_json::json;
     use std::collections::HashMap;
 
