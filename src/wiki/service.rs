@@ -418,13 +418,55 @@ impl<T: Transport + 'static> Wikis<T> {
         let cached = store::characters_of(&self.pool, wiki_id, &parent, now)
             .await
             .unwrap_or_default();
-        if !cached.is_empty() || w.character_category.is_none() {
+        if !cached.is_empty() {
             return cached;
         }
-        self.fetch_category(&w, 150).await;
-        store::characters_of(&self.pool, wiki_id, &parent, chrono::Utc::now().timestamp())
+        if w.character_category.is_some() {
+            self.fetch_category(&w, 150).await;
+            let again =
+                store::characters_of(&self.pool, wiki_id, &parent, chrono::Utc::now().timestamp())
+                    .await
+                    .unwrap_or_default();
+            if !again.is_empty() {
+                return again;
+            }
+        }
+        // No character category per work: the characters the work page links to (one request for the links, at
+        // most 60 details; every page that is not a character is dropped, the rest is cached with this work as parent).
+        self.characters_by_links(&w, game_title).await
+    }
+
+    async fn characters_by_links(&self, w: &Source, work_title: &str) -> Vec<Page> {
+        self.count_request();
+        let Ok(links) = self
+            .api
+            .page_links(&w.api_url, work_title, INTERACTIVE_TIMEOUT * 2)
             .await
-            .unwrap_or_default()
+        else {
+            return Vec::new();
+        };
+        let now = chrono::Utc::now().timestamp();
+        let mut out = Vec::new();
+        for batch in links.chunks(30).take(2) {
+            self.count_request();
+            let Ok(raws) = self
+                .api
+                .details(&w.api_url, batch, INTERACTIVE_TIMEOUT * 2)
+                .await
+            else {
+                continue;
+            };
+            for mut p in to_pages(w, raws) {
+                if p.kind != Kind::Character {
+                    continue;
+                }
+                p.parent_title.get_or_insert_with(|| work_title.to_string());
+                if store::upsert(&self.pool, &p, now).await.is_ok() {
+                    out.push(p);
+                }
+            }
+        }
+        out
     }
 
     /// Fetch the members of the wiki's character category and the details of up to `limit` of them into the cache.
@@ -653,6 +695,82 @@ mod tests {
         assert_eq!(live[0].work_category, None, "search-only for games");
         assert!(w.source(id).await.is_some());
         assert!(!t.calls.lock().expect("lock").is_empty());
+    }
+
+    /// A wiki of a manhwa: no game category anywhere. Characters and works are both found, the works are manga
+    /// (never "game"), the wiki serves /manga and not /game, and a page keeps the series name as written.
+    #[tokio::test]
+    async fn a_manhwa_wiki_is_discovered_classified_and_routed_without_any_game_assumption() {
+        let mut members = HashMap::new();
+        members.insert(
+            "Category:Characters".to_string(),
+            vec![(1, "Sung Jinwoo".to_string())],
+        );
+        let f = FakeWiki {
+            categories: vec![
+                ("Category:Characters".into(), 120),
+                ("Category:Manhwa".into(), 4),
+                ("Category:Chapters".into(), 200),
+            ],
+            members,
+            pages: vec![
+                (
+                    1,
+                    "Sung Jinwoo".into(),
+                    vec!["Characters".into(), "Hunters".into()],
+                    json!({"thumbnail": {"source": "https://static.wikia.nocookie.net/s/a.png"}}),
+                ),
+                (2, "Solo Leveling".into(), vec!["Manhwa".into()], json!({})),
+                (3, "Chapter 1".into(), vec!["Chapters".into()], json!({})),
+            ],
+            ..FakeWiki::default()
+        };
+        let (w, _t) = service(f).await;
+        let p = w.preview("sololeveling.fandom.com").await.expect("preview");
+        assert_eq!(p.detection.character.as_ref().map(|c| c.1), Some(120));
+        assert_eq!(
+            p.detection.work.as_ref().map(|c| c.0.as_str()),
+            Some("Category:Manhwa"),
+            "works are found without a Games category; chapters are not works"
+        );
+        let id = match w
+            .save(&p, None, Some("Characters"), Some("Manhwa"), 1)
+            .await
+            .expect("save")
+        {
+            store::Added::New(id) => id,
+            other => panic!("{other:?}"),
+        };
+        let src = w.source(id).await.expect("source");
+        assert_eq!(src.work_category.as_deref(), Some("Category:Manhwa"));
+        assert_eq!(parse::wiki_medium(&src), Some(Kind::Manga));
+        assert!(src.serves(Kind::Manga) && !src.serves(Kind::Game));
+        assert_eq!(parse::classify(&src, &["Manhwa".into()]), Kind::Manga);
+        assert_eq!(
+            parse::classify(&src, &["Characters".into()]),
+            Kind::Character
+        );
+        assert_eq!(parse::classify(&src, &["Chapters".into()]), Kind::Other);
+        // routing: manhwa characters appear under /manga, never under /game
+        assert!(super::super::fits(&src, Kind::Character, Kind::Character));
+        assert!(super::super::fits(&src, Kind::Manga, Kind::Manga));
+        assert!(super::super::fits(&src, Kind::Manga, Kind::Work));
+        assert!(!super::super::fits(&src, Kind::Manga, Kind::Game));
+        // a mixed wiki (no hint, no work category) serves every command, an unknown medium is never "game"
+        let mixed = Source {
+            work_category: None,
+            ..src.clone()
+        };
+        assert!(mixed.serves(Kind::Game) && mixed.serves(Kind::Anime));
+        assert_eq!(parse::work_kind(&mixed, &[]), Kind::Work);
+        assert_eq!(crate::i18n::wiki_medium_label(Kind::Work), None);
+        // a manual hint wins
+        let hinted = Source {
+            kind_hint: Some("game".into()),
+            ..src
+        };
+        assert_eq!(parse::work_kind(&hinted, &["Manhwa".into()]), Kind::Game);
+        assert_eq!(parse::wiki_medium(&hinted), Some(Kind::Game));
     }
 
     #[tokio::test]

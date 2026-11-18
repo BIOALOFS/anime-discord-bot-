@@ -96,6 +96,31 @@ pub fn parse_allcategories(doc: &Value) -> Vec<(String, u64)> {
         .unwrap_or_default()
 }
 
+/// `prop=links` of one page: the titles it links to (main namespace only, subpages and drafts dropped).
+pub fn parse_links(doc: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for page in doc
+        .pointer("/query/pages")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        for l in page
+            .get("links")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            if let Some(t) = l.get("title").and_then(Value::as_str) {
+                if title_ok(t) && !out.iter().any(|o| o == t) {
+                    out.push(t.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// `prop=categoryinfo`: `(category title, pages)` for the categories that exist.
 pub fn parse_categoryinfo(doc: &Value) -> Vec<(String, u64)> {
     doc.pointer("/query/pages")

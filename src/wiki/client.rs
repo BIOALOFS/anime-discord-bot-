@@ -392,6 +392,30 @@ impl<T: Transport> Api<T> {
         Ok(out)
     }
 
+    /// The pages a work page links to (at most 500): the cast list of a wiki that has no character category per work.
+    pub async fn page_links(
+        &self,
+        api_url: &str,
+        title: &str,
+        timeout: Duration,
+    ) -> Result<Vec<String>, WikiError> {
+        let doc = self
+            .t
+            .get(
+                api_url,
+                vec![
+                    p("action", "query"),
+                    p("prop", "links"),
+                    p("plnamespace", "0"),
+                    p("pllimit", "500"),
+                    p("titles", title),
+                ],
+                timeout,
+            )
+            .await?;
+        Ok(parse::parse_links(&doc))
+    }
+
     async fn categories_with_prefix(&self, api_url: &str, prefix: &str) -> Vec<(String, u64)> {
         match self
             .t
@@ -507,6 +531,8 @@ pub mod fake {
         /// Pages served by `prop=extracts…`: `(id, title, categories, extra json)`.
         pub pages: Vec<(i64, String, Vec<String>, Value)>,
         pub search_titles: Vec<(i64, String)>,
+        /// Links of a page by title, for `prop=links`.
+        pub links: HashMap<String, Vec<String>>,
         pub not_mediawiki: bool,
         pub fail: bool,
     }
@@ -589,6 +615,18 @@ pub mod fake {
                     .map(|(id, t)| json!({"pageid": id, "ns": 0, "title": t}))
                     .collect();
                 return Ok(json!({"query": {"search": list}}));
+            }
+            if arg(&params, "prop") == Some("links") {
+                let title = arg(&params, "titles").unwrap_or("");
+                let links: Vec<Value> = self
+                    .links
+                    .get(title)
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|t| json!({"ns": 0, "title": t}))
+                    .collect();
+                return Ok(json!({"query": {"pages": [{"title": title, "links": links}]}}));
             }
             if arg(&params, "prop").is_some_and(|p| p.contains("extracts")) {
                 let wanted: Vec<&str> = arg(&params, "titles").unwrap_or("").split('|').collect();

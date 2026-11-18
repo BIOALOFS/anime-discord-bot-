@@ -97,14 +97,13 @@ pub fn rows(
             buttons.push(crate::global::add_button_for(&p.key(), in_profile));
         }
         k if k.is_work() => {
-            if w.character_category.is_some() {
-                // The crew button is not offered: a wiki has no crew list.
-                buttons.extend(
-                    components::standard_actions(components::ItemKind::Work, Some(&p.key()))
-                        .into_iter()
-                        .take(1),
-                );
-            }
+            // The characters button is always offered: the characters come from the wiki's category, or from the links
+            // of the work page. The crew button is not offered: a wiki has no crew list.
+            buttons.extend(
+                components::standard_actions(components::ItemKind::Work, Some(&p.key()))
+                    .into_iter()
+                    .take(1),
+            );
             buttons.push(crate::global::add_button_for(&p.key(), in_profile));
         }
         _ => {}

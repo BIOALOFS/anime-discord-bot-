@@ -808,7 +808,16 @@ pub async fn run_media_with(
             Ok(mut v) if v.len() == 1 => Mode::Card(Box::new(v.remove(0))),
             Ok(v) if v.is_empty() => {
                 // AniList has nothing: try the (opt-in) fallback catalogs for written works.
+                let want = match kind {
+                    MediaKind::Anime => crate::wiki::Kind::Anime,
+                    MediaKind::Novel => crate::wiki::Kind::Novel,
+                    _ => crate::wiki::Kind::Manga,
+                };
                 if kind.is_written() && super::fallback::run(ctx, input.trim()).await? {
+                    return Ok(());
+                }
+                // The owner's wikis of the right medium answer last.
+                if super::category::wiki_fallback(ctx, input.trim(), want, false).await? {
                     return Ok(());
                 }
                 return say_ephemeral(ctx, i18n::NO_RESULTS).await;

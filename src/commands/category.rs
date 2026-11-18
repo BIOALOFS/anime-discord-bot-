@@ -55,6 +55,19 @@ impl Category {
         }
     }
 
+    /// The medium a wiki page must have to answer this command.
+    pub fn wiki_kind(self) -> crate::wiki::Kind {
+        use crate::wiki::Kind;
+        match self {
+            Self::Anime => Kind::Anime,
+            Self::Manga => Kind::Manga,
+            Self::Novel => Kind::Novel,
+            Self::Drama | Self::Series => Kind::Series,
+            Self::Movie => Kind::Movie,
+            Self::Game => Kind::Game,
+        }
+    }
+
     fn from_command(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|c| c.key() == name)
     }
@@ -338,6 +351,50 @@ fn command_category(ctx: Context<'_>) -> Option<Category> {
     Category::from_command(&ctx.command().name)
 }
 
+/// Suggestions from the owner's wikis, from the local index only (never a live call: three seconds), for works of
+/// the command's medium. At most five, so the main sources keep their room within Discord's 25.
+async fn wiki_choices(
+    ctx: Context<'_>,
+    partial: &str,
+    cat: Category,
+) -> Vec<serenity::AutocompleteChoice> {
+    if partial.trim().chars().count() < MIN_CHARS {
+        return Vec::new();
+    }
+    let wikis = ctx.data().wikis.clone();
+    let list = wikis.sources().await;
+    if list.is_empty() {
+        return Vec::new();
+    }
+    let want = cat.wiki_kind();
+    wikis
+        .suggest(partial, Some(crate::wiki::Kind::Work), None, 10)
+        .await
+        .into_iter()
+        .filter_map(|p| {
+            let src = list.iter().find(|s| s.id == p.wiki_id)?;
+            crate::wiki::fits(src, p.kind, want).then(|| {
+                let label: String = format!("{} ({})", p.title, src.name)
+                    .chars()
+                    .take(100)
+                    .collect();
+                serenity::AutocompleteChoice::new(label, p.key())
+            })
+        })
+        .take(5)
+        .collect()
+}
+
+/// The main suggestions followed by the wiki ones, within 25.
+fn with_wikis(
+    mut main: Vec<serenity::AutocompleteChoice>,
+    wiki: Vec<serenity::AutocompleteChoice>,
+) -> Vec<serenity::AutocompleteChoice> {
+    main.truncate(25 - wiki.len().min(5));
+    main.extend(wiki);
+    main
+}
+
 pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     if !crate::guild::autocomplete_allowed(ctx).await {
         return Vec::new();
@@ -366,7 +423,8 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
                     ..Opts::default()
                 },
             );
-            media::media_autocomplete(ctx, kind, kind.key(), partial).await
+            let main = media::media_autocomplete(ctx, kind, kind.key(), partial).await;
+            with_wikis(main, wiki_choices(ctx, partial, cat).await)
         }
         Category::Drama | Category::Series | Category::Movie => {
             let Some(tcat) = cat.tmdb() else {
@@ -396,7 +454,7 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
                         .collect()
                 })
                 .await;
-            to_choices(items)
+            with_wikis(to_choices(items), wiki_choices(ctx, partial, cat).await)
         }
         Category::Game => {
             let (games_on, mature) = fallback::game_flags(ctx).await;
@@ -453,13 +511,19 @@ pub async fn ac_name(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocompl
                             for p in wikis
                                 .suggest(
                                     &text,
-                                    Some(crate::wiki::Kind::Game),
+                                    Some(crate::wiki::Kind::Work),
                                     choice.only_wiki(),
                                     10,
                                 )
                                 .await
                             {
-                                if known.contains(&crate::wiki::normalize(&p.title)) {
+                                let fits = wiki_list
+                                    .iter()
+                                    .find(|s| s.id == p.wiki_id)
+                                    .is_some_and(|s| {
+                                        crate::wiki::fits(s, p.kind, crate::wiki::Kind::Game)
+                                    });
+                                if !fits || known.contains(&crate::wiki::normalize(&p.title)) {
                                     continue;
                                 }
                                 let wiki = names.get(&p.wiki_id).cloned().unwrap_or_default();
@@ -553,6 +617,44 @@ async fn guild_overrides(ctx: Context<'_>) -> std::collections::HashMap<String, 
             .await
             .unwrap_or_default(),
         None => Default::default(),
+    }
+}
+
+/// The wikis answer too when the main sources have nothing: pages of the right medium (a manhwa wiki under /manga, a
+/// game wiki under /game, a mixed wiki everywhere), shown directly. `true` when something was shown.
+pub async fn wiki_fallback(
+    ctx: Context<'_>,
+    q: &str,
+    want: crate::wiki::Kind,
+    character: bool,
+) -> Result<bool, Error> {
+    let wikis = ctx.data().wikis.clone();
+    let list = wikis.sources().await;
+    if list.is_empty() || q.trim().is_empty() {
+        return Ok(false);
+    }
+    let kind = if character {
+        crate::wiki::Kind::Character
+    } else {
+        crate::wiki::Kind::Work
+    };
+    let mut found = wikis.search(q, Some(kind), None).await;
+    found.pages.retain(|p| {
+        list.iter().find(|s| s.id == p.wiki_id).is_some_and(|s| {
+            if character {
+                s.serves(want)
+            } else {
+                crate::wiki::fits(s, p.kind, want)
+            }
+        })
+    });
+    let user = ctx.author().id.get() as i64;
+    match crate::wiki::msgs::show(&wikis, found, q, user).await {
+        Some(msg) => {
+            crate::global::reply(ctx, msg).await?;
+            Ok(true)
+        }
+        None => Ok(false),
     }
 }
 
@@ -716,6 +818,21 @@ pub async fn run(ctx: Context<'_>, cat: Category, ty: Type, o: Opts) -> Result<(
         ctx.defer_ephemeral().await?;
         return say_ephemeral(ctx, i18n::CATEGORY_NEEDS_NAME).await;
     }
+    // A wiki page picked from the suggestions opens directly, on every command.
+    if let Some((wiki, page)) = name
+        .as_deref()
+        .and_then(|n| crate::wiki::parse_key(n.trim()))
+    {
+        ctx.defer().await?;
+        let msg = crate::wiki::msgs::page_msg(
+            &ctx.data().wikis,
+            wiki,
+            page,
+            ctx.author().id.get() as i64,
+        )
+        .await;
+        return crate::global::reply(ctx, msg).await;
+    }
     // A wiki (or all wikis) chosen as the source: the search is restricted to wikis, for every command.
     if cat != Category::Game && matches!(ty, Type::Work | Type::Character) {
         let wiki_list = ctx.data().wikis.sources().await;
@@ -828,6 +945,11 @@ async fn run_tmdb(
                 Some((kind, id)) => tmdb.details(kind, id).await.into_iter().collect(),
                 None => find::search(&tmdb, tcat, &name, &filter, &overrides).await,
             };
+            if hits.is_empty()
+                && wiki_fallback(ctx, &name, cat.wiki_kind(), ty == Type::Character).await?
+            {
+                return Ok(());
+            }
             if ty == Type::Work {
                 return tmdb_view::show_results(ctx, sp, hits).await;
             }
@@ -935,9 +1057,16 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                 },
                 async {
                     if choice.wikis() {
-                        wikis
-                            .search(&q, Some(crate::wiki::Kind::Game), choice.only_wiki())
-                            .await
+                        let list = wikis.sources().await;
+                        let mut f = wikis
+                            .search(&q, Some(crate::wiki::Kind::Work), choice.only_wiki())
+                            .await;
+                        f.pages.retain(|p| {
+                            list.iter().find(|s| s.id == p.wiki_id).is_some_and(|s| {
+                                crate::wiki::fits(s, p.kind, crate::wiki::Kind::Game)
+                            })
+                        });
+                        f
                     } else {
                         crate::wiki::service::Found::default()
                     }

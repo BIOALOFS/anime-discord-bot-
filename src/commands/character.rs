@@ -857,12 +857,10 @@ pub(crate) async fn character_suggestions(
     let use_games = source != CharacterSource::AnimeManga && games_on && providers.games_enabled();
     let use_ani = source != CharacterSource::Games;
     let wikis = data.wikis.clone();
-    let wiki_names: std::collections::HashMap<i64, String> = wikis
-        .sources()
-        .await
-        .iter()
-        .map(|w| (w.id, w.name.clone()))
-        .collect();
+    let wiki_list = wikis.sources().await;
+    let wiki_names: std::collections::HashMap<i64, String> =
+        wiki_list.iter().map(|w| (w.id, w.name.clone())).collect();
+    let served = wikis_serving(&wiki_list, source);
     // The options that change the answer are part of the cache scope.
     let scope = format!("{source:?}|{mature}");
     let items = data
@@ -919,7 +917,7 @@ pub(crate) async fn character_suggestions(
                 );
                 // The owner's wikis, from the local index only. The same character (same name and same game) that a main
                 // source already listed is not listed again.
-                if source != CharacterSource::AnimeManga && text.chars().count() >= 2 {
+                if text.chars().count() >= 2 {
                     let mut known: Vec<(String, Option<String>)> = ani
                         .iter()
                         .map(|c| {
@@ -934,6 +932,9 @@ pub(crate) async fn character_suggestions(
                         .suggest(&text, Some(crate::wiki::Kind::Character), None, 8)
                         .await
                     {
+                        if !served.contains(&pg.wiki_id) {
+                            continue;
+                        }
                         if known.iter().any(|(n, g)| {
                             crate::wiki::same_identity(
                                 n,
@@ -957,6 +958,26 @@ pub(crate) async fn character_suggestions(
         )
         .await;
     to_choices(items)
+}
+
+/// The wikis whose characters answer this command: a wiki of a known medium serves only its own (a manhwa wiki serves
+/// /manga and /anime, a game wiki /game), a mixed wiki serves all.
+fn wikis_serving(
+    list: &[crate::wiki::Source],
+    source: CharacterSource,
+) -> std::collections::HashSet<i64> {
+    use crate::wiki::Kind;
+    list.iter()
+        .filter(|w| match crate::wiki::parse::wiki_medium(w) {
+            None => true,
+            Some(m) => match source {
+                CharacterSource::AnimeManga => matches!(m, Kind::Anime | Kind::Manga | Kind::Novel),
+                CharacterSource::Games => m == Kind::Game,
+                CharacterSource::All => true,
+            },
+        })
+        .map(|w| w.id)
+        .collect()
 }
 
 /// Resolve the typed or picked value and open the card (or a select menu for several matches).
@@ -1056,15 +1077,15 @@ pub async fn search_character(
             return say_ephemeral(ctx, game_notice(games_on, &providers)).await;
         }
         // The owner's wikis come in when the main sources have nothing: shown directly, no hint, no confirmation.
-        if wikis_allowed
-            && source != CharacterSource::AnimeManga
-            && matches!(filter, WorkFilter::None)
-        {
-            let found = ctx
+        if wikis_allowed && matches!(filter, WorkFilter::None) {
+            let list = ctx.data().wikis.sources().await;
+            let served = wikis_serving(&list, source);
+            let mut found = ctx
                 .data()
                 .wikis
                 .search(query, Some(crate::wiki::Kind::Character), None)
                 .await;
+            found.pages.retain(|p| served.contains(&p.wiki_id));
             if let Some(msg) = crate::wiki::msgs::show(
                 &ctx.data().wikis,
                 found,
