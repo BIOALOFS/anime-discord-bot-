@@ -13,6 +13,7 @@ mod events;
 mod feed;
 mod global;
 mod guild;
+mod http_log;
 pub mod texts;
 /// The one module of user-facing text; `i18n` is kept as its short alias across the code.
 pub use texts as i18n;
@@ -46,6 +47,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting anpot");
+    for (name, enabled, why) in config.provider_report() {
+        tracing::info!(provider = name, enabled, reason = why, "provider");
+    }
     let pool = db::connect(&config.database_url).await?;
     let anilist = std::sync::Arc::new(anilist::SafeAniList::new(&config)?);
     let token = config.discord_token.expose().to_string();

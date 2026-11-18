@@ -151,6 +151,8 @@ impl Tmdb {
                 continue;
             }
             if !resp.status().is_success() {
+                // The path is logged without its query (the key travels in the query or a header).
+                crate::http_log::failed("tmdb", path, resp).await;
                 self.negative.insert(key, ()).await;
                 return None;
             }

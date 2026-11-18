@@ -183,6 +183,11 @@ impl CharacterView {
         }
     }
 
+    /// A short note shown above the card (for example which provider did not answer).
+    pub fn set_notice(&mut self, note: Option<String>) {
+        self.notice = note;
+    }
+
     /// Mark the view as a child of another view.
     pub fn with_back(mut self) -> Self {
         self.from_parent = true;
@@ -450,7 +455,12 @@ impl View for CharacterView {
                     .cover
                     .as_ref()
                     .map_or("cover.jpg", |c| super::fallback::cover_name(c));
-                let mut row = vec![super::fallback::add_button(enabled, self.in_profile)];
+                // "أظهر العمل" opens the game (or novel) card as a new message.
+                let mut row = crate::components::standard_actions(
+                    crate::components::ItemKind::Character,
+                    w.work_key.as_deref(),
+                );
+                row.push(super::fallback::add_button(enabled, self.in_profile));
                 if let Some(u) = &w.url {
                     row.push(
                         serenity::CreateButton::new_link(u)
@@ -816,9 +826,14 @@ pub(crate) async fn character_suggestions(
                 },
                 async {
                     if use_games {
-                        providers.search_characters(&text, mature).await
+                        // Characters by name, and the games whose rosters the member may mean.
+                        let (chars, games) = futures::join!(
+                            providers.search_characters_found(&text, mature),
+                            providers.search_games_found(&text, None, mature, None)
+                        );
+                        (chars.works, games.works)
                     } else {
-                        Vec::new()
+                        (Vec::new(), Vec::new())
                     }
                 }
             );
@@ -832,7 +847,14 @@ pub(crate) async fn character_suggestions(
                     (label, format!("id:{}", c.id))
                 })
                 .collect();
-            out.extend(prov.iter().map(|w| (provider_label(w), w.id.clone())));
+            out.extend(prov.0.iter().map(|w| (provider_label(w), w.id.clone())));
+            // "شخصيات لعبة X": typing a game where a character is expected still leads somewhere.
+            out.extend(
+                prov.1
+                    .iter()
+                    .take(3)
+                    .map(|g| (i18n::roster_of_game(&g.title), format!("roster:{}", g.id))),
+            );
             out
         })
         .await;
@@ -866,6 +888,14 @@ pub async fn search_character(
         };
         return session::run(ctx, new_view(mode)).await;
     }
+    // "شخصيات لعبة X" picked from the suggestions: the game's roster.
+    if let Some(game) = name.strip_prefix("roster:") {
+        if !use_games {
+            return say_ephemeral(ctx, game_notice(games_on, &providers)).await;
+        }
+        let msg = crate::global::roster_msg(ctx.data(), game.trim(), 0, mature).await;
+        return crate::global::reply(ctx, msg).await;
+    }
     if name.starts_with("igdb:c") || name.starts_with("vndb:c") {
         if !use_games {
             return say_ephemeral(ctx, game_notice(games_on, &providers)).await;
@@ -892,13 +922,14 @@ pub async fn search_character(
         },
         async {
             if use_games {
-                providers.search_characters(query, mature).await
+                providers.search_characters_found(query, mature).await
             } else {
-                Vec::new()
+                crate::providers::Found::default()
             }
         }
     );
-    let prov = filter_providers(prov, &filter);
+    let prov_found = prov;
+    let prov = filter_providers(prov_found.works.clone(), &filter);
     let ani = match ani {
         Ok(list) => filter_by_work(list, &filter),
         // A dead AniList must not hide game results.
@@ -909,10 +940,33 @@ pub async fn search_character(
         }
     };
     if ani.is_empty() && prov.is_empty() {
-        let text = if source == CharacterSource::Games && !use_games {
-            game_notice(games_on, &providers)
-        } else if use_games && providers.games_unavailable() {
-            i18n::GAMES_DOWN
+        if source == CharacterSource::Games && !use_games {
+            return say_ephemeral(ctx, game_notice(games_on, &providers)).await;
+        }
+        // No character has that name: the member may have typed a game ("Silent Hill"). Search the games and show the
+        // roster of the best match (never when every provider failed: that is "unavailable", not "no such game").
+        if use_games && !prov_found.all_failed() && matches!(filter, WorkFilter::None) {
+            let games = providers
+                .search_games_found(query, None, mature, None)
+                .await;
+            let best = games
+                .works
+                .iter()
+                .find(|g| g.title.eq_ignore_ascii_case(query))
+                .or_else(|| games.works.first());
+            if let Some(game) = best {
+                let mut msg = crate::global::roster_msg(ctx.data(), &game.id, 0, mature).await;
+                if let Some(note) = prov_found.partial_note().or_else(|| games.partial_note()) {
+                    msg.text = Some(note);
+                }
+                return crate::global::reply(ctx, msg).await;
+            }
+            if games.all_failed() {
+                return say_ephemeral(ctx, i18n::GAMES_DOWN).await;
+            }
+        }
+        let text = if use_games {
+            prov_found.empty_message(i18n::NO_RESULTS)
         } else {
             i18n::NO_RESULTS
         };
@@ -926,6 +980,7 @@ pub async fn search_character(
     };
     let mut view = new_view(mode).with_providers(providers, extra);
     view.load_cover().await;
+    view.set_notice(prov_found.partial_note());
     session::run(ctx, view).await
 }
 
@@ -946,6 +1001,7 @@ mod tests {
 
     fn prov(title: &str, from: &str) -> Work {
         Work {
+            work_key: None,
             id: "igdb:c1".into(),
             source: Source::Igdb,
             kind: Kind::Character,

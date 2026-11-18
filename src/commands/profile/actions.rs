@@ -34,7 +34,13 @@ pub(super) async fn add_work(ctx: Context<'_>, value: &str) -> Result<(), Error>
     }
     // A key from a suggestion that is not an AniList id: a TMDB show or film, a game or a visual novel.
     if crate::components::is_work_key(value.trim()) && !value.trim().starts_with("anilist:") {
-        let text = crate::global::add(ctx.data(), value.trim(), uid(ctx)).await;
+        let text = crate::global::add(
+            ctx.data(),
+            value.trim(),
+            uid(ctx),
+            super::super::fallback::game_flags(ctx).await.1,
+        )
+        .await;
         return private_reply(ctx, text).await;
     }
     let api = ctx.data().anilist.clone();

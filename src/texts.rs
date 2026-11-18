@@ -435,6 +435,14 @@ pub const CHAPTER_DIGEST_EXPIRED: &str =
 
 pub const GAMES_DOWN: &str =
     "مصدر الألعاب لا يستجيب الآن، فلا أستطيع الحكم على الألعاب بأمان. جرّب بعد قليل.";
+pub fn game_without_characters(title: &str) -> String {
+    format!("لا أجد شخصيات مسجّلة للعبة «{title}» في المصادر. جرّب البحث عن الشخصية باسمها مباشرة.")
+}
+pub fn roster_of_game(title: &str) -> String {
+    format!("📚 شخصيات لعبة {title}")
+}
+pub const CHARACTER_NO_IMAGE: &str =
+    "لا توجد صورة لهذه الشخصية. يمكنك تعيين صورة لها من /edit بعد إضافتها لبروفايلك.";
 
 #[cfg(test)]
 mod tests {

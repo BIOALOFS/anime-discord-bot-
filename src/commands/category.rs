@@ -524,8 +524,10 @@ async fn run_tmdb(
             };
             let key = full.key();
             let data = ctx.data();
-            let msg = crate::global::roster_msg(data, &key, 0).await;
-            send_msg(ctx, msg).await
+            let mature =
+                crate::global::mature_for(data, ctx.guild_id().map(|g| g.get() as i64)).await;
+            let msg = crate::global::roster_msg(data, &key, 0, mature).await;
+            crate::global::reply(ctx, msg).await
         }
         Type::RandomWork => match find::random(&tmdb, tcat, &filter, &overrides, user).await {
             Some(w) => {
@@ -567,25 +569,6 @@ async fn run_tmdb(
     }
 }
 
-/// Send a global-handler message as the command's reply.
-async fn send_msg(ctx: Context<'_>, m: crate::global::Msg) -> Result<(), Error> {
-    let mut reply = poise::CreateReply::default();
-    if let Some(t) = m.text {
-        reply = reply.content(t);
-    }
-    if let Some(e) = m.embed {
-        reply = reply.embed(e);
-    }
-    for f in m.files {
-        reply = reply.attachment(f);
-    }
-    if !m.rows.is_empty() {
-        reply = reply.components(m.rows);
-    }
-    ctx.send(reply).await?;
-    Ok(())
-}
-
 async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) -> Result<(), Error> {
     ctx.defer().await?;
     let providers = ctx.data().providers.clone();
@@ -609,79 +592,59 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
     match ty {
         Type::Work => {
             let q = name.unwrap_or_default();
-            let (games, vns) = futures::join!(
-                async {
-                    if src == Some("vndb") {
-                        Vec::new()
-                    } else if let Some(p) = &platform {
-                        providers.search_games_on(&q, p, mature).await
-                    } else {
-                        providers.search_games(&q, mature).await
-                    }
-                },
-                async {
-                    if src == Some("igdb") || platform.is_some() {
-                        Vec::new()
-                    } else {
-                        providers.search_visual_novels(&q, mature).await
-                    }
-                }
-            );
-            let mut all: Vec<_> = games.into_iter().chain(vns).collect();
+            let found = providers
+                .search_games_found(&q, platform.as_deref(), mature, src)
+                .await;
+            let note = found.partial_note();
+            let mut all = found.works.clone();
             // An exact title wins over partial matches.
             if let Some(exact) = all.iter().position(|w| w.title.eq_ignore_ascii_case(&q)) {
                 all = vec![all.remove(exact)];
             }
             all.truncate(10);
             if all.is_empty() {
-                return say_ephemeral(ctx, empty_reason(&providers, i18n::NO_RESULTS)).await;
+                return say_ephemeral(ctx, found.empty_message(i18n::NO_RESULTS)).await;
             }
-            fallback::show(ctx, all).await
+            fallback::show_with_note(ctx, all, note).await
         }
         Type::Character => {
             character::search_character(ctx, name.unwrap_or_default(), None, Some("games".into()))
                 .await
         }
-        Type::RandomWork => match providers
-            .random_work(src, platform.as_deref(), mature)
-            .await
-        {
-            Some(w) => fallback::show(ctx, vec![w]).await,
-            None => say_ephemeral(ctx, empty_reason(&providers, i18n::RANDOM_FAILED)).await,
-        },
-        Type::RandomCharacter => match providers.random_character(src, mature).await {
-            Some(w) => {
-                let (api, db, user) = (
-                    ctx.data().anilist.clone(),
-                    ctx.data().db.clone(),
-                    ctx.author().id.get() as i64,
-                );
-                let mut view = CharacterView::new(
-                    api,
-                    super::policy(ctx),
-                    CharMode::Provider(Box::new(w)),
-                    db,
-                    user,
-                )
-                .with_providers(providers, Vec::new());
-                view.prepare().await;
-                view.load_cover().await;
-                session::run(ctx, view).await
+        Type::RandomWork => {
+            let user = ctx.author().id.get() as i64;
+            let found = providers
+                .random_work_found(src, platform.as_deref(), mature, user)
+                .await;
+            let note = found.partial_note();
+            match found.works.first().cloned() {
+                Some(w) => fallback::show_with_note(ctx, vec![w], note).await,
+                None => say_ephemeral(ctx, found.empty_message(i18n::RANDOM_FAILED)).await,
             }
-            None => say_ephemeral(ctx, empty_reason(&providers, i18n::RANDOM_FAILED)).await,
-        },
-    }
-}
-
-/// An empty game answer after a failed request is "the source is unavailable", not "nothing found".
-pub fn empty_reason(
-    providers: &crate::providers::Providers,
-    nothing: &'static str,
-) -> &'static str {
-    if providers.games_unavailable() {
-        i18n::GAMES_DOWN
-    } else {
-        nothing
+        }
+        Type::RandomCharacter => {
+            let user = ctx.author().id.get() as i64;
+            let found = providers.random_character_found(src, mature, user).await;
+            let note = found.partial_note();
+            match found.works.first().cloned() {
+                Some(w) => {
+                    let (api, db) = (ctx.data().anilist.clone(), ctx.data().db.clone());
+                    let mut view = CharacterView::new(
+                        api,
+                        super::policy(ctx),
+                        CharMode::Provider(Box::new(w)),
+                        db,
+                        user,
+                    )
+                    .with_providers(providers, Vec::new());
+                    view.prepare().await;
+                    view.load_cover().await;
+                    view.set_notice(note);
+                    session::run(ctx, view).await
+                }
+                None => say_ephemeral(ctx, found.empty_message(i18n::RANDOM_FAILED)).await,
+            }
+        }
     }
 }
 

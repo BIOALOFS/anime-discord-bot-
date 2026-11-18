@@ -106,7 +106,17 @@ async fn guild_overrides(
 }
 
 /// The card of a work of any source, as a new message.
-pub async fn work_msg(data: &Data, key: &str, user: i64) -> Msg {
+/// The server's `mature-themes` switch (on outside servers and when unreadable).
+pub async fn mature_for(data: &Data, guild: Option<i64>) -> bool {
+    match guild {
+        Some(g) => crate::db::custom::mature_themes(&data.db, g)
+            .await
+            .unwrap_or(true),
+        None => true,
+    }
+}
+
+pub async fn work_msg(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
     let current = status::get(&data.db, user, key).await.ok().flatten();
     if let Some(id) = key
         .strip_prefix("anilist:")
@@ -140,7 +150,6 @@ pub async fn work_msg(data: &Data, key: &str, user: i64) -> Msg {
             work_rows(key, Some(&w.url()), "TMDB", true, false, current.as_deref()),
         );
     }
-    let mature = true;
     match data.providers.work_by_key(key, mature).await {
         Some(w) => {
             let cover = data.providers.cover(&w).await;
@@ -172,7 +181,7 @@ pub async fn work_msg(data: &Data, key: &str, user: i64) -> Msg {
 }
 
 /// One page of the characters of a work (0-based), as a message with a menu of them and page buttons.
-pub async fn roster_msg(data: &Data, key: &str, page: usize) -> Msg {
+pub async fn roster_msg(data: &Data, key: &str, page: usize, mature: bool) -> Msg {
     if let Some(id) = key
         .strip_prefix("anilist:")
         .and_then(|n| n.parse::<i64>().ok())
@@ -244,32 +253,47 @@ pub async fn roster_msg(data: &Data, key: &str, page: usize) -> Msg {
         return Msg::card(e, rows);
     }
     if key.starts_with("igdb:") || key.starts_with("vndb:v") {
-        let list = data.providers.characters_of(key, true).await;
-        if list.is_empty() {
-            return Msg::text(i18n::NO_CHARACTERS);
-        }
-        let lines: Vec<String> = list
-            .iter()
-            .take(25)
-            .map(|c| format!("**{}**", c.title))
-            .collect();
-        let items: Vec<(String, String)> = list
-            .iter()
-            .take(25)
-            .map(|c| (crate::ui::embeds::fit(&c.title, 100), c.id.clone()))
-            .collect();
-        let e = Emb::new()
-            .title(i18n::TITLE_CHARACTERS)
-            .description(lines.join("\n"))
-            .footer(list[0].source.credit());
-        return Msg::card(
-            e,
-            components::character_menu(i18n::PICK_CHARACTER_PLACEHOLDER, &items)
-                .into_iter()
-                .collect(),
-        );
+        return provider_roster(data, key, page, mature).await;
     }
     Msg::text(i18n::NO_CHARACTERS_SOURCE)
+}
+
+/// Characters per page of a game roster (one select menu holds 25).
+pub const ROSTER_PAGE: usize = 25;
+
+/// The characters of a game or visual novel: a select menu and page buttons. A failed source is said so; a game with no
+/// characters in the sources gets a polite note that suggests searching by the character's name.
+async fn provider_roster(data: &Data, key: &str, page: usize, mature: bool) -> Msg {
+    // The game itself must pass the safety rules before its roster is shown.
+    let Some(game) = data.providers.work_by_key(key, mature).await else {
+        return Msg::text(i18n::SHOW_WORK_UNAVAILABLE);
+    };
+    let list = match data.providers.characters_of(key, mature).await {
+        Ok(l) => l,
+        Err(_) => return Msg::text(i18n::GAMES_DOWN),
+    };
+    if list.is_empty() {
+        return Msg::text(i18n::game_without_characters(&game.title));
+    }
+    let pages = list.len().div_ceil(ROSTER_PAGE);
+    let page = page.min(pages - 1);
+    let slice = &list[page * ROSTER_PAGE..((page + 1) * ROSTER_PAGE).min(list.len())];
+    let lines: Vec<String> = slice.iter().map(|c| format!("**{}**", c.title)).collect();
+    let items: Vec<(String, String)> = slice
+        .iter()
+        .map(|c| (crate::ui::embeds::fit(&c.title, 100), c.id.clone()))
+        .collect();
+    let e = Emb::new()
+        .title(format!("{} — {}", i18n::TITLE_CHARACTERS, game.title))
+        .description(lines.join("\n"))
+        .footer(format!("{} · {}/{}", game.source.credit(), page + 1, pages));
+    let mut rows: Vec<_> = components::character_menu(i18n::PICK_CHARACTER_PLACEHOLDER, &items)
+        .into_iter()
+        .collect();
+    if pages > 1 {
+        rows.push(roster_nav(key, page, pages));
+    }
+    Msg::card(e, rows)
 }
 
 fn roster_nav(key: &str, page: usize, pages: usize) -> serenity::CreateActionRow {
@@ -290,7 +314,7 @@ fn roster_nav(key: &str, page: usize, pages: usize) -> serenity::CreateActionRow
 }
 
 /// The card of a character of any source. `value` is an AniList character id, a `tmdb-cast:` key or a provider key.
-pub async fn character_msg(data: &Data, value: &str) -> Msg {
+pub async fn character_msg(data: &Data, value: &str, mature: bool) -> Msg {
     if let Ok(id) = value.parse::<i64>() {
         return match data.anilist.character_by_id(id, ContentPolicy::SAFE).await {
             Ok(CharacterLookup::Found(c)) => {
@@ -329,14 +353,15 @@ pub async fn character_msg(data: &Data, value: &str) -> Msg {
             vec![serenity::CreateActionRow::Buttons(row)],
         );
     }
-    match data.providers.character_by_key(value, true).await {
+    match data.providers.character_by_key(value, mature).await {
         Some(w) => {
             let cover = data.providers.cover(&w).await;
             let name = cover
                 .as_ref()
                 .map_or("cover.jpg", |c| crate::commands::fallback::cover_name(c));
             let e = crate::commands::fallback::card(&w, cover.is_some(), name);
-            let mut row = Vec::new();
+            // "أظهر العمل": the game (or novel) card, as a new message.
+            let mut row = components::standard_actions(ItemKind::Character, w.work_key.as_deref());
             row.push(components::add_button(value));
             if let Some(u) = &w.url {
                 row.push(link(u, w.source.credit()));
@@ -401,8 +426,8 @@ pub async fn remind(data: &Data, key: &str, user: i64, guild: Option<i64>) -> St
 }
 
 /// Add a work or a character to the member's profile (or say it is already there).
-pub async fn add(data: &Data, key: &str, user: i64) -> String {
-    match add_inner(data, key, user).await {
+pub async fn add(data: &Data, key: &str, user: i64, mature: bool) -> String {
+    match add_inner(data, key, user, mature).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("add to profile failed: {e:#}");
@@ -411,7 +436,7 @@ pub async fn add(data: &Data, key: &str, user: i64) -> String {
     }
 }
 
-async fn add_inner(data: &Data, key: &str, user: i64) -> Result<String, Error> {
+async fn add_inner(data: &Data, key: &str, user: i64, mature: bool) -> Result<String, Error> {
     let pool = &data.db;
     pdb::create_profile(pool, user).await?;
     let now = crate::commands::profile::now();
@@ -477,7 +502,7 @@ async fn add_inner(data: &Data, key: &str, user: i64) -> Result<String, Error> {
         ));
     }
     if key.starts_with("igdb:c") || key.starts_with("vndb:c") {
-        return match data.providers.character_by_key(key, true).await {
+        return match data.providers.character_by_key(key, mature).await {
             Some(w) => Ok(crate::commands::fallback::add_to_profile(pool, user, &w)
                 .await
                 .text),
@@ -506,7 +531,7 @@ async fn add_inner(data: &Data, key: &str, user: i64) -> Result<String, Error> {
             works::add_work(pool, user, key, kind.key()).await?,
         ));
     }
-    if let Some(w) = data.providers.work_by_key(key, true).await {
+    if let Some(w) = data.providers.work_by_key(key, mature).await {
         if w.kind != PKind::Character {
             return Ok(crate::commands::fallback::add_to_profile(pool, user, &w)
                 .await
@@ -574,6 +599,25 @@ pub async fn set_status(data: &Data, key: &str, value: &str, user: i64) -> Strin
     }
 }
 
+/// Send a message built here as the reply of a slash command.
+pub async fn reply(ctx: crate::error::Context<'_>, m: Msg) -> Result<(), Error> {
+    let mut reply = poise::CreateReply::default();
+    if let Some(t) = m.text {
+        reply = reply.content(t);
+    }
+    if let Some(e) = m.embed {
+        reply = reply.embed(e);
+    }
+    for f in m.files {
+        reply = reply.attachment(f);
+    }
+    if !m.rows.is_empty() {
+        reply = reply.components(m.rows);
+    }
+    ctx.send(reply).await?;
+    Ok(())
+}
+
 fn followup(m: Msg, ephemeral: bool) -> serenity::CreateInteractionResponseFollowup {
     let mut f = serenity::CreateInteractionResponseFollowup::new().ephemeral(ephemeral);
     if let Some(t) = m.text {
@@ -601,9 +645,10 @@ pub async fn handle(
 ) -> Result<(), Error> {
     let user = i.user.id.get() as i64;
     let guild = i.guild_id.map(|g| g.get() as i64);
+    let mature = mature_for(data, guild).await;
     if let Press::ShowChars(key, Some(page)) = &press {
         // Page buttons of a roster message edit that (new) message.
-        let m = roster_msg(data, key, *page).await;
+        let m = roster_msg(data, key, *page, mature).await;
         let mut r = serenity::CreateInteractionResponseMessage::new().components(m.rows);
         r = match (m.embed, m.text) {
             (Some(e), _) => r.embed(e),
@@ -619,11 +664,13 @@ pub async fn handle(
     );
     i.create_response(ctx, defer).await?;
     let (msg, private) = match press {
-        Press::ShowWork(k) | Press::PickWork(k) => (work_msg(data, &k, user).await, ephemeral),
-        Press::ShowChars(k, _) => (roster_msg(data, &k, 0).await, ephemeral),
-        Press::PickChar(v) => (character_msg(data, &v).await, ephemeral),
+        Press::ShowWork(k) | Press::PickWork(k) => {
+            (work_msg(data, &k, user, mature).await, ephemeral)
+        }
+        Press::ShowChars(k, _) => (roster_msg(data, &k, 0, mature).await, ephemeral),
+        Press::PickChar(v) => (character_msg(data, &v, mature).await, ephemeral),
         Press::Remind(k) => (Msg::text(remind(data, &k, user, guild).await), true),
-        Press::Add(k) => (Msg::text(add(data, &k, user).await), true),
+        Press::Add(k) => (Msg::text(add(data, &k, user, mature).await), true),
         Press::Status(k, v) => (Msg::text(set_status(data, &k, &v, user).await), true),
     };
     i.create_followup(ctx, followup(msg, private)).await?;
