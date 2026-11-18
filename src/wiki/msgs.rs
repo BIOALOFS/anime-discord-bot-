@@ -34,7 +34,7 @@ pub fn credit(w: &Source) -> String {
 pub fn card(p: &Page, w: &Source) -> Emb {
     let mut lines = Vec::new();
     if let Some(parent) = &p.parent_title {
-        lines.push(format!("🎮 {parent}"));
+        lines.push(format!("📚 {parent}"));
     }
     if let Some(e) = &p.extract {
         lines.push(fit(e, 700));
@@ -64,15 +64,29 @@ async fn game_key(wikis: &Wikis, p: &Page) -> Option<String> {
         .map(|g| g.key())
 }
 
-/// The buttons under a card: a character carries "أظهر العمل" when its game page is known, a game carries
-/// "أظهر الشخصيات"; the page link comes last (it is the first thing to go in a crowded row).
-pub fn rows(p: &Page, w: &Source, game: Option<&str>) -> Vec<serenity::CreateActionRow> {
+/// The buttons under a card: a character carries "أظهر العمل" (the work's page when it is known, otherwise the work is
+/// looked up when the button is pressed), a game carries "أظهر الشخصيات"; both carry the add / remove button of the
+/// profile; the page link comes last (it is the first thing to go in a crowded row).
+pub fn rows(
+    p: &Page,
+    w: &Source,
+    game: Option<&str>,
+    in_profile: bool,
+) -> Vec<serenity::CreateActionRow> {
     let mut buttons = Vec::new();
     match p.kind {
-        Kind::Character => buttons.extend(components::standard_actions(
-            components::ItemKind::Character,
-            game,
-        )),
+        Kind::Character => {
+            buttons.push(
+                serenity::CreateButton::new(match game {
+                    Some(g) => components::show_work_id(g),
+                    None => components::show_work_of_id(&p.key()),
+                })
+                .label(components::LABEL_SHOW_WORK)
+                .emoji('📖')
+                .style(serenity::ButtonStyle::Secondary),
+            );
+            buttons.push(crate::global::add_button_for(&p.key(), in_profile));
+        }
         Kind::Game => {
             if w.character_category.is_some() {
                 // The crew button is not offered: a wiki has no crew list.
@@ -82,6 +96,7 @@ pub fn rows(p: &Page, w: &Source, game: Option<&str>) -> Vec<serenity::CreateAct
                         .take(1),
                 );
             }
+            buttons.push(crate::global::add_button_for(&p.key(), in_profile));
         }
         Kind::Other => {}
     }
@@ -92,12 +107,79 @@ pub fn rows(p: &Page, w: &Source, game: Option<&str>) -> Vec<serenity::CreateAct
     components::card_rows(buttons).0
 }
 
-pub async fn page_msg(wikis: &Wikis, wiki_id: i64, page_id: i64) -> Msg {
+/// The card of a page that is only known from its snapshot (its wiki is disabled or deleted, or the cache expired):
+/// what the member saw when adding it, with the source named.
+pub fn snapshot_card(s: &super::profile::Snapshot) -> Emb {
+    let mut lines = Vec::new();
+    if let Some(parent) = &s.parent {
+        lines.push(format!("📚 {parent}"));
+    }
+    if let Some(e) = &s.summary {
+        lines.push(fit(e, 700));
+    }
+    let mut e = Emb::new()
+        .title(fit(&s.name, 256))
+        .url(Some(s.page_url.clone()))
+        .description(lines.join("\n\n"))
+        .footer(match &s.license_name {
+            Some(l) => format!("{} · {l} · {}", s.source_name, i18n::WIKI_SNAPSHOT_NOTE),
+            None => format!("{} · {}", s.source_name, i18n::WIKI_SNAPSHOT_NOTE),
+        });
+    e.image = s.image_url.clone();
+    e
+}
+
+/// A page, or the page rebuilt from its snapshot when the wiki cannot give it any more.
+pub async fn page_or_snapshot(wikis: &Wikis, wiki_id: i64, page_id: i64) -> Option<Page> {
+    if let Some((p, _)) = wikis.page(wiki_id, page_id).await {
+        return Some(p);
+    }
+    let s = super::profile::snapshot(&wikis.pool, wiki_id, page_id).await?;
+    Some(Page {
+        wiki_id,
+        page_id,
+        title: s.name,
+        kind: s.kind,
+        extract: s.summary,
+        image_url: s.image_url,
+        aliases: Vec::new(),
+        parent_title: s.parent,
+        categories: Vec::new(),
+    })
+}
+
+pub async fn page_msg(wikis: &Wikis, wiki_id: i64, page_id: i64, user: i64) -> Msg {
+    let mine =
+        crate::global::in_profile_pool(&wikis.pool, user, &super::key(wiki_id, page_id)).await;
     let Some((p, w)) = wikis.page(wiki_id, page_id).await else {
-        return Msg::text(i18n::SHOW_WORK_UNAVAILABLE);
+        // The wiki cannot give the page: an item in a profile still shows what was saved.
+        let Some(s) = super::profile::snapshot(&wikis.pool, wiki_id, page_id).await else {
+            return Msg::text(i18n::SHOW_WORK_UNAVAILABLE);
+        };
+        let key = super::key(wiki_id, page_id);
+        let buttons = vec![
+            crate::global::add_button_for(&key, mine),
+            serenity::CreateButton::new_link(s.page_url.clone())
+                .label(format!("🔗 {}", fit(&s.source_name, 60))),
+        ];
+        return Msg::card(snapshot_card(&s), components::card_rows(buttons).0);
     };
     let game = game_key(wikis, &p).await;
-    Msg::card(card(&p, &w), rows(&p, &w, game.as_deref()))
+    Msg::card(card(&p, &w), rows(&p, &w, game.as_deref(), mine))
+}
+
+/// "أظهر العمل" of a wiki character: opens the work, looked up now; a clear message when nothing is found.
+pub async fn work_of_msg(data: &crate::Data, character_key: &str, mature: bool, user: i64) -> Msg {
+    let Some((wiki, page)) = super::parse_key(character_key) else {
+        return Msg::text(i18n::SHOW_WORK_UNAVAILABLE);
+    };
+    let Some(p) = page_or_snapshot(&data.wikis, wiki, page).await else {
+        return Msg::text(i18n::SHOW_WORK_UNAVAILABLE);
+    };
+    match super::resolve::work_key_for(data, &p, mature).await {
+        Some(key) => crate::global::work_msg(data, &key, user, mature).await,
+        None => Msg::text(i18n::wiki_work_not_found(p.parent_title.as_deref())),
+    }
 }
 
 /// Several pages matched: a short list with a menu that opens each one in place.
@@ -135,7 +217,12 @@ pub fn list_msg(
 
 /// What to answer for the pages a search found: nothing (`None`), the card when one page matched or the typed name is
 /// exactly one title, otherwise a list. A note names the wikis that did not answer.
-pub async fn show(wikis: &Wikis, found: super::service::Found, typed: &str) -> Option<Msg> {
+pub async fn show(
+    wikis: &Wikis,
+    found: super::service::Found,
+    typed: &str,
+    user: i64,
+) -> Option<Msg> {
     let note = (!found.failed.is_empty()).then(|| {
         format!(
             "⚠️ لم يصل رد من {} الآن، فالنتائج ناقصة.",
@@ -154,7 +241,7 @@ pub async fn show(wikis: &Wikis, found: super::service::Found, typed: &str) -> O
         _ => None,
     };
     if let Some(p) = one {
-        let mut m = page_msg(wikis, p.wiki_id, p.page_id).await;
+        let mut m = page_msg(wikis, p.wiki_id, p.page_id, user).await;
         if let (Some(n), None) = (note, m.text.as_ref()) {
             m.text = Some(n);
         }
@@ -257,7 +344,7 @@ mod tests {
         let e = json(&card(&page(Kind::Character), &wiki()).build());
         let text = e["description"].as_str().unwrap_or("");
         assert!(
-            text.contains("🎮 Silent Hill 2") && text.contains("A monster"),
+            text.contains("📚 Silent Hill 2") && text.contains("A monster"),
             "{text}"
         );
         assert_eq!(e["footer"]["text"], "Silent Hill Wiki · CC BY-SA 3.0");
@@ -288,28 +375,52 @@ mod tests {
                 .map(|c| c["label"].as_str().unwrap_or("").to_string())
                 .collect()
         };
-        let with_game = labels(&rows(&page(Kind::Character), &wiki(), Some("wiki:1:5")));
-        assert_eq!(with_game, vec!["أظهر العمل", "🔗 Silent Hill Wiki"]);
+        let with_game = labels(&rows(
+            &page(Kind::Character),
+            &wiki(),
+            Some("wiki:1:5"),
+            false,
+        ));
+        assert_eq!(
+            with_game,
+            vec!["أظهر العمل", "أضف لبروفايلي", "🔗 Silent Hill Wiki"]
+        );
         let game_page = Page {
             kind: Kind::Game,
             ..page(Kind::Game)
         };
         assert_eq!(
-            labels(&rows(&game_page, &wiki(), None)),
-            vec!["أظهر الشخصيات", "🔗 Silent Hill Wiki"],
+            labels(&rows(&game_page, &wiki(), None, false)),
+            vec!["أظهر الشخصيات", "أضف لبروفايلي", "🔗 Silent Hill Wiki"],
             "no crew button for a wiki"
         );
         let mut search_only = wiki();
         search_only.character_category = None;
         assert_eq!(
-            labels(&rows(&game_page, &search_only, None)),
-            vec!["🔗 Silent Hill Wiki"],
+            labels(&rows(&game_page, &search_only, None, false)),
+            vec!["أضف لبروفايلي", "🔗 Silent Hill Wiki"],
             "no roster without a character category"
         );
         assert_eq!(
-            json(&rows(&page(Kind::Character), &wiki(), Some("wiki:1:5"))[0])["components"][0]
-                ["custom_id"],
+            json(&rows(&page(Kind::Character), &wiki(), Some("wiki:1:5"), false)[0])["components"]
+                [0]["custom_id"],
             "showwork:wiki:1:5"
+        );
+        // without a known work page the button is still there: the work is looked up when it is pressed
+        let lazy = json(&rows(&page(Kind::Character), &wiki(), None, false)[0]);
+        assert_eq!(lazy["components"][0]["label"], "أظهر العمل");
+        assert_eq!(lazy["components"][0]["custom_id"], "showworkof:wiki:1:10");
+        assert_eq!(
+            components::parse("showworkof:wiki:1:10", &[]),
+            Some(components::Press::ShowWorkOf("wiki:1:10".into()))
+        );
+        assert_eq!(components::parse("showworkof:anilist:1", &[]), None);
+        // the add button turns into a remove button for an item that is already in the profile
+        let mine = json(&rows(&page(Kind::Character), &wiki(), None, true)[0]);
+        assert_eq!(mine["components"][1]["label"], "إزالة من بروفايلي");
+        assert_eq!(
+            mine["components"][1]["custom_id"], "addprofile:wiki:1:10",
+            "the same id toggles"
         );
     }
 

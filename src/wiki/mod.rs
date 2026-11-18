@@ -3,10 +3,13 @@
 //! de-duplication and the address rules (HTTPS, public hosts only); the other modules parse, fetch and store.
 
 pub mod admin;
+pub mod clean;
 pub mod client;
 pub mod fill;
 pub mod msgs;
 pub mod parse;
+pub mod profile;
+pub mod resolve;
 pub mod safety;
 pub mod service;
 pub mod store;
@@ -174,26 +177,22 @@ pub fn title_qualifier(t: &str) -> Option<&str> {
 /// Are these two titles about the same thing? The names must match after normalisation AND the game or series must
 /// agree (both known and equal, after normalisation). Name-only similarity is not enough: rare duplicates are better
 /// than wrong merges.
-pub fn same_identity(
-    a_title: &str,
-    a_parent: Option<&str>,
-    b_title: &str,
-    b_parent: Option<&str>,
+pub fn same_identity<'a>(
+    a_title: &'a str,
+    a_parent: Option<&'a str>,
+    b_title: &'a str,
+    b_parent: Option<&'a str>,
 ) -> bool {
     if normalize(base_title(a_title)) != normalize(base_title(b_title))
         || normalize(base_title(a_title)).is_empty()
     {
         return false;
     }
-    let pa = a_parent
-        .or_else(|| title_qualifier(a_title))
-        .map(normalize)
-        .filter(|p| !p.is_empty());
-    let pb = b_parent
-        .or_else(|| title_qualifier(b_title))
-        .map(normalize)
-        .filter(|p| !p.is_empty());
-    matches!((pa, pb), (Some(x), Some(y)) if x == y)
+    let known = |p: Option<&'a str>| p.filter(|p| !normalize(p).is_empty());
+    let pa = known(a_parent.or_else(|| title_qualifier(a_title)));
+    let pb = known(b_parent.or_else(|| title_qualifier(b_title)));
+    // The game or series must agree, compared flexibly ("Sun/Moon" = "Sun and Moon"); when unsure, they differ.
+    matches!((pa, pb), (Some(x), Some(y)) if clean::series_matches(x, y))
 }
 
 // ---- addresses -------------------------------------------------------------------------------------

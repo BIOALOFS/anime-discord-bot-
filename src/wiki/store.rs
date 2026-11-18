@@ -303,6 +303,33 @@ pub async fn characters_of(
         .collect())
 }
 
+/// The cached characters of enabled wikis whose series matches this work's title strongly (any wiki). Cache only: it
+/// answers at once, and the background warmer and earlier searches are what fill it.
+pub async fn characters_for_work(
+    pool: &SqlitePool,
+    work_title: &str,
+    now: i64,
+    limit: usize,
+) -> Result<Vec<Page>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {PAGE_COLUMNS} FROM wiki_cache c JOIN wiki_sources s ON s.id = c.wiki_id AND s.enabled = 1 \
+         WHERE c.kind = 'character' AND c.parent_title IS NOT NULL AND c.fetched_at > ?1 ORDER BY c.title LIMIT 5000"
+    ))
+    .bind(now - PAGE_TTL_SECS)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| page_of(r).0)
+        .filter(|p| {
+            p.parent_title
+                .as_deref()
+                .is_some_and(|g| super::clean::series_matches(g, work_title))
+        })
+        .take(limit)
+        .collect())
+}
+
 /// Pages older than their lifetime go (this is how the pages of a removed wiki disappear). Returns how many.
 pub async fn purge_stale(pool: &SqlitePool, now: i64) -> Result<u64> {
     let r = sqlx::query("DELETE FROM wiki_cache WHERE fetched_at <= ?1")
@@ -607,6 +634,51 @@ mod tests {
             }
         }
         assert_eq!(page_count(&pool).await.expect("count"), 0);
+    }
+
+    #[tokio::test]
+    async fn characters_of_a_work_are_found_by_a_strong_series_match_in_any_wiki() {
+        let pool = crate::db::connect_memory().await;
+        for host in ["a.example.com", "b.example.com"] {
+            insert(&pool, &new(host)).await.expect("insert");
+        }
+        for p in [
+            page(1, 1, "Acerola", Kind::Character, Some("Pokémon Sun/Moon")),
+            page(2, 2, "Lillie", Kind::Character, Some("Pokemon Sun & Moon")),
+            page(
+                1,
+                3,
+                "Cynthia",
+                Kind::Character,
+                Some("Pokémon Diamond/Pearl"),
+            ),
+            page(1, 4, "Silent Hill 2", Kind::Game, None),
+        ] {
+            upsert(&pool, &p, 10).await.expect("upsert");
+        }
+        let found = characters_for_work(&pool, "Pokémon Sun and Moon", 20, 25)
+            .await
+            .expect("found");
+        assert_eq!(
+            found.iter().map(|p| p.title.as_str()).collect::<Vec<_>>(),
+            vec!["Acerola", "Lillie"]
+        );
+        assert!(
+            characters_for_work(&pool, "Pokémon", 20, 25)
+                .await
+                .expect("none")
+                .is_empty(),
+            "a vague name matches nothing"
+        );
+        set_enabled(&pool, 2, false).await.expect("off");
+        assert_eq!(
+            characters_for_work(&pool, "Pokémon Sun/Moon", 20, 25)
+                .await
+                .expect("found")
+                .len(),
+            1,
+            "a disabled wiki is gone"
+        );
     }
 
     #[tokio::test]

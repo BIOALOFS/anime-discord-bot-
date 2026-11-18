@@ -331,7 +331,7 @@ pub async fn own_or_reply(ctx: Context<'_>, input: &str) -> Result<Option<(i64, 
 
 /// The label of one of my characters in a list: people carry their role ("👤 Name · شخص حقيقي · ممثل").
 pub fn own_label(id: i64, name: &str, sub: Option<&str>) -> String {
-    match (id >= crate::people::PERSON_ID_BASE, sub) {
+    match (crate::people::decode_person_id(id).is_some(), sub) {
         (true, Some(role)) => fit(&format!("👤 {name} · {role}"), 100),
         _ => fit(name, 100),
     }

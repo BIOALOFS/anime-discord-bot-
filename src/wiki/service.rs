@@ -57,13 +57,18 @@ pub fn to_pages(w: &Source, raws: Vec<parse::RawPage>) -> Vec<Page> {
             }
             aliases.dedup();
             let kind = parse::classify(w, &r.categories);
-            let parent = parse::infer_parent(&r.title, &r.categories);
+            // The infobox "Series" is the parent as the wiki writes it; otherwise the categories or the title say.
+            let parent = r
+                .series
+                .clone()
+                .or_else(|| parse::infer_parent(&r.title, &r.categories));
             safety::clean_page(Page {
                 wiki_id: w.id,
                 page_id: r.page_id,
                 title: r.title,
                 kind,
-                extract: r.extract,
+                // Sentences about a wiki bot are dropped; nothing left means no summary (nothing is invented).
+                extract: r.extract.as_deref().and_then(super::clean::clean_extract),
                 image_url: r.image,
                 aliases,
                 parent_title: parent,
@@ -908,6 +913,7 @@ mod tests {
             categories: cats.iter().map(|c| c.to_string()).collect(),
             disambiguation: false,
             redirects_from: redirects.iter().map(|r| r.to_string()).collect(),
+            series: None,
         };
         let pages = to_pages(
             &w,
@@ -927,5 +933,83 @@ mod tests {
         assert_eq!(pages[0].aliases, vec!["Pyramid-Head", "Pyramid Head"]);
         assert_eq!(pages[0].parent_title.as_deref(), Some("Silent Hill 2"));
         assert_eq!(pages[1].kind, Kind::Game);
+    }
+
+    #[test]
+    fn a_mudae_style_page_is_cleaned_and_its_series_becomes_the_parent_and_matches_other_sources() {
+        let doc = json!({"query": {"pages": [{
+            "pageid": 77, "ns": 0, "title": "Acerola",
+            "extract": "Acerola is a rollable waifu from Pokémon Sun/Moon. She is the trial captain of Ula'ula Island.",
+            "thumbnail": {"source": "https://static.wikia.nocookie.net/mudae/images/a/a1/Acerola.png/revision/latest"},
+            "categories": [{"ns": 14, "title": "Category:Female characters"}, {"ns": 14, "title": "Category:Pokémon characters"}],
+            "revisions": [{"slots": {"main": {"content": "{{Character\n|series = [[Pokémon Sun and Moon|Pokémon Sun/Moon]]\n|gender = Female\n|roulette = Waifu\n|official site = https://example.org\n}}"}}}]
+        }]}});
+        let w = Source {
+            id: 2,
+            name: "Mudae Wiki".into(),
+            host: "mudae.fandom.com".into(),
+            api_url: "https://mudae.fandom.com/api.php".into(),
+            lang: "en".into(),
+            license_name: Some("CC BY-SA".into()),
+            license_url: None,
+            character_category: Some("Category:Characters".into()),
+            game_category: None,
+            enabled: true,
+            added_by: None,
+            created_at: 0,
+            last_checked_at: None,
+            last_error: None,
+        };
+        let pages = to_pages(&w, parse::parse_details(&doc));
+        assert_eq!(pages.len(), 1);
+        let p = &pages[0];
+        assert_eq!(
+            p.parent_title.as_deref(),
+            Some("Pokémon Sun/Moon"),
+            "the series is the parent, as the wiki writes it"
+        );
+        assert_eq!(
+            p.extract.as_deref(),
+            Some("She is the trial captain of Ula'ula Island."),
+            "no rollable-waifu text"
+        );
+        assert_eq!(
+            p.kind,
+            Kind::Character,
+            "classified from the categories, not assumed to be a game"
+        );
+        assert!(p.image_url.is_some());
+        // the same character from another source, with the series written differently, is the same one
+        assert!(crate::wiki::same_identity(
+            "Acerola",
+            Some("Pokémon Sun and Moon"),
+            &p.title,
+            p.parent_title.as_deref()
+        ));
+        assert!(crate::wiki::same_identity(
+            "Acerola",
+            Some("Pokemon Sun & Moon"),
+            &p.title,
+            p.parent_title.as_deref()
+        ));
+        // another game's Acerola, or one with no known game, is not
+        assert!(!crate::wiki::same_identity(
+            "Acerola",
+            Some("Pokémon Sword/Shield"),
+            &p.title,
+            p.parent_title.as_deref()
+        ));
+        assert!(!crate::wiki::same_identity(
+            "Acerola",
+            None,
+            &p.title,
+            p.parent_title.as_deref()
+        ));
+        // a page whose whole summary is jargon keeps no summary
+        let all_jargon = json!({"query": {"pages": [{"pageid": 78, "ns": 0, "title": "Rem", "extract": "A waifu. Claim her.", "categories": []}]}});
+        assert_eq!(
+            to_pages(&w, parse::parse_details(&all_jargon))[0].extract,
+            None
+        );
     }
 }

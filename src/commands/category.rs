@@ -94,6 +94,8 @@ pub enum Type {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceChoice {
     Default,
+    /// The command's own main source (AniList, TMDB): the wikis stay out of it.
+    Primary,
     Igdb,
     Vndb,
     AllWikis,
@@ -103,6 +105,9 @@ pub enum SourceChoice {
 pub const SOURCE_IGDB: (&str, &str) = ("ألعاب (IGDB)", "IGDB");
 pub const SOURCE_VNDB: (&str, &str) = ("روايات بصرية (VNDB)", "VNDB");
 pub const SOURCE_ALL_WIKIS: (&str, &str) = ("كل الويكيات", "wikis");
+pub const SOURCE_ANILIST: (&str, &str) = ("AniList", "anilist");
+pub const SOURCE_TMDB: (&str, &str) = ("TMDB", "tmdb");
+pub const SOURCE_PRIMARY: (&str, &str) = ("المصادر الأساسية", "providers");
 
 impl SourceChoice {
     /// What the member picked from the suggestions or typed: a value (`IGDB`, `wikis`, `wiki:3`) or its label.
@@ -119,6 +124,12 @@ impl SourceChoice {
         }
         if same(SOURCE_ALL_WIKIS.1) || same(SOURCE_ALL_WIKIS.0) {
             return Self::AllWikis;
+        }
+        if [SOURCE_ANILIST, SOURCE_TMDB, SOURCE_PRIMARY]
+            .iter()
+            .any(|s| same(s.1) || same(s.0))
+        {
+            return Self::Primary;
         }
         let by_id = t.strip_prefix("wiki:").and_then(|n| n.parse::<i64>().ok());
         wikis
@@ -158,23 +169,36 @@ impl SourceChoice {
     }
 }
 
-/// The options of the `source` menu: the two providers, "كل الويكيات" and one entry per wiki, within Discord's 25
-/// (further wikis are still reachable through "كل الويكيات"). `(label, value)`.
-pub fn source_options(wikis: &[crate::wiki::Source]) -> Vec<(String, String)> {
-    let mut out = vec![
-        (SOURCE_IGDB.0.to_string(), SOURCE_IGDB.1.to_string()),
-        (SOURCE_VNDB.0.to_string(), SOURCE_VNDB.1.to_string()),
-    ];
+/// The main sources a command offers in its `source` menu: `(label, value)`.
+pub fn primary_options(cat: Option<Category>) -> Vec<(String, String)> {
+    let own = |l: (&str, &str)| (l.0.to_string(), l.1.to_string());
+    match cat {
+        Some(Category::Anime | Category::Manga | Category::Novel) => vec![own(SOURCE_ANILIST)],
+        Some(Category::Drama | Category::Series | Category::Movie) => vec![own(SOURCE_TMDB)],
+        Some(Category::Game) => vec![own(SOURCE_IGDB), own(SOURCE_VNDB)],
+        None => vec![own(SOURCE_PRIMARY)],
+    }
+}
+
+/// The options of the `source` menu: the command's own sources, "كل الويكيات" and one entry per wiki, within Discord's
+/// 25 (further wikis are still reachable through "كل الويكيات"). `(label, value)`. Read from the cached wiki list, so a
+/// wiki added or removed shows up in every server at once without registering the commands again.
+pub fn source_options(
+    wikis: &[crate::wiki::Source],
+    cat: Option<Category>,
+) -> Vec<(String, String)> {
+    let mut out = primary_options(cat);
     if !wikis.is_empty() {
         out.push((
             SOURCE_ALL_WIKIS.0.to_string(),
             SOURCE_ALL_WIKIS.1.to_string(),
         ));
     }
+    let room = 25usize.saturating_sub(out.len());
     out.extend(
         wikis
             .iter()
-            .take(22)
+            .take(room)
             .map(|w| (w.name.clone(), format!("wiki:{}", w.id))),
     );
     out
@@ -508,7 +532,7 @@ pub async fn ac_source(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocom
     let wikis = ctx.data().wikis.sources().await;
     let needle = partial.trim().to_lowercase();
     to_choices(
-        source_options(&wikis)
+        source_options(&wikis, command_category(ctx))
             .into_iter()
             .filter(|(label, value)| {
                 needle.is_empty()
@@ -529,6 +553,34 @@ async fn guild_overrides(ctx: Context<'_>) -> std::collections::HashMap<String, 
             .await
             .unwrap_or_default(),
         None => Default::default(),
+    }
+}
+
+/// `source` set to a wiki on a command that normally uses another source: only the wikis are searched.
+async fn run_wiki_only(
+    ctx: Context<'_>,
+    ty: Type,
+    q: String,
+    choice: SourceChoice,
+) -> Result<(), Error> {
+    ctx.defer().await?;
+    let wikis = ctx.data().wikis.clone();
+    let user = ctx.author().id.get() as i64;
+    if let Some((wiki, page)) = crate::wiki::parse_key(q.trim()) {
+        let msg = crate::wiki::msgs::page_msg(&wikis, wiki, page, user).await;
+        return crate::global::reply(ctx, msg).await;
+    }
+    let kind = (ty == Type::Character).then_some(crate::wiki::Kind::Character);
+    let mut found = wikis.search(&q, kind, choice.only_wiki()).await;
+    if kind.is_none() {
+        // A work search: the pages that are not characters.
+        found
+            .pages
+            .retain(|p| p.kind != crate::wiki::Kind::Character);
+    }
+    match crate::wiki::msgs::show(&wikis, found, &q, user).await {
+        Some(msg) => crate::global::reply(ctx, msg).await,
+        None => say_ephemeral(ctx, i18n::NO_RESULTS).await,
     }
 }
 
@@ -646,7 +698,8 @@ async fn run_person(ctx: Context<'_>, cat: Category, name: String) -> Result<(),
             }
         }
     };
-    let msg = crate::people::msgs::person_msg(data, &key, mature).await;
+    let msg =
+        crate::people::msgs::person_msg(data, &key, mature, ctx.author().id.get() as i64).await;
     crate::global::reply(ctx, msg).await
 }
 
@@ -662,6 +715,14 @@ pub async fn run(ctx: Context<'_>, cat: Category, ty: Type, o: Opts) -> Result<(
     if matches!(ty, Type::Work | Type::Character | Type::Person) && name.is_none() {
         ctx.defer_ephemeral().await?;
         return say_ephemeral(ctx, i18n::CATEGORY_NEEDS_NAME).await;
+    }
+    // A wiki (or all wikis) chosen as the source: the search is restricted to wikis, for every command.
+    if cat != Category::Game && matches!(ty, Type::Work | Type::Character) {
+        let wiki_list = ctx.data().wikis.sources().await;
+        let choice = SourceChoice::parse(o.source.as_deref(), &wiki_list);
+        if choice.wikis_only() {
+            return run_wiki_only(ctx, ty, name.unwrap_or_default(), choice).await;
+        }
     }
     match cat {
         Category::Anime | Category::Manga | Category::Novel => {
@@ -853,7 +914,8 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
         .as_deref()
         .and_then(|n| crate::wiki::parse_key(n.trim()))
     {
-        let msg = crate::wiki::msgs::page_msg(&wikis, wiki, page).await;
+        let msg =
+            crate::wiki::msgs::page_msg(&wikis, wiki, page, ctx.author().id.get() as i64).await;
         return crate::global::reply(ctx, msg).await;
     }
     match ty {
@@ -892,7 +954,9 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                 return fallback::show_with_note(ctx, all, note).await;
             }
             // The main providers have nothing (or a wiki was asked for): the wiki results are shown directly.
-            if let Some(msg) = crate::wiki::msgs::show(&wikis, wiki_found, &q).await {
+            if let Some(msg) =
+                crate::wiki::msgs::show(&wikis, wiki_found, &q, ctx.author().id.get() as i64).await
+            {
                 return crate::global::reply(ctx, msg).await;
             }
             say_ephemeral(ctx, found.empty_message(i18n::NO_RESULTS)).await
@@ -903,10 +967,33 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                 let found = wikis
                     .search(&q, Some(crate::wiki::Kind::Character), choice.only_wiki())
                     .await;
-                return match crate::wiki::msgs::show(&wikis, found, &q).await {
+                return match crate::wiki::msgs::show(
+                    &wikis,
+                    found,
+                    &q,
+                    ctx.author().id.get() as i64,
+                )
+                .await
+                {
                     Some(msg) => crate::global::reply(ctx, msg).await,
                     None => say_ephemeral(ctx, i18n::NO_RESULTS).await,
                 };
+            }
+            // With no source chosen and wikis present, wiki characters join the very same list as the other sources'
+            // (the general search with the type set to characters: one ranked, de-duplicated list, the source of each
+            // option in its description), always, not only when the main sources found nothing.
+            if choice == SourceChoice::Default && !wiki_list.is_empty() {
+                let msg = crate::global::search_or_open(
+                    ctx.data(),
+                    ctx.guild_id().map(|g| g.get() as i64),
+                    ctx.author().id.get() as i64,
+                    crate::search::Cat::Game,
+                    crate::search::Ty::Character,
+                    crate::search::Src::Auto,
+                    &q,
+                )
+                .await;
+                return crate::global::reply(ctx, msg).await;
             }
             // Only one provider asked for: the wikis stay out of it.
             let scope = if matches!(choice, SourceChoice::Igdb | SourceChoice::Vndb) {
@@ -941,7 +1028,8 @@ async fn run_game(ctx: Context<'_>, ty: Type, o: &Opts, name: Option<String>) ->
                         db,
                         user,
                     )
-                    .with_providers(providers, Vec::new());
+                    .with_providers(providers, Vec::new())
+                    .with_wikis(ctx.data().wikis.clone());
                     view.prepare().await;
                     view.load_cover().await;
                     view.set_notice(note);
@@ -988,6 +1076,11 @@ pub async fn anime(
     #[name_localized("ar", "الحالة")]
     #[autocomplete = "ac_status"]
     status: Option<String>,
+    #[description = "Source (optional): the main source, all wikis or one wiki"]
+    #[description_localized("ar", "المصدر (اختياري): المصدر الأساسي أو كل الويكيات أو ويكي بعينها")]
+    #[name_localized("ar", "المصدر")]
+    #[autocomplete = "ac_source"]
+    source: Option<String>,
 ) -> Result<(), Error> {
     run(
         ctx,
@@ -995,6 +1088,7 @@ pub async fn anime(
         r#type,
         Opts {
             name,
+            source,
             format,
             year,
             status,
@@ -1031,6 +1125,11 @@ pub async fn manga(
     #[name_localized("ar", "الحالة")]
     #[autocomplete = "ac_status"]
     status: Option<String>,
+    #[description = "Source (optional): the main source, all wikis or one wiki"]
+    #[description_localized("ar", "المصدر (اختياري): المصدر الأساسي أو كل الويكيات أو ويكي بعينها")]
+    #[name_localized("ar", "المصدر")]
+    #[autocomplete = "ac_source"]
+    source: Option<String>,
 ) -> Result<(), Error> {
     run(
         ctx,
@@ -1038,6 +1137,7 @@ pub async fn manga(
         r#type,
         Opts {
             name,
+            source,
             format,
             status,
             ..Opts::default()
@@ -1073,6 +1173,11 @@ pub async fn novel(
     #[name_localized("ar", "الحالة")]
     #[autocomplete = "ac_status"]
     status: Option<String>,
+    #[description = "Source (optional): the main source, all wikis or one wiki"]
+    #[description_localized("ar", "المصدر (اختياري): المصدر الأساسي أو كل الويكيات أو ويكي بعينها")]
+    #[name_localized("ar", "المصدر")]
+    #[autocomplete = "ac_source"]
+    source: Option<String>,
 ) -> Result<(), Error> {
     run(
         ctx,
@@ -1080,6 +1185,7 @@ pub async fn novel(
         r#type,
         Opts {
             name,
+            source,
             country: origin,
             status,
             ..Opts::default()
@@ -1121,6 +1227,11 @@ pub async fn drama(
     #[name_localized("ar", "الحالة")]
     #[autocomplete = "ac_status"]
     status: Option<String>,
+    #[description = "Source (optional): the main source, all wikis or one wiki"]
+    #[description_localized("ar", "المصدر (اختياري): المصدر الأساسي أو كل الويكيات أو ويكي بعينها")]
+    #[name_localized("ar", "المصدر")]
+    #[autocomplete = "ac_source"]
+    source: Option<String>,
 ) -> Result<(), Error> {
     run(
         ctx,
@@ -1128,6 +1239,7 @@ pub async fn drama(
         r#type,
         Opts {
             name,
+            source,
             country,
             year,
             status,
@@ -1143,6 +1255,7 @@ pub async fn drama(
     name_localized("ar", "مسلسل"),
     description_localized("ar", "ابحث عن مسلسل أو شخصية، أو اختر واحدًا عشوائيًا")
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn series(
     ctx: Context<'_>,
     #[description = "What to do"]
@@ -1175,6 +1288,11 @@ pub async fn series(
     #[name_localized("ar", "التصنيف")]
     #[autocomplete = "ac_genre"]
     genre: Option<String>,
+    #[description = "Source (optional): the main source, all wikis or one wiki"]
+    #[description_localized("ar", "المصدر (اختياري): المصدر الأساسي أو كل الويكيات أو ويكي بعينها")]
+    #[name_localized("ar", "المصدر")]
+    #[autocomplete = "ac_source"]
+    source: Option<String>,
 ) -> Result<(), Error> {
     run(
         ctx,
@@ -1182,6 +1300,7 @@ pub async fn series(
         r#type,
         Opts {
             name,
+            source,
             country,
             year,
             status,
@@ -1225,6 +1344,11 @@ pub async fn movie(
     #[name_localized("ar", "البلد")]
     #[autocomplete = "ac_country"]
     country: Option<String>,
+    #[description = "Source (optional): the main source, all wikis or one wiki"]
+    #[description_localized("ar", "المصدر (اختياري): المصدر الأساسي أو كل الويكيات أو ويكي بعينها")]
+    #[name_localized("ar", "المصدر")]
+    #[autocomplete = "ac_source"]
+    source: Option<String>,
 ) -> Result<(), Error> {
     run(
         ctx,
@@ -1232,6 +1356,7 @@ pub async fn movie(
         r#type,
         Opts {
             name,
+            source,
             year,
             genre,
             country,
@@ -1434,5 +1559,117 @@ mod tests {
             assert_eq!(people_scope(c), Scope::Screen);
         }
         assert_eq!(people_scope(Category::Game), Scope::Games);
+    }
+
+    fn wiki(id: i64, name: &str) -> crate::wiki::Source {
+        crate::wiki::Source {
+            id,
+            name: name.into(),
+            host: format!("w{id}.example.com"),
+            api_url: format!("https://w{id}.example.com/api.php"),
+            lang: "en".into(),
+            license_name: None,
+            license_url: None,
+            character_category: None,
+            game_category: None,
+            enabled: true,
+            added_by: None,
+            created_at: 0,
+            last_checked_at: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn the_source_menu_lists_the_commands_own_sources_all_wikis_and_each_wiki() {
+        let none = source_options(&[], Some(Category::Anime));
+        assert_eq!(
+            none.iter().map(|o| o.1.as_str()).collect::<Vec<_>>(),
+            vec!["anilist"],
+            "no wikis, no wiki options"
+        );
+        let wikis = [wiki(1, "Silent Hill Wiki"), wiki(2, "Mudae Wiki")];
+        let anime = source_options(&wikis, Some(Category::Anime));
+        assert_eq!(
+            anime.iter().map(|o| o.1.as_str()).collect::<Vec<_>>(),
+            vec!["anilist", "wikis", "wiki:1", "wiki:2"]
+        );
+        assert_eq!(source_options(&wikis, Some(Category::Movie))[0].1, "tmdb");
+        assert_eq!(
+            source_options(&wikis, Some(Category::Game))[..2]
+                .iter()
+                .map(|o| o.1.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IGDB", "VNDB"]
+        );
+        assert_eq!(source_options(&wikis, None)[0].1, "providers", "/search");
+        // a newly added wiki shows up in the very next call: the options come from the list, not from the definition
+        let more = [wikis[0].clone(), wikis[1].clone(), wiki(3, "New Wiki")];
+        assert!(source_options(&more, Some(Category::Drama))
+            .iter()
+            .any(|o| o.1 == "wiki:3"));
+    }
+
+    #[test]
+    fn the_source_menu_never_exceeds_discords_25_and_keeps_all_wikis() {
+        let wikis: Vec<_> = (1..=40).map(|i| wiki(i, &format!("Wiki {i}"))).collect();
+        for cat in [Some(Category::Anime), Some(Category::Game), None] {
+            let o = source_options(&wikis, cat);
+            assert_eq!(o.len(), 25, "{cat:?}");
+            assert!(
+                o.iter().any(|x| x.1 == "wikis"),
+                "the extra wikis are still reachable through all wikis"
+            );
+            let mut seen = std::collections::HashSet::new();
+            assert!(o
+                .iter()
+                .all(|x| seen.insert(x.1.clone()) && x.0.chars().count() <= 100));
+        }
+    }
+
+    #[test]
+    fn a_chosen_source_restricts_the_search() {
+        let wikis = [wiki(1, "Silent Hill Wiki"), wiki(2, "Mudae Wiki")];
+        let p = |s: &str| SourceChoice::parse(Some(s), &wikis);
+        assert_eq!(SourceChoice::parse(None, &wikis), SourceChoice::Default);
+        assert!(
+            SourceChoice::Default.providers() && SourceChoice::Default.wikis(),
+            "the default asks everything"
+        );
+        assert!(
+            p("anilist").providers() && !p("anilist").wikis(),
+            "the main source only"
+        );
+        assert!(p("tmdb").providers() && !p("tmdb").wikis());
+        assert!(
+            !p("wikis").providers() && p("wikis").wikis() && p("wikis").only_wiki().is_none(),
+            "all wikis means wikis only"
+        );
+        assert_eq!(p("wiki:2"), SourceChoice::Wiki(2));
+        assert_eq!(
+            p("Mudae Wiki"),
+            SourceChoice::Wiki(2),
+            "a typed name works too"
+        );
+        assert!(!p("wiki:2").providers() && p("wiki:2").only_wiki() == Some(2));
+        assert_eq!(p("IGDB").provider(), Some("igdb"));
+        assert!(!p("IGDB").wikis(), "one provider keeps the wikis out");
+        assert_eq!(
+            p("wiki:99"),
+            SourceChoice::Default,
+            "a wiki that is gone is not a restriction"
+        );
+        assert_eq!(
+            crate::search::Src::from_choice(p("wikis")),
+            crate::search::Src::AllWikis
+        );
+        assert_eq!(
+            crate::search::Src::from_choice(p("wiki:1")),
+            crate::search::Src::Wiki(1)
+        );
+        assert_eq!(
+            crate::search::Src::from_choice(p("anilist")),
+            crate::search::Src::Providers
+        );
     }
 }

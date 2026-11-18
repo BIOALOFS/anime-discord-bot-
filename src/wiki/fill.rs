@@ -58,7 +58,14 @@ pub fn pick_match<'a>(
 ) -> Option<&'a Page> {
     let strong: Vec<&Page> = pages
         .iter()
-        .filter(|p| p.kind == kind)
+        // `Other` is "any work": a page that is not a character (an anime, a series, a film…).
+        .filter(|p| {
+            if kind == Kind::Other {
+                p.kind != Kind::Character
+            } else {
+                p.kind == kind
+            }
+        })
         .filter(|p| match kind {
             Kind::Character => {
                 super::same_identity(title, parent, &p.title, p.parent_title.as_deref())
@@ -67,7 +74,10 @@ pub fn pick_match<'a>(
                 let t = normalize(super::base_title(title));
                 !t.is_empty() && t == normalize(super::base_title(&p.title))
             }
-            Kind::Other => false,
+            Kind::Other => {
+                let t = normalize(super::base_title(title));
+                !t.is_empty() && t == normalize(super::base_title(&p.title))
+            }
         })
         .collect();
     // The page that gives the most (a picture and a summary) wins; ties keep the wiki order.
@@ -101,17 +111,18 @@ impl<T: Transport + 'static> Wikis<T> {
         self.fills
             .try_get_with(key, async {
                 let now = chrono::Utc::now().timestamp();
+                let only = (kind != Kind::Other).then_some(kind);
                 let mut pages = super::store::by_title(
                     &self.pool,
                     &normalize(super::base_title(title)),
-                    Some(kind),
+                    only,
                     now,
                 )
                 .await
                 .unwrap_or_default();
                 if pick_match(title, parent, kind, &pages).is_none() {
                     pages.extend(
-                        self.search(super::base_title(title), Some(kind), None)
+                        self.search(super::base_title(title), only, None)
                             .await
                             .pages,
                     );
@@ -156,6 +167,93 @@ impl<T: Transport + 'static> Wikis<T> {
             Ok(Ok(r)) => r,
             _ => None,
         }
+    }
+}
+
+/// A fill that is looked up while a live card is already on screen: the card renders at once, and when the lookup
+/// finishes the view asks for an update, so the message is edited in place. It never extends the message's lifetime
+/// (only presses do) and gives up after a few seconds.
+pub struct LiveFill {
+    task: Option<tokio::task::JoinHandle<Option<Fill>>>,
+    started: Option<std::time::Instant>,
+    key: Option<String>,
+    pub fill: Option<Fill>,
+}
+
+/// How long a live card waits for its fill before giving up.
+const LIVE_LIMIT: Duration = Duration::from_secs(4);
+/// How often a live card looks whether its fill has arrived.
+pub const LIVE_POLL: Duration = Duration::from_millis(400);
+
+impl Default for LiveFill {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveFill {
+    pub fn new() -> Self {
+        Self {
+            task: None,
+            started: None,
+            key: None,
+            fill: None,
+        }
+    }
+
+    /// Start looking up a fill for the item `key` (once per item; a new item resets the previous fill).
+    pub fn start<T: Transport + 'static>(
+        &mut self,
+        wikis: &Arc<Wikis<T>>,
+        key: &str,
+        title: &str,
+        parent: Option<&str>,
+        kind: Kind,
+    ) {
+        if self.key.as_deref() == Some(key) {
+            return;
+        }
+        if let Some(t) = self.task.take() {
+            t.abort();
+        }
+        self.fill = None;
+        self.key = Some(key.to_string());
+        self.started = Some(std::time::Instant::now());
+        let (me, t, p) = (wikis.clone(), title.to_string(), parent.map(str::to_string));
+        self.task = Some(tokio::spawn(async move {
+            me.fill_for(&t, p.as_deref(), kind).await
+        }));
+    }
+
+    pub fn pending(&self) -> bool {
+        self.task.is_some()
+    }
+
+    /// The fill, only if it is for this item.
+    pub fn for_key(&self, key: &str) -> Option<&Fill> {
+        self.fill
+            .as_ref()
+            .filter(|_| self.key.as_deref() == Some(key))
+    }
+
+    /// Has the fill arrived (or the time run out)? `true` when the card should be drawn again.
+    pub async fn poll(&mut self) -> bool {
+        let Some(task) = self.task.as_mut() else {
+            return false;
+        };
+        let timed_out = self.started.is_some_and(|s| s.elapsed() > LIVE_LIMIT);
+        if !task.is_finished() && !timed_out {
+            return false;
+        }
+        let Some(task) = self.task.take() else {
+            return false;
+        };
+        if !task.is_finished() {
+            task.abort();
+            return false;
+        }
+        self.fill = task.await.ok().flatten();
+        self.fill.is_some()
     }
 }
 
@@ -335,6 +433,24 @@ mod tests {
         assert!(
             pick_match("Silent Hill", None, Kind::Game, &pages).is_none(),
             "a prefix is not a match"
+        );
+    }
+
+    #[test]
+    fn any_work_matches_a_page_that_is_not_a_character_by_its_name() {
+        let pages = vec![
+            page(1, "Frieren", Kind::Character, Some("Frieren"), true),
+            page(2, "Frieren", Kind::Other, None, true),
+            page(3, "Frieren: Beyond Journey's End", Kind::Game, None, false),
+        ];
+        assert_eq!(
+            pick_match("Frieren", None, Kind::Other, &pages).map(|p| p.page_id),
+            Some(2),
+            "never the character page"
+        );
+        assert!(
+            pick_match("Sousou no Frieren", None, Kind::Other, &pages).is_none(),
+            "a different name is no match"
         );
     }
 
@@ -528,5 +644,67 @@ mod tests {
             started.elapsed() - before < Duration::from_millis(100),
             "the second look is served from the cache"
         );
+    }
+
+    #[tokio::test]
+    async fn a_live_card_gets_its_fill_later_and_asks_for_an_update() {
+        let w = service(FakeWiki::default()).await;
+        store::insert(
+            &w.pool,
+            &store::NewSource {
+                name: "SH".into(),
+                host: "sh.example".into(),
+                api_url: "https://sh.example/api.php".into(),
+                lang: "en".into(),
+                license_name: None,
+                license_url: None,
+                character_category: None,
+                game_category: None,
+                added_by: None,
+            },
+        )
+        .await
+        .expect("source");
+        w.invalidate().await;
+        store::upsert(
+            &w.pool,
+            &page(5, "Silent Hill 2", Kind::Game, None, true),
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+        .expect("page");
+        let mut live = LiveFill::new();
+        assert!(!live.pending() && !live.poll().await);
+        live.start(&w, "igdb:1", "Silent Hill 2", None, Kind::Game);
+        assert!(live.pending());
+        let mut updated = false;
+        for _ in 0..50 {
+            if live.poll().await {
+                updated = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(updated, "the view is asked to draw the card again");
+        assert!(live.fill.is_some() && !live.pending());
+        // the same item again does nothing; a new item starts over
+        live.start(&w, "igdb:1", "Silent Hill 2", None, Kind::Game);
+        assert!(!live.pending());
+        live.start(&w, "igdb:2", "Nothing Known", None, Kind::Game);
+        assert!(live.pending() && live.fill.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_live_card_without_a_match_never_asks_for_an_update() {
+        let w = service(FakeWiki::default()).await;
+        let mut live = LiveFill::new();
+        live.start(&w, "igdb:9", "No Such Game", None, Kind::Game);
+        let mut asked = false;
+        for _ in 0..20 {
+            asked |= live.poll().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!asked, "nothing to show, so the message is left alone");
+        assert!(!live.pending());
     }
 }

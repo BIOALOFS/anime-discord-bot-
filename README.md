@@ -252,6 +252,15 @@ The bot owner can add MediaWiki sites (Fandom, wiki.gg, Wikipedia-style) as extr
 - **Data.** Migration 0020 is additive (`wiki_sources`, `wiki_cache`, an FTS5 index). Deleting a wiki removes only its definition; its cached pages expire (a week) and are never shown meanwhile. Member data is never touched.
 - **Optional setting:** `WIKI_REQUESTS_PER_SECOND` (default `2`, per wiki).
 
+## Wikis are first-class sources (Round 11.1)
+A wiki entry behaves like an entry from AniList, IGDB, VNDB or TMDB. Only real people (staff, actors, voice actors) stay out of profiles.
+
+- **`source` everywhere.** `/anime`, `/manga`, `/novel`, `/drama`, `/series`, `/movie`, `/search` and `/game` take an optional, autocomplete-backed **المصدر**: the command's own providers, **كل الويكيات** (wikis only) or one wiki by name (25-option cap). The choice is read from the cached `wiki_sources` table, so a wiki added or removed in `/admin` shows up in every server at once with no command re-registration. Empty = the old behavior.
+- **Profiles.** Every character and work card (wiki ones too) has "أضف إلى البروفايل", which becomes "إزالة من البروفايل" once the item is there. A wiki item has the key `wiki:{wiki_id}:{page_id}` (characters live in the integer id range from 4e15, works as `wiki` works) and a **snapshot** (migration 0021, additive: name, picture, summary, series, source, page URL, license). Disabling or deleting a wiki never removes or breaks an item; it keeps showing its snapshot with the source in the footer. No item limit; the profile stays paginated with its 30 s cache.
+- **Editing.** Picture, nickname and every other per-item field work on wiki items and are stored apart from the source data, so cache refreshes and wiki changes never overwrite them.
+- **No second class.** Wiki characters join the same ranked, de-duplicated list as the other providers; "أظهر العمل" is always on a wiki character and resolves the work on click (series field, then the same wiki, then other sources by flexible title); "أظهر الشخصيات" works on wiki works and on other works with strong wiki matches. The interactive views (`/game`, character cards) now receive the fill-missing-fields result **in place** while the view is alive (no lifetime is extended), and AniList/TMDB cards are filled too.
+- **Cleaning (Mudae-style wikis).** Bot jargon is removed by one constant, `JARGON` and `IGNORED_FIELDS` in `src/wiki/clean.rs` (`rollable`, `waifu`, `husbando`, `roulette`, `kakera`, `claim`, `wishlist`, `$` commands; fields ROULETTE / OFFICIAL SITE). An empty summary stays empty. The infobox **Series** is the parent work, matched flexibly (case, accents, punctuation, "Sun/Moon" = "Sun and Moon" = "Sun & Moon"; edition words are stripped only when the rest still matches strongly). The first infobox picture is preferred. The kind is never assumed to be "game".
+
 ### Owner checklist
 1. `/admin` → للمالك → إدارة الويكيات → إضافة ويكي → `silenthill.fandom.com` → check the preview → تأكيد.
 2. `/game` type شخصية, name "Pyramid Head", no source: a single card with the wiki footer.

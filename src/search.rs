@@ -143,6 +143,67 @@ impl Ty {
     }
 }
 
+/// Which sources a search uses (the `source` option): the default (everything appropriate, wikis included), only the
+/// main providers, only wikis (all of them) or only one wiki.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Src {
+    #[default]
+    Auto,
+    Providers,
+    AllWikis,
+    Wiki(i64),
+}
+
+impl Src {
+    /// A short code for button ids: `a`, `p`, `w`, `w12`.
+    pub fn code(self) -> String {
+        match self {
+            Self::Auto => "a".into(),
+            Self::Providers => "p".into(),
+            Self::AllWikis => "w".into(),
+            Self::Wiki(id) => format!("w{id}"),
+        }
+    }
+
+    pub fn from_code(c: &str) -> Option<Self> {
+        match c {
+            "a" => Some(Self::Auto),
+            "p" => Some(Self::Providers),
+            "w" => Some(Self::AllWikis),
+            _ => c
+                .strip_prefix('w')
+                .and_then(|n| n.parse().ok())
+                .map(Self::Wiki),
+        }
+    }
+
+    fn providers(self) -> bool {
+        matches!(self, Self::Auto | Self::Providers)
+    }
+
+    fn wikis(self) -> bool {
+        !matches!(self, Self::Providers)
+    }
+
+    fn only_wiki(self) -> Option<i64> {
+        match self {
+            Self::Wiki(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// What the `source` option said.
+    pub fn from_choice(c: crate::commands::category::SourceChoice) -> Self {
+        use crate::commands::category::SourceChoice as C;
+        match c {
+            C::Default => Self::Auto,
+            C::AllWikis => Self::AllWikis,
+            C::Wiki(id) => Self::Wiki(id),
+            C::Primary | C::Igdb | C::Vndb => Self::Providers,
+        }
+    }
+}
+
 /// The three kinds of result, in the order they are grouped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Group {
@@ -191,6 +252,7 @@ pub struct Params {
     pub games_on: bool,
     /// Ask the wikis live (a submitted search) or read only their local index (autocomplete, which may not wait).
     pub live_wikis: bool,
+    pub src: Src,
 }
 
 /// Everything found, and the sources that did not answer.
@@ -234,8 +296,15 @@ pub async fn gather(
         p.ty.includes(Group::Character),
         p.ty.includes(Group::Person),
     );
+    // The `source` option: only the main providers, or only wikis, or the default of both.
+    let providers_on = p.src.providers();
+    let (want_works_p, want_chars_p, want_people_p) = (
+        want_works && providers_on,
+        want_chars && providers_on,
+        want_people && providers_on,
+    );
     let ani_works = async {
-        if !(want_works && p.cat.anilist()) || q.chars().count() < 2 {
+        if !(want_works_p && p.cat.anilist()) || q.chars().count() < 2 {
             return Vec::new();
         }
         let kind = match p.cat {
@@ -271,7 +340,7 @@ pub async fn gather(
         }
     };
     let ani_chars = async {
-        if !(want_chars && p.cat.anilist()) || q.chars().count() < 2 {
+        if !(want_chars_p && p.cat.anilist()) || q.chars().count() < 2 {
             return Vec::new();
         }
         match src
@@ -300,7 +369,7 @@ pub async fn gather(
         }
     };
     let tmdb_works = async {
-        if !(want_works && p.cat.tmdb()) || !src.tmdb.enabled() || q.chars().count() < 2 {
+        if !(want_works_p && p.cat.tmdb()) || !src.tmdb.enabled() || q.chars().count() < 2 {
             return Vec::new();
         }
         let list: Vec<tm::Work> = match p.cat {
@@ -361,7 +430,7 @@ pub async fn gather(
             .collect()
     };
     let games = async {
-        if !(want_works && p.cat.games() && p.games_on) || q.chars().count() < 2 {
+        if !(want_works_p && p.cat.games() && p.games_on) || q.chars().count() < 2 {
             return (Vec::new(), Vec::new());
         }
         let found = src
@@ -391,7 +460,7 @@ pub async fn gather(
         (entries, failed)
     };
     let game_chars = async {
-        if !(want_chars && p.cat.games() && p.games_on) || q.chars().count() < 2 {
+        if !(want_chars_p && p.cat.games() && p.games_on) || q.chars().count() < 2 {
             return Vec::new();
         }
         src.providers
@@ -413,7 +482,7 @@ pub async fn gather(
             .collect()
     };
     let persons = async {
-        if !want_people || q.chars().count() < 2 {
+        if !want_people_p || q.chars().count() < 2 {
             return (Vec::new(), Vec::new());
         }
         let found = people::fetch::search(src, p.cat.people_scope(), q, p.mature).await;
@@ -438,14 +507,17 @@ pub async fn gather(
     };
     // The wikis of the owner (global): searched live for a submitted search, from the local index for autocomplete.
     let wikis = async {
-        if !(want_works || want_chars) || !p.cat.games() || q.chars().count() < 2 {
+        // By default a wiki joins the searches that can concern its pages (games and the general one); chosen through
+        // `source` it is searched whatever the category.
+        let relevant = p.src != Src::Auto || p.cat.games();
+        if !p.src.wikis() || !relevant || !(want_works || want_chars) || q.chars().count() < 2 {
             return (Vec::new(), Vec::new());
         }
         let found = if p.live_wikis {
-            src.wikis.search(q, None, None).await
+            src.wikis.search(q, None, p.src.only_wiki()).await
         } else {
             crate::wiki::service::Found {
-                pages: src.wikis.suggest(q, None, None, 10).await,
+                pages: src.wikis.suggest(q, None, p.src.only_wiki(), 10).await,
                 failed: Vec::new(),
             }
         };
@@ -586,26 +658,29 @@ pub fn is_key(v: &str) -> bool {
 const PAGE: usize = 25;
 const QUERY_IN_ID: usize = 50;
 
-/// The id of a page button: `searchpage:{cat}:{type}:{page}:{text}` (the text is cut so the id fits 100 characters).
-pub fn page_id(cat: Cat, ty: Ty, page: usize, q: &str) -> String {
+/// The id of a page button: `searchpage:{cat}:{type}:{source}:{page}:{text}` (the text is cut so the id fits 100
+/// characters).
+pub fn page_id(cat: Cat, ty: Ty, src: Src, page: usize, q: &str) -> String {
     let q: String = q.trim().chars().take(QUERY_IN_ID).collect();
     format!(
-        "{}:{}:{}:{page}:{q}",
+        "{}:{}:{}:{}:{page}:{q}",
         components::SEARCH_PAGE,
         cat.key(),
-        ty.key()
+        ty.key(),
+        src.code()
     )
 }
 
-/// Parse a page id back into `(cat, type, page, text)`.
-pub fn parse_page_id(id: &str) -> Option<(Cat, Ty, usize, String)> {
+/// Parse a page id back into `(cat, type, source, page, text)`.
+pub fn parse_page_id(id: &str) -> Option<(Cat, Ty, Src, usize, String)> {
     let rest = id.strip_prefix(&format!("{}:", components::SEARCH_PAGE))?;
-    let mut p = rest.splitn(4, ':');
+    let mut p = rest.splitn(5, ':');
     let cat = Cat::from_key(p.next()?)?;
     let ty = Ty::from_key(p.next()?)?;
+    let src = Src::from_code(p.next()?)?;
     let page = p.next()?.parse().ok()?;
     let q = p.next()?.to_string();
-    (!q.is_empty()).then_some((cat, ty, page, q))
+    (!q.is_empty()).then_some((cat, ty, src, page, q))
 }
 
 /// The result message of a free-text search: the entries grouped by kind, a select menu of the page and page buttons.
@@ -649,7 +724,7 @@ pub fn results_msg(g: &Gathered, p: Params, q: &str, page: usize) -> Msg {
             .collect();
     if pages > 1 {
         let btn = |label: &str, to: usize, off: bool| {
-            serenity::CreateButton::new(page_id(p.cat, p.ty, to, q))
+            serenity::CreateButton::new(page_id(p.cat, p.ty, p.src, to, q))
                 .label(label)
                 .style(serenity::ButtonStyle::Secondary)
                 .disabled(off)
@@ -807,15 +882,21 @@ mod tests {
 
     #[test]
     fn page_ids_round_trip_including_colons_and_stay_short() {
-        let id = page_id(Cat::Game, Ty::Person, 3, "re: zero ماذا");
+        let id = page_id(Cat::Game, Ty::Person, Src::Wiki(12), 3, "re: zero ماذا");
         assert_eq!(
             parse_page_id(&id),
-            Some((Cat::Game, Ty::Person, 3, "re: zero ماذا".into()))
+            Some((
+                Cat::Game,
+                Ty::Person,
+                Src::Wiki(12),
+                3,
+                "re: zero ماذا".into()
+            ))
         );
-        let long = page_id(Cat::All, Ty::All, 0, &"ا".repeat(200));
+        let long = page_id(Cat::All, Ty::All, Src::AllWikis, 0, &"ا".repeat(200));
         assert!(long.chars().count() <= 100);
-        assert_eq!(parse_page_id("searchpage:bad:all:0:x"), None);
-        assert_eq!(parse_page_id("searchpage:all:all:x:q"), None);
+        assert_eq!(parse_page_id("searchpage:bad:all:a:0:x"), None);
+        assert_eq!(parse_page_id("searchpage:all:all:a:x:q"), None);
     }
 
     #[test]
@@ -830,6 +911,7 @@ mod tests {
             mature: true,
             games_on: true,
             live_wikis: true,
+            src: Src::Auto,
         };
         let m = results_msg(&g, p, "silent", 0);
         assert_eq!(m.rows.len(), 2);
@@ -842,7 +924,7 @@ mod tests {
         let nav = serde_json::to_value(&m.rows[1]).expect("json");
         assert_eq!(
             nav["components"][2]["custom_id"],
-            page_id(Cat::All, Ty::All, 1, "silent")
+            page_id(Cat::All, Ty::All, Src::Auto, 1, "silent")
         );
         let text = serde_json::to_value(m.embed.expect("embed")).expect("json")["description"]
             .as_str()
@@ -949,5 +1031,24 @@ mod tests {
             },
         ];
         assert_eq!(dedupe_characters(works).len(), 2);
+    }
+
+    #[test]
+    fn source_codes_round_trip() {
+        for s in [
+            Src::Auto,
+            Src::Providers,
+            Src::AllWikis,
+            Src::Wiki(7),
+            Src::Wiki(1234),
+        ] {
+            assert_eq!(Src::from_code(&s.code()), Some(s));
+        }
+        assert_eq!(Src::from_code("x"), None);
+        assert_eq!(Src::from_code("wx"), None);
+        assert!(Src::Auto.providers() && Src::Auto.wikis());
+        assert!(Src::Providers.providers() && !Src::Providers.wikis());
+        assert!(!Src::AllWikis.providers() && Src::AllWikis.wikis());
+        assert_eq!(Src::Wiki(3).only_wiki(), Some(3));
     }
 }

@@ -97,3 +97,9 @@ What was removed and what was merged. Nothing here is reachable from a command a
 - **Not done on purpose:** wiki pages cannot be added to a profile (they have no stable integer id), and the cards of the interactive game / character views
   (`FallbackView`, `CharacterView`) are not filled in place, only the cards that the navigation buttons and `/search` open.
 
+
+## Round 11.1
+- **Added:** `src/wiki/clean.rs` (jargon list, series matching), `wiki/profile.rs`, `wiki/resolve.rs`, `wiki/fill.rs` live fill, migration 0021 (additive
+  `wiki_snapshots`), the `source` option on every search command, the add/remove toggle on every card.
+- **Removed:** the "wiki pages cannot be added to a profile" limit and the "fallback only" wiki results; the `ac_name` source-less path.
+- **Still true:** the notification digests do not list wiki items separately; a wiki work is not merged with a same-title work of another source (they are only linked for button navigation).
