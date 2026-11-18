@@ -93,7 +93,7 @@ pub async fn verify_migrated(
 }
 
 /// Tables that only cache data from elsewhere; they are rebuilt on demand and not user data.
-const CACHE_TABLES: &[&str] = &["character_cache", "media_cache"];
+const CACHE_TABLES: &[&str] = &["character_cache", "media_cache", "wiki_cache"];
 
 /// Row counts of every user-data table (every table but the caches and the migration bookkeeping).
 pub async fn user_data_counts(
@@ -107,7 +107,7 @@ pub async fn user_data_counts(
     let mut out = std::collections::BTreeMap::new();
     for name in names
         .into_iter()
-        .filter(|n| !CACHE_TABLES.contains(&n.as_str()))
+        .filter(|n| !CACHE_TABLES.contains(&n.as_str()) && !n.starts_with("wiki_fts"))
     {
         // Table names come from sqlite_master, never from users.
         let n: i64 = sqlx::query_scalar(&format!(

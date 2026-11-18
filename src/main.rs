@@ -27,6 +27,7 @@ mod render;
 mod search;
 mod tmdb;
 mod ui;
+mod wiki;
 
 use poise::serenity_prelude as serenity;
 use sqlx::SqlitePool;
