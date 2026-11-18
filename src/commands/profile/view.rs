@@ -8,7 +8,7 @@ use crate::{
     anilist::{ContentPolicy, SafeAniList},
     commands::buttons,
     db::{
-        custom::{self, StoredImage},
+        custom::StoredImage,
         profile::{self as pdb, Profile},
         suggest, works,
     },
@@ -291,9 +291,7 @@ impl ProfileView {
             .current()
             .filter(|i| i.section == Section::Characters && i.visible)?;
         let id = item.character_id()?;
-        let Some(image_id) = item.custom_image_id else {
-            return None;
-        };
+        let image_id = item.custom_image_id?;
         let Some(img) = self.images.get(&self.pool, image_id).await else {
             tracing::warn!("custom image of character {id} is missing; using the provider image");
             return None;
