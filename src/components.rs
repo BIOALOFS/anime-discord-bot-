@@ -21,6 +21,9 @@ pub const SHOW_WORKS: &str = "showworks";
 pub const SHOW_CREW: &str = "showcrew";
 pub const SHOW_PERFORMER: &str = "showperf";
 pub const PICK_MORE: &str = "pickmore";
+/// The general search: its result menu (any kind of item) and its page buttons.
+pub const PICK_ANY: &str = "pickany";
+pub const SEARCH_PAGE: &str = "searchpage";
 pub const REMIND: &str = "remind";
 pub const ADD_PROFILE: &str = "addprofile";
 /// The watch / read status menu of a work card: `setstatus:<work key>` (the chosen status is the menu value).
@@ -49,7 +52,9 @@ pub fn is_global_id(id: &str) -> bool {
         || id == PICK_CHAR
         || id == PICK_PERSON
         || id == PICK_MORE
+        || id == PICK_ANY
         || [
+            SEARCH_PAGE,
             SHOW_WORK,
             SHOW_CHARS,
             SHOW_WORKS,
@@ -128,6 +133,10 @@ pub enum Press {
     PickWork(String),
     PickChar(String),
     PickPerson(String),
+    /// Any item of the general search, by key: opens a work, character or person card.
+    PickAny(String),
+    /// A page button of a general-search result: category, type, page, text.
+    SearchPage(crate::search::Cat, crate::search::Ty, usize, String),
     /// The works of a person, and the page when it is a page button of that message.
     ShowWorks(String, Option<usize>),
     /// The crew of a work, and the page when it is a page button of that message.
@@ -153,6 +162,15 @@ pub fn parse(id: &str, values: &[String]) -> Option<Press> {
             .first()
             .filter(|v| is_person_key(v))
             .map(|v| Press::PickPerson(v.clone()));
+    }
+    if id == PICK_ANY {
+        return values
+            .first()
+            .filter(|v| crate::search::is_key(v))
+            .map(|v| Press::PickAny(v.clone()));
+    }
+    if id.starts_with(&format!("{SEARCH_PAGE}:")) {
+        return crate::search::parse_page_id(id).map(|(c, t, p, q)| Press::SearchPage(c, t, p, q));
     }
     if id == PICK_MORE {
         // The overflow menu carries the id of the button it stands for.
@@ -366,6 +384,14 @@ pub fn work_menu(
     items: &[(String, String)],
 ) -> Option<serenity::CreateActionRow> {
     menu(PICK_WORK, placeholder, items)
+}
+
+/// A menu of items of any kind (the general search): choosing one opens its card as a new message.
+pub fn any_menu(
+    placeholder: &str,
+    items: &[(String, String)],
+) -> Option<serenity::CreateActionRow> {
+    menu(PICK_ANY, placeholder, items)
 }
 
 /// A menu of characters (rosters, lists of characters).

@@ -42,7 +42,7 @@ What was removed and what was merged. Nothing here is reachable from a command a
   (`chapters/`), weekly leaderboard, suggestion pictures.
 
 ## Round 7 (audit)
-- **Removed commands:** `/search`, `/character` and `/random` (their jobs live in the seven category commands `/anime /manga /novel /drama /series /movie /game`);
+- **Removed commands (round 5; `/search` came back in round 9 as the general search):** `/search`, `/character` and `/random` (their jobs live in the seven category commands `/anime /manga /novel /drama /series /movie /game`);
   `src/commands/search.rs` and `src/commands/random.rs` are deleted. The old minigame `/game` became `/event` (`commands/game.rs` → `commands/event.rs`).
   Their autocompletes (`ac_source`, `ac_work`, the `source` choices), the daily-spotlight and birthday pickers in the command surface, and every mention
   in `/help`, README and the strings are gone. `/top` lost its `kind/scope/type` options and the global scope (it is the server's ranking now).

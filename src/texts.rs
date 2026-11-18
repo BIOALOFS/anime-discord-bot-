@@ -465,6 +465,11 @@ pub const NO_CREW: &str = "ما وصلتني بيانات الطاقم لهذا 
 pub const NO_PERFORMER: &str = "ما عندي مؤدٍّ مسجّل لهذه الشخصية.";
 pub const PICK_WORK_OF_PERSON: &str = "افتح عملًا…";
 pub const PICK_CHAR_OF_PERSON: &str = "افتح شخصية…";
+pub const PICK_ANY_PLACEHOLDER: &str = "افتح نتيجة…";
+pub fn search_results_for(q: &str) -> String {
+    format!("نتائج البحث عن «{q}»")
+}
+pub const SEARCH_NEEDS_NAME: &str = "اكتب اسم عمل أو شخصية أو شخص للبحث.";
 pub const PICK_PERSON_TITLE: &str = "من تقصد؟";
 pub const PICK_PERSON_PLACEHOLDER: &str = "افتح بطاقة شخص…";
 pub const PICK_PERFORMER_PLACEHOLDER: &str = "اختر المؤدي…";

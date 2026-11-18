@@ -313,6 +313,76 @@ fn roster_nav(key: &str, page: usize, pages: usize) -> serenity::CreateActionRow
     ])
 }
 
+/// Open any item by its key: a person, a work or a character.
+pub async fn open_any(data: &Data, key: &str, user: i64, mature: bool) -> Msg {
+    if crate::people::parse_key(key).is_some() {
+        crate::people::msgs::person_msg(data, key, mature).await
+    } else if components::is_work_key(key) {
+        work_msg(data, key, user, mature).await
+    } else {
+        character_msg(data, key, mature).await
+    }
+}
+
+async fn search_params(
+    data: &Data,
+    guild: Option<i64>,
+    cat: crate::search::Cat,
+    ty: crate::search::Ty,
+) -> crate::search::Params {
+    let games_on = match guild {
+        Some(g) => crate::db::custom::games_enabled(&data.db, g)
+            .await
+            .unwrap_or(true),
+        None => true,
+    };
+    crate::search::Params {
+        cat,
+        ty,
+        mature: mature_for(data, guild).await,
+        games_on,
+    }
+}
+
+/// The result list of the general search for `q` (one page), as it was typed.
+pub async fn search_msg(
+    data: &Data,
+    guild: Option<i64>,
+    cat: crate::search::Cat,
+    ty: crate::search::Ty,
+    q: &str,
+    page: usize,
+) -> Msg {
+    let p = search_params(data, guild, cat, ty).await;
+    let overrides = guild_overrides(data, guild).await;
+    let found =
+        crate::search::gather(&crate::people::fetch::Sources::of(data), &overrides, p, q).await;
+    crate::search::results_msg(&found, p, q, page)
+}
+
+/// The submit of the general search: a picked key opens its card; a typed name with exactly one result opens that
+/// result; otherwise the grouped result list.
+pub async fn search_or_open(
+    data: &Data,
+    guild: Option<i64>,
+    user: i64,
+    cat: crate::search::Cat,
+    ty: crate::search::Ty,
+    q: &str,
+) -> Msg {
+    let p = search_params(data, guild, cat, ty).await;
+    if crate::search::is_key(q) {
+        return open_any(data, q.trim(), user, p.mature).await;
+    }
+    let overrides = guild_overrides(data, guild).await;
+    let found =
+        crate::search::gather(&crate::people::fetch::Sources::of(data), &overrides, p, q).await;
+    match found.entries.as_slice() {
+        [one] if found.failed.is_empty() => open_any(data, &one.key, user, p.mature).await,
+        _ => crate::search::results_msg(&found, p, q, 0),
+    }
+}
+
 /// Does anyone voice this character (AniList and VNDB look it up; the answer is cached by the sources)?
 async fn has_performers(data: &Data, key: &str, mature: bool) -> bool {
     !crate::people::fetch::performers(&crate::people::fetch::Sources::of(data), key, mature)
@@ -673,6 +743,9 @@ pub async fn handle(
         Press::ShowCrew(key, Some(page)) => {
             Some(crate::people::msgs::crew_msg(data, key, *page, mature).await)
         }
+        Press::SearchPage(cat, ty, page, q) => {
+            Some(search_msg(data, guild, *cat, *ty, q, *page).await)
+        }
         _ => None,
     };
     if let Some(m) = page_edit {
@@ -695,6 +768,8 @@ pub async fn handle(
             (work_msg(data, &k, user, mature).await, ephemeral)
         }
         Press::ShowChars(k, _) => (roster_msg(data, &k, 0, mature).await, ephemeral),
+        Press::PickAny(k) => (open_any(data, &k, user, mature).await, ephemeral),
+        Press::SearchPage(..) => return Ok(()),
         Press::PickPerson(k) => (
             crate::people::msgs::person_msg(data, &k, mature).await,
             ephemeral,

@@ -33,7 +33,6 @@ pub enum Scope {
     /// `/game`: IGDB companies and VNDB staff.
     Games,
     /// `/search` without a category.
-    #[allow(dead_code)] // used by `/search` in the next commit
     All,
 }
 

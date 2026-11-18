@@ -16,6 +16,7 @@ pub mod profile;
 pub mod recommend;
 pub mod roster;
 pub mod schedule;
+pub mod search;
 pub mod settings;
 pub mod suggest;
 pub mod tmdb_view;
