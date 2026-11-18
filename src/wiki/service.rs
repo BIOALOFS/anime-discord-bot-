@@ -219,7 +219,8 @@ impl<T: Transport + 'static> Wikis<T> {
                 license_name: p.license_name.clone(),
                 license_url: p.license_url.clone(),
                 character_category: clean(characters),
-                game_category: clean(games),
+                work_category: clean(games),
+                kind_hint: None,
                 added_by: Some(added_by),
             },
         )
@@ -293,7 +294,7 @@ impl<T: Transport + 'static> Wikis<T> {
                         .unwrap_or(usize::MAX)
                 };
                 pages.sort_by_key(order);
-                pages.retain(|p| kind.is_none_or(|k| p.kind == k));
+                pages.retain(|p| kind.is_none_or(|k| k.matches(p.kind)));
                 Ok::<_, WikiError>(Arc::new(pages))
             })
             .await
@@ -649,7 +650,7 @@ mod tests {
             Some("Category:Characters"),
             "typed categories are normalised"
         );
-        assert_eq!(live[0].game_category, None, "search-only for games");
+        assert_eq!(live[0].work_category, None, "search-only for games");
         assert!(w.source(id).await.is_some());
         assert!(!t.calls.lock().expect("lock").is_empty());
     }
@@ -898,7 +899,8 @@ mod tests {
             license_name: None,
             license_url: None,
             character_category: Some("Category:Characters".into()),
-            game_category: Some("Category:Games".into()),
+            work_category: Some("Category:Games".into()),
+            kind_hint: None,
             enabled: true,
             added_by: None,
             created_at: 0,
@@ -953,7 +955,8 @@ mod tests {
             license_name: Some("CC BY-SA".into()),
             license_url: None,
             character_category: Some("Category:Characters".into()),
-            game_category: None,
+            work_category: None,
+            kind_hint: None,
             enabled: true,
             added_by: None,
             created_at: 0,

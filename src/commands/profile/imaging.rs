@@ -91,6 +91,59 @@ pub fn process(input: &[u8]) -> Result<Processed, ImageError> {
     }
 }
 
+/// Most pixels a downloaded picture may have, and the smallest side that is still a picture and not a dot.
+pub const REMOTE_MAX_PIXELS: u64 = 40_000_000;
+pub const REMOTE_MIN_SIDE: u32 = 16;
+/// Most bytes of a downloaded picture.
+pub const REMOTE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// A picture downloaded from an address: up to 8 MB, PNG, JPEG, WebP or GIF by magic bytes (SVG and everything else
+/// is refused), a GIF becomes its first frame, the pixel count and the smallest side are checked from the header
+/// before anything is decoded, and the result is a clean re-encode (no metadata) of a bounded size.
+pub fn process_remote(input: &[u8]) -> Result<Processed, ImageError> {
+    if input.len() > REMOTE_MAX_BYTES {
+        return Err(ImageError::TooLarge);
+    }
+    let format = sniff(input).ok_or(ImageError::UnknownFormat)?;
+    let fmt = match format {
+        Format::Png => image::ImageFormat::Png,
+        Format::Jpeg => image::ImageFormat::Jpeg,
+        Format::Webp => image::ImageFormat::WebP,
+        Format::Gif => image::ImageFormat::Gif,
+    };
+    let (w, h) = ImageReader::with_format(Cursor::new(input), fmt)
+        .into_dimensions()
+        .map_err(|_| ImageError::Corrupt)?;
+    if u64::from(w) * u64::from(h) > REMOTE_MAX_PIXELS {
+        return Err(ImageError::TooBig);
+    }
+    if w < REMOTE_MIN_SIDE || h < REMOTE_MIN_SIDE {
+        return Err(ImageError::Corrupt);
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(input), fmt);
+    let mut l = Limits::default();
+    l.max_alloc = Some(512 * 1024 * 1024);
+    reader.limits(l);
+    let img = reader.decode().map_err(|_| ImageError::Corrupt)?.to_rgba8();
+    let (w, h) = fit(img.width(), img.height());
+    let img = if (w, h) == img.dimensions() {
+        img
+    } else {
+        image::imageops::resize(&img, w, h, FilterType::Triangle)
+    };
+    let mut out = Vec::new();
+    img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|_| ImageError::Corrupt)?;
+    Ok(Processed {
+        hash: hash_of(&out),
+        bytes: out,
+        mime: "image/png",
+        width: w,
+        height: h,
+        animated: false,
+    })
+}
+
 fn limits() -> Limits {
     let mut l = Limits::default();
     l.max_image_width = Some(MAX_INPUT_SIDE);
@@ -485,5 +538,33 @@ mod tests {
     fn gif_dimensions_are_capped() {
         let out = process(&gif(2, 1200, 600)).expect("ok");
         assert_eq!((out.width, out.height), (800, 400));
+    }
+
+    #[test]
+    fn a_remote_picture_is_checked_before_it_is_decoded_and_cleaned() {
+        // fake extension / not an image / SVG
+        assert_eq!(
+            process_remote(b"<svg xmlns='http://www.w3.org/2000/svg'/>").err(),
+            Some(ImageError::UnknownFormat)
+        );
+        assert_eq!(
+            process_remote(b"<html>not a picture</html>").err(),
+            Some(ImageError::UnknownFormat)
+        );
+        // too small
+        assert_eq!(process_remote(&png(4, 4)).err(), Some(ImageError::Corrupt));
+        // a GIF becomes one still frame
+        let g = process_remote(&gif(3, 40, 40)).expect("gif");
+        assert!(!g.animated);
+        assert_eq!(g.mime, "image/png");
+        // big pictures are shrunk, small ones kept
+        let big = process_remote(&png(1600, 900)).expect("png");
+        assert!(big.width.max(big.height) <= MAX_SIDE);
+        assert_eq!(process_remote(&png(100, 100)).expect("small").width, 100);
+        // oversized input is refused outright
+        assert_eq!(
+            process_remote(&vec![0u8; REMOTE_MAX_BYTES + 1]).err(),
+            Some(ImageError::TooLarge)
+        );
     }
 }

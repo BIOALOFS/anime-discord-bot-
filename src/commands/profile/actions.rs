@@ -283,6 +283,77 @@ pub(super) async fn character_image(
     private_reply(ctx, i18n::custom_image_saved(&name, new.animated)).await
 }
 
+/// The reply for a failed URL picture, by reason. Nothing about the address is echoed back.
+pub(super) fn url_error_text(e: &crate::netfetch::FetchError) -> &'static str {
+    use crate::netfetch::FetchError as F;
+    match e {
+        F::Unsafe | F::TooManyRedirects => i18n::IMAGE_URL_UNSAFE,
+        F::TooLarge => i18n::IMAGE_URL_TOO_LARGE,
+        F::Failed => i18n::IMAGE_URL_FAILED,
+    }
+}
+
+/// The picture of a character (or a wiki item) of the caller's profile from an address. The interaction is
+/// acknowledged first; the address is vetted, fetched without ever trusting DNS or a redirect, processed, stored as
+/// a copy, and only then swapped in: any failure leaves the old picture exactly as it was.
+pub(super) async fn character_image_url(
+    ctx: Context<'_>,
+    value: &str,
+    url: Option<&str>,
+) -> Result<(), Error> {
+    begin_private(ctx).await?;
+    if upload_gate(ctx).await?.is_none() {
+        return Ok(());
+    }
+    let (pool, user) = (pool(ctx), uid(ctx));
+    let Some(url) = url.map(str::trim).filter(|u| !u.is_empty()) else {
+        return private_reply(ctx, i18n::IMAGE_URL_REQUIRED).await;
+    };
+    if crate::netfetch::validate_url(url).is_err() {
+        return private_reply(ctx, i18n::IMAGE_URL_UNSAFE).await;
+    }
+    if crate::anilist::safety::contains_explicit_term(url) {
+        return private_reply(ctx, i18n::IMAGE_URL_BLOCKED).await;
+    }
+    let Some((character, name)) = own_or_reply(ctx, value).await? else {
+        return Ok(());
+    };
+    if !crate::netfetch::allow(user as u64) {
+        return private_reply(ctx, i18n::IMAGE_URL_SLOW_DOWN).await;
+    }
+    // only the host is ever logged
+    tracing::debug!(
+        "picture by address from {}",
+        reqwest::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default()
+    );
+    let bytes = match crate::netfetch::fetch_limited(url).await {
+        None => return private_reply(ctx, i18n::IMAGE_URL_BUSY).await,
+        Some(Err(e)) => return private_reply(ctx, url_error_text(&e)).await,
+        Some(Ok(b)) => b,
+    };
+    let processed = match tokio::task::spawn_blocking(move || imaging::process_remote(&bytes)).await
+    {
+        Ok(Ok(p)) => p,
+        Ok(Err(imaging::ImageError::TooLarge)) => {
+            return private_reply(ctx, i18n::IMAGE_URL_TOO_LARGE).await
+        }
+        Ok(Err(imaging::ImageError::TooBig)) => {
+            return private_reply(ctx, i18n::BANNER_TOO_MANY_PIXELS).await
+        }
+        _ => return private_reply(ctx, i18n::IMAGE_URL_NOT_IMAGE).await,
+    };
+    let new = new_image(processed);
+    let id = match custom::store_image(&pool, user, &new, custom::MAX_IMAGES_PER_USER).await? {
+        StoreOutcome::Stored(id) | StoreOutcome::Existing(id) => id,
+        StoreOutcome::LimitReached => return private_reply(ctx, i18n::IMAGE_LIMIT).await,
+    };
+    custom::set_character_image(&pool, user, character, id).await?;
+    private_reply(ctx, i18n::custom_image_saved(&name, false)).await
+}
+
 /// Profile banner from an uploaded picture or GIF, accepted as it is. Stored as a custom image of the caller.
 pub(super) async fn banner_image(
     ctx: Context<'_>,
@@ -379,4 +450,20 @@ pub(super) async fn delete_data(ctx: Context<'_>) -> Result<(), Error> {
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+    use crate::netfetch::FetchError as F;
+
+    #[test]
+    fn every_url_failure_has_a_clear_arabic_reply_that_never_echoes_the_address() {
+        for e in [F::Unsafe, F::TooLarge, F::TooManyRedirects, F::Failed] {
+            let t = url_error_text(&e);
+            assert!(t.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)));
+            assert!(!t.contains("http://") && !t.contains("169.254"));
+        }
+        assert_ne!(url_error_text(&F::TooLarge), url_error_text(&F::Failed));
+    }
 }

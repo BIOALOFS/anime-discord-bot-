@@ -59,22 +59,16 @@ pub fn pick_match<'a>(
     let strong: Vec<&Page> = pages
         .iter()
         // `Other` is "any work": a page that is not a character (an anime, a series, a film…).
-        .filter(|p| {
-            if kind == Kind::Other {
-                p.kind != Kind::Character
-            } else {
-                p.kind == kind
-            }
+        .filter(|p| match kind {
+            Kind::Character => p.kind == Kind::Character,
+            Kind::Other => p.kind != Kind::Character,
+            _ => p.kind.is_work(),
         })
         .filter(|p| match kind {
             Kind::Character => {
                 super::same_identity(title, parent, &p.title, p.parent_title.as_deref())
             }
-            Kind::Game => {
-                let t = normalize(super::base_title(title));
-                !t.is_empty() && t == normalize(super::base_title(&p.title))
-            }
-            Kind::Other => {
+            _ => {
                 let t = normalize(super::base_title(title));
                 !t.is_empty() && t == normalize(super::base_title(&p.title))
             }
@@ -507,7 +501,8 @@ mod tests {
                 license_name: Some("CC BY-SA".into()),
                 license_url: None,
                 character_category: None,
-                game_category: None,
+                work_category: None,
+                kind_hint: None,
                 added_by: None,
             },
         )
@@ -573,7 +568,8 @@ mod tests {
                 license_name: None,
                 license_url: None,
                 character_category: None,
-                game_category: None,
+                work_category: None,
+                kind_hint: None,
                 added_by: None,
             },
         )
@@ -621,7 +617,8 @@ mod tests {
                 license_name: None,
                 license_url: None,
                 character_category: None,
-                game_category: None,
+                work_category: None,
+                kind_hint: None,
                 added_by: None,
             },
         )
@@ -659,7 +656,8 @@ mod tests {
                 license_name: None,
                 license_url: None,
                 character_category: None,
-                game_category: None,
+                work_category: None,
+                kind_hint: None,
                 added_by: None,
             },
         )

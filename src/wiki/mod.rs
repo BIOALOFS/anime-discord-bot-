@@ -24,7 +24,17 @@ pub const FILL_BUDGET: std::time::Duration = std::time::Duration::from_millis(12
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Character,
+    /// A work whose medium is a game.
     Game,
+    Anime,
+    /// Manga, manhwa, manhua and webtoons.
+    Manga,
+    Novel,
+    /// Dramas and series.
+    Series,
+    Movie,
+    /// A work whose medium the categories do not say: shown with the series name as written, never assumed a game.
+    Work,
     Other,
 }
 
@@ -33,6 +43,12 @@ impl Kind {
         match self {
             Self::Character => "character",
             Self::Game => "game",
+            Self::Anime => "anime",
+            Self::Manga => "manga",
+            Self::Novel => "novel",
+            Self::Series => "series",
+            Self::Movie => "movie",
+            Self::Work => "work",
             Self::Other => "other",
         }
     }
@@ -41,7 +57,66 @@ impl Kind {
         match k {
             "character" => Self::Character,
             "game" => Self::Game,
+            "anime" => Self::Anime,
+            "manga" => Self::Manga,
+            "novel" => Self::Novel,
+            "series" => Self::Series,
+            "movie" => Self::Movie,
+            "work" => Self::Work,
             _ => Self::Other,
+        }
+    }
+
+    /// Every kind that is a work (whatever its medium).
+    pub const WORKS: [Kind; 6] = [
+        Self::Game,
+        Self::Anime,
+        Self::Manga,
+        Self::Novel,
+        Self::Series,
+        Self::Movie,
+    ];
+
+    /// Does a filter of this kind accept a page of kind `page`? `Work` accepts every medium.
+    pub fn matches(self, page: Kind) -> bool {
+        self == page || (self == Self::Work && page.is_work())
+    }
+
+    pub fn is_work(self) -> bool {
+        self == Self::Work || Self::WORKS.contains(&self)
+    }
+
+    /// The medium named by a word of a category or a hint ("Manhwa", "Light novels", "TV series", "Films"...).
+    pub fn medium_of(text: &str) -> Option<Kind> {
+        let padded = format!(" {} ", normalize(text));
+        let has = |words: &[&str]| words.iter().any(|w| padded.contains(&format!(" {w} ")));
+        if has(&[
+            "games",
+            "game",
+            "video games",
+            "visual novels",
+            "visual novel",
+        ]) {
+            Some(Self::Game)
+        } else if has(&["manhwa", "manhua", "webtoon", "webtoons", "manga"]) {
+            Some(Self::Manga)
+        } else if has(&["light novels", "light novel", "novels", "novel"]) {
+            Some(Self::Novel)
+        } else if has(&["anime", "ova", "ona"]) {
+            Some(Self::Anime)
+        } else if has(&[
+            "dramas",
+            "drama",
+            "kdrama",
+            "tv series",
+            "tv shows",
+            "series",
+        ]) {
+            Some(Self::Series)
+        } else if has(&["films", "film", "movies", "movie"]) {
+            Some(Self::Movie)
+        } else {
+            None
         }
     }
 }
@@ -94,12 +169,37 @@ pub struct Source {
     pub license_name: Option<String>,
     pub license_url: Option<String>,
     pub character_category: Option<String>,
-    pub game_category: Option<String>,
+    pub work_category: Option<String>,
+    /// Optional manual override of the medium of this wiki's works (game, anime, manga, novel, series, movie).
+    pub kind_hint: Option<String>,
     pub enabled: bool,
     pub added_by: Option<i64>,
     pub created_at: i64,
     pub last_checked_at: Option<i64>,
     pub last_error: Option<String>,
+}
+
+impl Source {
+    /// Does this wiki take part in searches for works/characters of this medium? A wiki with a known medium (its hint,
+    /// or the name of its work category: Manhwa, Games...) serves that medium; a mixed wiki serves them all.
+    pub fn serves(&self, want: Kind) -> bool {
+        match parse::wiki_medium(self) {
+            Some(m) => !want.is_work() || m == want || want == Kind::Work,
+            None => true,
+        }
+    }
+}
+
+/// May a page of kind `page` of this wiki answer a search for `want` (a medium, `Work` for any, or `Character`)? A page
+/// whose own categories name its medium must match it; anything else follows the wiki.
+pub fn fits(src: &Source, page: Kind, want: Kind) -> bool {
+    if want == Kind::Character {
+        return page == Kind::Character && src.serves(Kind::Work);
+    }
+    if page.is_work() && page != Kind::Work {
+        return want.matches(page);
+    }
+    page.is_work() && src.serves(want)
 }
 
 // ---- normalisation ---------------------------------------------------------------------------------

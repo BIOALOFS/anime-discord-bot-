@@ -224,7 +224,7 @@ fn p(k: &str, v: impl Into<String>) -> (String, String) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Detection {
     pub character: Option<(String, u64)>,
-    pub game: Option<(String, u64)>,
+    pub work: Option<(String, u64)>,
     /// A few character names from the chosen category.
     pub samples: Vec<String>,
 }
@@ -419,14 +419,23 @@ impl<T: Transport> Api<T> {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let mut games: Vec<String> = parse::GAME_CATEGORIES
+        let mut games: Vec<String> = parse::WORK_CATEGORIES
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let (extra_c, extra_g) = futures::join!(
-            self.categories_with_prefix(api_url, "Char"),
-            self.categories_with_prefix(api_url, "Game")
-        );
+        let scan = |prefixes: &'static [&'static str]| async move {
+            futures::future::join_all(
+                prefixes
+                    .iter()
+                    .map(|p| self.categories_with_prefix(api_url, p)),
+            )
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+        };
+        let (extra_c, extra_g) =
+            futures::join!(scan(parse::CHARACTER_PREFIXES), scan(parse::WORK_PREFIXES));
         // Categories found by prefix are candidates only when they look like lists of characters or games, not of
         // images, templates or hubs ("Character images", "Characters by game").
         let known_c: Vec<(String, u64)> = extra_c
@@ -452,7 +461,7 @@ impl<T: Transport> Api<T> {
             }
         );
         let character = parse::pick_category(&cc);
-        let game = parse::pick_category(&gc);
+        let work = parse::pick_category(&gc);
         let samples = match &character {
             Some((cat, _)) => self
                 .category_members(api_url, cat, 5, INTERACTIVE_TIMEOUT * 2)
@@ -463,7 +472,7 @@ impl<T: Transport> Api<T> {
         };
         Detection {
             character,
-            game,
+            work,
             samples,
         }
     }
@@ -706,12 +715,12 @@ mod tests {
             Some(("Category:Characters".to_string(), 7)),
             "7 pages beat the 2 of Heroes; 'Character images' wins by count too"
         );
-        assert_eq!(d.game, Some(("Category:Games".to_string(), 5)));
+        assert_eq!(d.work, Some(("Category:Games".to_string(), 5)));
         assert_eq!(d.samples.len(), 5);
         // a wiki with no such categories finds nothing and still allows manual setup
         let (none, _) = super::fake::api(FakeWiki::default());
         let d = none.detect("https://x.fandom.com/api.php").await;
-        assert_eq!((d.character, d.game, d.samples.len()), (None, None, 0));
+        assert_eq!((d.character, d.work, d.samples.len()), (None, None, 0));
     }
 
     #[tokio::test]

@@ -1029,7 +1029,8 @@ mod wiki_profile_tests {
                 license_name: Some("CC BY-SA 3.0".into()),
                 license_url: None,
                 character_category: Some("Category:Characters".into()),
-                game_category: None,
+                work_category: None,
+                kind_hint: None,
                 added_by: None,
             },
         )

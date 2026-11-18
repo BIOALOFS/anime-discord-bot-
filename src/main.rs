@@ -17,6 +17,7 @@ mod global;
 mod guild;
 mod http_log;
 mod nav;
+mod netfetch;
 mod ops;
 mod people;
 pub mod texts;

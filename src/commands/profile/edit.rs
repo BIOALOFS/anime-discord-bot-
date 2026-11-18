@@ -42,6 +42,7 @@ pub const PROFILE_ACTIONS: &[(&str, &str)] = &[
 
 pub const CHARACTER_ACTIONS: &[(&str, &str)] = &[
     ("image", "تغيير الصورة (PNG/JPG/WebP/GIF)"),
+    ("image-url", "تغيير الصورة من رابط (النص = الرابط)"),
     ("title", "اللقب (حتى 40 حرفًا)"),
     ("description", "الوصف (حتى 300 حرف)"),
     ("reset", "إعادة للأصل"),
@@ -643,6 +644,10 @@ pub async fn edit(
             };
             match act {
                 "image" => actions::character_image(ctx, who, image).await,
+                "image-url" => {
+                    actions::character_image_url(ctx, who, text.as_deref().or(value.as_deref()))
+                        .await
+                }
                 "title" => character_text(ctx, "title", who, text.as_deref()).await,
                 "description" => character_text(ctx, "description", who, text.as_deref()).await,
                 "reset" => actions::reset_character(ctx, who).await,
@@ -692,7 +697,15 @@ mod tests {
         let chars: Vec<_> = CHARACTER_ACTIONS.iter().map(|a| a.0).collect();
         assert_eq!(
             chars,
-            vec!["image", "title", "description", "reset", "remove", "move"]
+            vec![
+                "image",
+                "image-url",
+                "title",
+                "description",
+                "reset",
+                "remove",
+                "move"
+            ]
         );
     }
 
