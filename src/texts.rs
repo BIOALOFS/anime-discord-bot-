@@ -553,6 +553,20 @@ pub fn wiki_connection_failed(why: &str) -> String {
     format!("❌ تعذّر الاتصال بالويكي: {why}")
 }
 
+/// The word for the medium of a wiki work; none when the categories do not say (the series name is shown as written).
+pub fn wiki_medium_label(k: crate::wiki::Kind) -> Option<&'static str> {
+    use crate::wiki::Kind;
+    match k {
+        Kind::Game => Some(KIND_GAME),
+        Kind::Anime => Some(KIND_ANIME),
+        Kind::Manga => Some(KIND_MANGA),
+        Kind::Novel => Some(KIND_NOVEL),
+        Kind::Series => Some(KIND_SERIES),
+        Kind::Movie => Some(KIND_MOVIE),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Constants that are brand names or symbols, not sentences.
@@ -628,19 +642,5 @@ mod tests {
                 );
             }
         }
-    }
-}
-
-/// The word for the medium of a wiki work; none when the categories do not say (the series name is shown as written).
-pub fn wiki_medium_label(k: crate::wiki::Kind) -> Option<&'static str> {
-    use crate::wiki::Kind;
-    match k {
-        Kind::Game => Some(KIND_GAME),
-        Kind::Anime => Some(KIND_ANIME),
-        Kind::Manga => Some(KIND_MANGA),
-        Kind::Novel => Some(KIND_NOVEL),
-        Kind::Series => Some(KIND_SERIES),
-        Kind::Movie => Some(KIND_MOVIE),
-        _ => None,
     }
 }

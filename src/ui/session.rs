@@ -924,8 +924,8 @@ mod tests {
         use crate::ui::v2;
         use poise::serenity_prelude::CreateAttachment;
         let pic = CreateAttachment::bytes(vec![2; 10], "custom-5.png");
-        let mut known = v2::known_from(&[("custom-5.png".into(), 888)], &[pic.clone()]);
-        let (_, upload) = v2::payload_reusing(vec![], &[pic.clone()], &known);
+        let mut known = v2::known_from(&[("custom-5.png".into(), 888)], std::slice::from_ref(&pic));
+        let (_, upload) = v2::payload_reusing(vec![], std::slice::from_ref(&pic), &known);
         assert!(upload.is_empty(), "unchanged and known: referenced by id");
         known.clear();
         let (body, upload) = v2::payload_reusing(vec![], &[pic], &known);
